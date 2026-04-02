@@ -1,0 +1,40 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime data
+input/*
+!input/.gitkeep
+
+output/*
+!output/.gitkeep
+
+result/*
+!result/.gitkeep
+
+result_threshold_test/
+
+temp_capture/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Optional model artifacts
+models/*.pth
+models/*.pt
+models/*.joblib
