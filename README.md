@@ -47,7 +47,7 @@ Recommended repo name: `jingyuan-dual-llm-threat-detection`
 python -m pip install -r requirements.txt
 ```
 
-2. Start the full workflow:
+2. Start the full workflow (capture + detect + LLM):
 
 ```powershell
 python app.py --port 80 --capture-batch-size 4
@@ -79,6 +79,25 @@ Detect only:
 python app.py --only-detect --no-skip-existing-at-start
 ```
 
+Detect only (without LLM):
+
+```powershell
+python app.py --only-detect --no-llm
+```
+
+Run LLM analysis daemon (file-output mode, no DB):
+
+```powershell
+python scripts\llm_analyzer_daemon.py --once --model qwen3:8b --num-gpu 0
+python scripts\llm_analyzer_daemon.py --model qwen3:8b --num-gpu 0
+```
+
+Disable LLM in unified app entry:
+
+```powershell
+python app.py --no-llm
+```
+
 ## Workflow
 
 1. `scripts/capture_http_request_batches.py`
@@ -91,12 +110,22 @@ python app.py --only-detect --no-skip-existing-at-start
    - `build_demo_candidates.py`
    - `export_demo_candidates_to_result.py`
 5. `result/b.n`
+6. `scripts/llm_analyzer_daemon.py` reads `result/b.n` and writes:
+   - `result/b.n/analysis.json`
+   - `result/b.n/analysis_raw.txt`
 
 ## Logs and State
 
 - App runtime logs: `output/app_runtime/`
 - Daemon state: `output/demo_daemon_state.json`
 - Per-run logs: `output/daemon_runs/`
+- LLM runtime logs: `output/app_runtime/llm_stdout.log`, `output/app_runtime/llm_stderr.log`
+
+## LLM Directory
+
+- `llm/prompts/system_prompt.txt`: system prompt
+- `llm/schemas/analysis.schema.json`: output schema
+- `llm/README.md`: LLM usage notes
 
 ## Roadmap
 

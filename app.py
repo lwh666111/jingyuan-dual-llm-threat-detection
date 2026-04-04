@@ -101,6 +101,38 @@ def build_daemon_cmd(args, script_dir: Path, input_dir: Path, output_dir: Path) 
     return cmd
 
 
+def build_llm_cmd(args, script_dir: Path) -> List[str]:
+    cmd = [
+        args.python_exe,
+        str(script_dir / "llm_analyzer_daemon.py"),
+        "--result-dir",
+        args.llm_result_dir,
+        "--input-dir",
+        args.input_dir,
+        "--model",
+        args.llm_model,
+        "--ollama-url",
+        args.ollama_url,
+        "--prompt",
+        args.llm_prompt,
+        "--schema",
+        args.llm_schema,
+        "--poll-seconds",
+        str(args.llm_poll_seconds),
+        "--timeout-sec",
+        str(args.llm_timeout_sec),
+        "--num-ctx",
+        str(args.llm_num_ctx),
+        "--num-gpu",
+        str(args.llm_num_gpu),
+        "--temperature",
+        str(args.llm_temperature),
+        "--max-cases",
+        str(args.llm_max_cases),
+    ]
+    return cmd
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--python-exe",
@@ -178,6 +210,32 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.set_defaults(update_existing_export=True)
 
+    llm_group = parser.add_argument_group("LLM 分析守护（默认启用）")
+    llm_group.add_argument(
+        "--enable-llm",
+        dest="enable_llm",
+        action="store_true",
+        help="启动 llm_analyzer_daemon，自动分析 result/b.n",
+    )
+    llm_group.add_argument(
+        "--no-llm",
+        dest="enable_llm",
+        action="store_false",
+        help="不启动 llm_analyzer_daemon",
+    )
+    parser.set_defaults(enable_llm=True)
+    llm_group.add_argument("--llm-result-dir", default="result", help="LLM 监听的 result 目录")
+    llm_group.add_argument("--llm-model", default="qwen3:8b", help="Ollama 模型名")
+    llm_group.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama 服务地址")
+    llm_group.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="系统提示词路径")
+    llm_group.add_argument("--llm-schema", default="llm/schemas/analysis.schema.json", help="JSON schema 路径")
+    llm_group.add_argument("--llm-poll-seconds", type=int, default=5, help="LLM 守护轮询间隔（秒）")
+    llm_group.add_argument("--llm-timeout-sec", type=int, default=300, help="单条 LLM 请求超时（秒）")
+    llm_group.add_argument("--llm-num-ctx", type=int, default=1024, help="Ollama num_ctx")
+    llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu，0=CPU 更稳")
+    llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM 采样温度")
+    llm_group.add_argument("--llm-max-cases", type=int, default=0, help="每轮最多处理多少 case，0=不限制")
+
     model_group = parser.add_argument_group("模型文件（可选）")
     model_group.add_argument("--preprocessor", default="", help="可选：指定 preprocessor.joblib 路径")
     model_group.add_argument("--model", default="", help="可选：指定 best_mlp.pth 路径")
@@ -187,7 +245,7 @@ def main() -> None:
     project_root = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(
-        description="统一入口：启动抓包 + 自动检测整条工作流",
+        description="统一入口：启动抓包 + 自动检测 + LLM 分析整条工作流",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例:\n"
@@ -195,6 +253,7 @@ def main() -> None:
             "  python app.py --port 3000 --capture-batch-size 1\n"
             "  python app.py --interface WLAN --port 10086 --capture-batch-size 20\n"
             "  python app.py --only-detect --no-skip-existing-at-start\n"
+            "  python app.py --only-detect --no-llm\n"
             "  python app.py --only-capture --port 80\n"
         ),
     )
@@ -209,10 +268,12 @@ def main() -> None:
     scripts_dir = (project_root / args.scripts_dir).resolve()
     input_dir = (project_root / args.input_dir).resolve()
     output_dir = (project_root / args.output_dir).resolve()
+    result_dir = (project_root / args.llm_result_dir).resolve()
     runtime_dir = output_dir / "app_runtime"
 
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
     if args.preprocessor:
@@ -225,17 +286,18 @@ def main() -> None:
     else:
         args.model = None
 
-    ensure_scripts(
-        scripts_dir,
-        [
-            "capture_http_request_batches.py",
-            "run_demo_daemon.py",
-            "demo_workflow.py",
-        ],
-    )
-
     run_capture = not args.only_detect
     run_daemon = not args.only_capture
+    run_llm = args.enable_llm and not args.only_capture
+
+    required_scripts = [
+        "capture_http_request_batches.py",
+        "run_demo_daemon.py",
+        "demo_workflow.py",
+    ]
+    if run_llm:
+        required_scripts.append("llm_analyzer_daemon.py")
+    ensure_scripts(scripts_dir, required_scripts)
 
     app_log = runtime_dir / "app.log"
     state_file = runtime_dir / "app_state.json"
@@ -243,22 +305,26 @@ def main() -> None:
     capture_stderr = runtime_dir / "capture_stderr.log"
     daemon_stdout = runtime_dir / "daemon_stdout.log"
     daemon_stderr = runtime_dir / "daemon_stderr.log"
+    llm_stdout = runtime_dir / "llm_stdout.log"
+    llm_stderr = runtime_dir / "llm_stderr.log"
 
     capture_cmd = build_capture_cmd(args, scripts_dir, input_dir) if run_capture else []
     daemon_cmd = build_daemon_cmd(args, scripts_dir, input_dir, output_dir) if run_daemon else []
+    llm_cmd = build_llm_cmd(args, scripts_dir) if run_llm else []
 
     log("APP start", app_log)
     log(f"project_root={project_root}", app_log)
     log(f"scripts_dir={scripts_dir}", app_log)
-    log(f"mode capture={run_capture} daemon={run_daemon}", app_log)
+    log(f"mode capture={run_capture} daemon={run_daemon} llm={run_llm}", app_log)
     if run_capture:
         log("capture cmd: " + " ".join(capture_cmd), app_log)
     if run_daemon:
         log("daemon  cmd: " + " ".join(daemon_cmd), app_log)
+    if run_llm:
+        log("llm     cmd: " + " ".join(llm_cmd), app_log)
 
-    capture_proc = None
-    daemon_proc = None
-    capture_out_f = capture_err_f = daemon_out_f = daemon_err_f = None
+    capture_proc = daemon_proc = llm_proc = None
+    capture_out_f = capture_err_f = daemon_out_f = daemon_err_f = llm_out_f = llm_err_f = None
 
     try:
         if run_capture:
@@ -289,11 +355,25 @@ def main() -> None:
             )
             log(f"daemon  started pid={daemon_proc.pid}", app_log)
 
+        if run_llm:
+            llm_out_f = llm_stdout.open("a", encoding="utf-8")
+            llm_err_f = llm_stderr.open("a", encoding="utf-8")
+            llm_proc = subprocess.Popen(
+                llm_cmd,
+                cwd=str(project_root),
+                stdout=llm_out_f,
+                stderr=llm_err_f,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            log(f"llm     started pid={llm_proc.pid}", app_log)
+
         runtime_state = {
             "started_at": now_iso(),
             "project_root": str(project_root),
             "scripts_dir": str(scripts_dir),
-            "mode": {"capture": run_capture, "daemon": run_daemon},
+            "mode": {"capture": run_capture, "daemon": run_daemon, "llm": run_llm},
             "capture": {
                 "pid": capture_proc.pid if capture_proc else None,
                 "cmd": capture_cmd,
@@ -306,6 +386,12 @@ def main() -> None:
                 "stdout": str(daemon_stdout),
                 "stderr": str(daemon_stderr),
             },
+            "llm": {
+                "pid": llm_proc.pid if llm_proc else None,
+                "cmd": llm_cmd,
+                "stdout": str(llm_stdout),
+                "stderr": str(llm_stderr),
+            },
             "app_log": str(app_log),
         }
         write_runtime_state(state_file, runtime_state)
@@ -315,23 +401,37 @@ def main() -> None:
         while True:
             cap_rc = capture_proc.poll() if capture_proc else None
             dmn_rc = daemon_proc.poll() if daemon_proc else None
+            llm_rc = llm_proc.poll() if llm_proc else None
 
             cap_alive = capture_proc is not None and cap_rc is None
             dmn_alive = daemon_proc is not None and dmn_rc is None
+            llm_alive = llm_proc is not None and llm_rc is None
 
             if run_capture and capture_proc and cap_rc is not None:
                 log(f"capture exited rc={cap_rc}", app_log)
                 if daemon_proc:
                     terminate_process(daemon_proc, "daemon", app_log)
+                if llm_proc:
+                    terminate_process(llm_proc, "llm", app_log)
                 raise SystemExit(cap_rc)
 
             if run_daemon and daemon_proc and dmn_rc is not None:
                 log(f"daemon exited rc={dmn_rc}", app_log)
                 if capture_proc:
                     terminate_process(capture_proc, "capture", app_log)
+                if llm_proc:
+                    terminate_process(llm_proc, "llm", app_log)
                 raise SystemExit(dmn_rc)
 
-            if not cap_alive and not dmn_alive:
+            if run_llm and llm_proc and llm_rc is not None:
+                log(f"llm exited rc={llm_rc}", app_log)
+                if capture_proc:
+                    terminate_process(capture_proc, "capture", app_log)
+                if daemon_proc:
+                    terminate_process(daemon_proc, "daemon", app_log)
+                raise SystemExit(llm_rc)
+
+            if not cap_alive and not dmn_alive and not llm_alive:
                 break
 
             time.sleep(1)
@@ -341,6 +441,7 @@ def main() -> None:
     finally:
         terminate_process(capture_proc, "capture", app_log)
         terminate_process(daemon_proc, "daemon", app_log)
+        terminate_process(llm_proc, "llm", app_log)
 
         if capture_out_f:
             capture_out_f.close()
@@ -350,6 +451,10 @@ def main() -> None:
             daemon_out_f.close()
         if daemon_err_f:
             daemon_err_f.close()
+        if llm_out_f:
+            llm_out_f.close()
+        if llm_err_f:
+            llm_err_f.close()
 
         log("APP stopped", app_log)
 

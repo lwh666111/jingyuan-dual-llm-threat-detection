@@ -1,0 +1,30 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["attack", "benign", "unknown"] },
+    "source_ip": { "type": "string" },
+    "destination_ip": { "type": "string" },
+    "attack_interface": { "type": "string" },
+    "attack_method": { "type": "string" },
+    "attack_path": { "type": "string" },
+    "attack_time": { "type": "string" },
+    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical", "unknown"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 8
+    },
+    "summary": { "type": "string" }
+  },
+  "required": [
+    "verdict",
+    "source_ip",
+    "attack_interface",
+    "attack_method",
+    "confidence",
+    "summary"
+  ],
+  "additionalProperties": true
+}
