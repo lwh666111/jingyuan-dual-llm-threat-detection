@@ -171,6 +171,47 @@ def call_ollama_chat(
     return parsed, content
 
 
+def fetch_available_models(base_url: str, timeout_sec: int = 10) -> List[str]:
+    url = base_url.rstrip("/") + "/api/tags"
+    req = urllib.request.Request(url=url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        obj = json.loads(raw)
+    except Exception:
+        return []
+
+    rows = obj.get("models")
+    if not isinstance(rows, list):
+        return []
+    names: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def resolve_model_name(base_url: str, preferred_model: str, timeout_sec: int = 10) -> str:
+    preferred = str(preferred_model or "").strip()
+    if not preferred:
+        preferred = "qwen3:8b"
+
+    models = fetch_available_models(base_url=base_url, timeout_sec=timeout_sec)
+    if not models:
+        log(f"cannot read Ollama model list, keep configured model: {preferred}")
+        return preferred
+
+    if preferred in models:
+        return preferred
+
+    fallback = models[0]
+    log(f"configured model '{preferred}' not found, fallback to installed model: {fallback}")
+    return fallback
+
+
 def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, model_name: str) -> Dict:
     uri = str(case_obj.get("uri") or "unknown")
     method = str(case_obj.get("method") or "")
@@ -256,6 +297,8 @@ def process_case(
         analysis_raw_path.write_text(raw_content or "", encoding="utf-8")
 
         case_obj["llm_status"] = "done"
+        case_obj.pop("llm_error", None)
+        case_obj.pop("llm_failed_at", None)
         case_obj["analysis_file"] = str(analysis_path.resolve())
         case_obj["analysis_raw_file"] = str(analysis_raw_path.resolve())
         case_obj["analyzed_at"] = now_iso()
@@ -306,6 +349,7 @@ def main() -> None:
     if not schema_obj:
         raise RuntimeError(f"schema 无效: {schema_path}")
 
+    args.model = resolve_model_name(args.ollama_url, args.model, timeout_sec=10)
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
     log(f"result_dir={result_dir}")
 
