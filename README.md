@@ -28,6 +28,9 @@ Recommended repo name: `jingyuan-dual-llm-threat-detection`
 .
 ├─ app.py
 ├─ scripts/
+├─ config/
+├─ Dockerfile
+├─ docker-compose.yml
 ├─ docs/
 ├─ input/
 ├─ output/
@@ -59,11 +62,67 @@ For local demo (one-command startup, without packet capture):
 python app.py --only-detect --no-llm --db-backend mysql --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user root --mysql-password 123456 --mysql-database traffic_pipeline --api-port 3049 --dashboard-port 1145
 ```
 
+Use DB config file (recommended):
+
+```powershell
+python app.py --only-detect --no-llm --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
+```
+
 3. Show all options:
 
 ```powershell
 python app.py --help
 ```
+
+## Database Config File
+
+- local config: `config/db_config.json`
+- docker config: `config/db_config.docker.json`
+- CLI has higher priority than config file values
+
+Format:
+
+```json
+{
+  "db_backend": "mysql",
+  "db_path": "result/result_cases.db",
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "123456",
+    "database": "traffic_pipeline"
+  }
+}
+```
+
+## Docker One-Click Deploy (No LLM)
+
+This deployment includes:
+
+- MySQL 8.0
+- API service (`3049`)
+- Dashboard frontend (`1145`)
+- DB auto-ingest daemon
+- Detection daemon
+
+LLM is intentionally disabled in one-click Docker startup.
+
+Start:
+
+```powershell
+docker compose up -d --build
+```
+
+Stop:
+
+```powershell
+docker compose down
+```
+
+Open dashboard:
+
+- `http://127.0.0.1:1145`
 
 ## Common Commands
 
@@ -273,6 +332,8 @@ Use only in authorized environments for defense, testing, and research.
 ## Docs
 
 - Main guide: `docs/PROJECT_GUIDE.md`
+- Usage guide: `docs/USAGE.md`
+- API declaration: `docs/API_DECLARATION.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
 

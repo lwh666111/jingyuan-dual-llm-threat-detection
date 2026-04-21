@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: traffic_pipeline_mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: "traffic_pipeline"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  traffic_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: traffic_pipeline_app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: >
+      python app.py
+      --only-detect
+      --no-llm
+      --db-config config/db_config.docker.json
+      --api-host 0.0.0.0
+      --api-port 3049
+      --dashboard-host 0.0.0.0
+      --dashboard-port 1145
+    ports:
+      - "1145:1145"
+      - "3049:3049"
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./result:/app/result
+      - ./config/db_config.docker.json:/app/config/db_config.docker.json:ro
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

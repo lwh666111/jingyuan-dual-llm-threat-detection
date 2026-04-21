@@ -53,6 +53,60 @@ def write_runtime_state(path: Path, state: Dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def read_json_config(path: Path) -> Dict:
+    if not path.exists():
+        raise FileNotFoundError(f"配置文件不存在: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"配置文件不是有效 JSON: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"配置文件格式错误(必须是 JSON object): {path}")
+    return data
+
+
+def apply_db_config(args, parser: argparse.ArgumentParser, project_root: Path) -> None:
+    db_cfg_text = (getattr(args, "db_config", "") or "").strip()
+    if not db_cfg_text:
+        return
+
+    db_cfg_path = Path(db_cfg_text)
+    if not db_cfg_path.is_absolute():
+        db_cfg_path = (project_root / db_cfg_path).resolve()
+    cfg = read_json_config(db_cfg_path)
+    mysql_cfg = cfg.get("mysql") if isinstance(cfg.get("mysql"), dict) else cfg
+
+    defaults = {
+        "db_backend": parser.get_default("db_backend"),
+        "db_path": parser.get_default("db_path"),
+        "mysql_host": parser.get_default("mysql_host"),
+        "mysql_port": parser.get_default("mysql_port"),
+        "mysql_user": parser.get_default("mysql_user"),
+        "mysql_password": parser.get_default("mysql_password"),
+        "mysql_database": parser.get_default("mysql_database"),
+    }
+
+    if getattr(args, "db_backend", None) == defaults["db_backend"] and cfg.get("db_backend") in {"sqlite", "mysql"}:
+        args.db_backend = str(cfg["db_backend"])
+    if getattr(args, "db_path", None) == defaults["db_path"] and isinstance(cfg.get("db_path"), str):
+        args.db_path = cfg["db_path"]
+
+    if getattr(args, "mysql_host", None) == defaults["mysql_host"] and isinstance(mysql_cfg.get("host"), str):
+        args.mysql_host = mysql_cfg["host"]
+    if getattr(args, "mysql_port", None) == defaults["mysql_port"] and mysql_cfg.get("port") is not None:
+        args.mysql_port = int(mysql_cfg["port"])
+    if getattr(args, "mysql_user", None) == defaults["mysql_user"] and isinstance(mysql_cfg.get("user"), str):
+        args.mysql_user = mysql_cfg["user"]
+    if getattr(args, "mysql_password", None) == defaults["mysql_password"] and isinstance(
+        mysql_cfg.get("password"), str
+    ):
+        args.mysql_password = mysql_cfg["password"]
+    if getattr(args, "mysql_database", None) == defaults["mysql_database"] and isinstance(
+        mysql_cfg.get("database"), str
+    ):
+        args.mysql_database = mysql_cfg["database"]
+
+
 def build_capture_cmd(args, script_dir: Path, input_dir: Path) -> List[str]:
     cmd = [
         args.python_exe,
@@ -230,6 +284,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     io_group.add_argument("--input-dir", default="input", help="抓包输出目录，同时也是检测监听目录")
     io_group.add_argument("--output-dir", default="output", help="流程输出目录")
     io_group.add_argument("--scripts-dir", default="scripts", help="脚本目录（默认 scripts）")
+    io_group.add_argument("--db-config", default="", help="数据库配置 JSON 文件路径（可选，CLI 优先级更高）")
 
     capture_group = parser.add_argument_group("抓包设置")
     capture_group.add_argument("--port", type=int, default=80, help="监听 TCP 端口（可改成任意端口，如 3000/10086）")
@@ -404,6 +459,7 @@ def main() -> None:
     )
     add_arguments(parser)
     args = parser.parse_args()
+    apply_db_config(args, parser, project_root)
 
     if args.only_capture and args.only_detect:
         parser.error("--only-capture 与 --only-detect 不能同时使用")

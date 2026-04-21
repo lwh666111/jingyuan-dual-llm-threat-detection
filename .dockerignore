@@ -1,0 +1,13 @@
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+output
+result
+input
+result_threshold_test
+docs
