@@ -538,54 +538,6 @@ pre {
   text-decoration: underline;
 }
 
-.modal {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-}
-
-.modal-mask {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-}
-
-.modal-card {
-  position: relative;
-  width: min(820px, 92vw);
-  max-height: 80vh;
-  overflow: auto;
-  margin: 9vh auto 0;
-  border: 1px solid var(--line-strong);
-  background: linear-gradient(160deg, rgba(19, 44, 71, 0.96), rgba(9, 24, 40, 0.98));
-  border-radius: 12px;
-  padding: 14px;
-}
-
-.alert-list {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.alert-item {
-  border: 1px solid rgba(255, 73, 101, 0.45);
-  background: rgba(62, 13, 26, 0.56);
-  border-radius: 10px;
-  padding: 10px;
-}
-
-.alert-item h4 {
-  margin: 0 0 6px;
-  font-size: 13px;
-}
-
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .tooltip {
   position: fixed;
   z-index: 50;

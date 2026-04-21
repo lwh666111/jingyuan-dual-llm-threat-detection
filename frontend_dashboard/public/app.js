@@ -18,25 +18,6 @@ const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周�
 
 const appEl = document.getElementById("app");
 const tooltipEl = document.getElementById("tooltip");
-const alertModalEl = document.getElementById("alertModal");
-const alertListEl = document.getElementById("alertList");
-const closeAlertBtn = document.getElementById("closeAlertBtn");
-const ackAllBtn = document.getElementById("ackAllBtn");
-const ALERT_SNOOZE_MS = 10 * 60 * 1000;
-const ALERT_MUTE_STORAGE_KEY = "attack_alert_muted_until";
-const ALERT_SEEN_STORAGE_KEY = "attack_alert_seen_ids";
-
-function loadSeenAlertIds() {
-  try {
-    const raw = localStorage.getItem(ALERT_SEEN_STORAGE_KEY);
-    if (!raw) return [];
-    const rows = JSON.parse(raw);
-    if (!Array.isArray(rows)) return [];
-    return rows.filter((x) => typeof x === "string" && x);
-  } catch (err) {
-    return [];
-  }
-}
 
 const state = {
   token: localStorage.getItem("attack_demo_token") || "",
@@ -45,13 +26,9 @@ const state = {
   systemStatus: null,
   latestDataTime: "-",
   soundEnabled: localStorage.getItem("attack_sound_on") !== "0",
-  unseenAlertIds: new Set(loadSeenAlertIds()),
-  openAlerts: [],
-  alertMutedUntil: Number(localStorage.getItem(ALERT_MUTE_STORAGE_KEY) || "0"),
   intervals: {
     clock: null,
     system: null,
-    alert: null,
     view: null,
   },
   screenData: null,
@@ -95,40 +72,8 @@ const state = {
   },
 };
 
-function persistSeenAlertIds() {
-  const arr = [...state.unseenAlertIds];
-  const tail = arr.slice(Math.max(0, arr.length - 3000));
-  localStorage.setItem(ALERT_SEEN_STORAGE_KEY, JSON.stringify(tail));
-}
-
-function markAlertSeenByIds(ids) {
-  let changed = false;
-  ids.forEach((id) => {
-    if (!id) return;
-    if (!state.unseenAlertIds.has(id)) {
-      state.unseenAlertIds.add(id);
-      changed = true;
-    }
-  });
-  if (changed) persistSeenAlertIds();
-}
-
-function markAlertsSeen(items) {
-  markAlertSeenByIds((items || []).map((x) => x?.event_id));
-}
-
-function closeAlertModalWithSnooze() {
-  markAlertsSeen(state.openAlerts);
-  state.alertMutedUntil = Date.now() + ALERT_SNOOZE_MS;
-  localStorage.setItem(ALERT_MUTE_STORAGE_KEY, String(state.alertMutedUntil));
-  state.openAlerts = [];
-  alertModalEl.classList.add("hidden");
-  showToast("高危告警已静默10分钟");
-}
-
 document.addEventListener("DOMContentLoaded", () => {
   bindGlobalTooltip();
-  bindAlertModal();
   bootstrap();
 });
 
@@ -362,11 +307,9 @@ function startGlobalTimers() {
 
   updateClock();
   refreshSystemStatus().catch((err) => console.warn(err));
-  pollAlertPopup().catch((err) => console.warn(err));
 
   state.intervals.clock = setInterval(updateClock, 1000);
   state.intervals.system = setInterval(() => refreshSystemStatus().catch((err) => console.warn(err)), 5000);
-  state.intervals.alert = setInterval(() => pollAlertPopup().catch((err) => console.warn(err)), 8000);
 }
 
 function updateClock() {
@@ -399,114 +342,6 @@ async function refreshSystemStatus() {
       dotEl.classList.add("dot-green");
       textEl.textContent = "系统状态：正常";
     }
-  }
-}
-
-async function pollAlertPopup() {
-  if (!state.token) return;
-  const data = await api("/api/v2/common/alerts/popup?limit=5");
-  const items = Array.isArray(data.items) ? data.items : [];
-  if (!items.length) return;
-
-  if (Date.now() < state.alertMutedUntil) {
-    markAlertsSeen(items);
-    return;
-  }
-
-  const newItems = items.filter((x) => x?.event_id && !state.unseenAlertIds.has(x.event_id));
-  if (!newItems.length) return;
-  markAlertsSeen(newItems);
-  state.openAlerts = newItems;
-
-  renderAlertModal(newItems);
-  if (state.soundEnabled) {
-    playAlertSound();
-  }
-}
-
-function bindAlertModal() {
-  closeAlertBtn?.addEventListener("click", () => {
-    closeAlertModalWithSnooze();
-  });
-  alertModalEl?.querySelector(".modal-mask")?.addEventListener("click", () => {
-    closeAlertModalWithSnooze();
-  });
-  document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape" && !alertModalEl.classList.contains("hidden")) {
-      closeAlertModalWithSnooze();
-    }
-  });
-  ackAllBtn?.addEventListener("click", async () => {
-    try {
-      for (const row of state.openAlerts) {
-        await api(`/api/v2/common/alerts/${encodeURIComponent(row.event_id)}/ack`, { method: "POST", body: {} });
-      }
-      markAlertsSeen(state.openAlerts);
-      alertModalEl.classList.add("hidden");
-      state.openAlerts = [];
-      showToast("高危告警已批量确认");
-    } catch (err) {
-      showToast(`批量确认失败：${err.message}`);
-    }
-  });
-
-  alertListEl.addEventListener("click", async (ev) => {
-    const target = ev.target;
-    if (!(target instanceof HTMLElement)) return;
-    const eventId = target.getAttribute("data-ack-id");
-    if (!eventId) return;
-    try {
-      await api(`/api/v2/common/alerts/${encodeURIComponent(eventId)}/ack`, { method: "POST", body: {} });
-      markAlertSeenByIds([eventId]);
-      state.openAlerts = state.openAlerts.filter((x) => x.event_id !== eventId);
-      renderAlertModal(state.openAlerts);
-      showToast(`告警 ${eventId} 已确认`);
-    } catch (err) {
-      showToast(`确认失败：${err.message}`);
-    }
-  });
-}
-
-function renderAlertModal(items) {
-  if (!items || !items.length) {
-    alertModalEl.classList.add("hidden");
-    return;
-  }
-  alertListEl.innerHTML = items
-    .map(
-      (row) => `
-      <div class="alert-item">
-        <h4>${escapeHtml(row.event_id)} | ${escapeHtml(row.attack_type)}</h4>
-        <div class="kv"><strong>时间：</strong>${escapeHtml(row.occurred_at || "-")}</div>
-        <div class="kv"><strong>来源IP：</strong>${escapeHtml(row.source_ip || "-")} <strong style="margin-left:8px;">节点：</strong>${escapeHtml(row.target_node || "-")}</div>
-        <div class="kv"><strong>接口：</strong>${escapeHtml(row.target_interface || "-")}</div>
-        <div style="margin-top:8px;"><button class="btn btn-danger" data-ack-id="${escapeHtml(row.event_id)}">确认处置</button></div>
-      </div>
-    `
-    )
-    .join("");
-  alertModalEl.classList.remove("hidden");
-}
-
-function playAlertSound() {
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "square";
-    osc.frequency.value = 880;
-    gain.gain.value = 0.06;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    setTimeout(() => {
-      osc.stop();
-      ctx.close();
-    }, 220);
-  } catch (err) {
-    console.warn("play sound failed", err);
   }
 }
 
