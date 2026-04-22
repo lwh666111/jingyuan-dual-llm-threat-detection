@@ -51,6 +51,10 @@
 
 默认使用一键部署，不再需要手工“下库”或分别启动多服务。
 
+首次在新 Windows 机器部署前，请先完成前置安装：
+
+- `docs/WINDOWS_PREREQ_SETUP.md`
+
 1. 首次执行（自动生成 `deploy/.env` 模板）：
 
 ```powershell
@@ -427,6 +431,7 @@ Use only in authorized environments for defense, testing, and research.
 
 - Main guide: `docs/PROJECT_GUIDE.md`
 - Usage guide: `docs/USAGE.md`
+- Windows prerequisite setup: `docs/WINDOWS_PREREQ_SETUP.md`
 - API declaration: `docs/API_DECLARATION.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`

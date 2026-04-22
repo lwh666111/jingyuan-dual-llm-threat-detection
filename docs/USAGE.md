@@ -23,6 +23,10 @@
 
 ## 3. 环境准备
 
+首次在陌生 Windows 机器部署时，先看：
+
+- `docs/WINDOWS_PREREQ_SETUP.md`（Docker/Python/Node/Wireshark+Npcap/Ollama/MySQL/RAG 全步骤）
+
 ### 3.1 本机运行
 
 - Python 3.10+
