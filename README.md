@@ -1,27 +1,31 @@
-﻿# JingYuan: Dual-LLM Threat Detection
+﻿# 靖渊 AI 攻击态势感知平台
 
-JingYuan is a dual-LLM-driven network attack detection and situation awareness system.
+面向实战流量的端到端安全分析系统，覆盖抓包、检测、LLM 研判、RAG 增强、结果入库、API 服务与前端大屏。
 
-Current stage focuses on an end-to-end automated pipeline:
+当前版本核心链路：
 
-- Capture HTTP traffic from a selected network interface and TCP port
-- Build canonical batch files (`input/1.1.n.txt`) from complete request/response pairs
-- Auto-detect newly arrived batches
-- Run compatibility inference pipeline
-- Export suspicious cases into `result/b.n` for downstream LLM analysis and frontend visualization
+- 监听指定网卡和端口，抓取完整 HTTP 请求/响应
+- 生成标准化批次文件（`input/1.1.n.txt`）
+- 自动化检测与可疑事件导出（`result/b.n`）
+- Ollama 大模型研判 + SQLite FTS5 RAG 检索增强
+- MySQL 持久化（`requests` / `responses` / `analyses` 三表）
+- Flask API（3049）+ Node 前端大屏（1145）
 
-## Repository
+## GitHub 仓库简介（中文建议）
 
-Recommended repo name: `jingyuan-dual-llm-threat-detection`
+可直接粘贴到 GitHub 仓库 Description：
 
-## Key Features
+`靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库与大屏展示，已支持一键部署（MySQL + Ollama + 全链路服务）。`
 
-- Single entry point: `app.py`
-- Configurable port monitoring (`80`, `3000`, `10086`, etc.)
-- Batch by complete HTTP request/response records (not raw packet slicing)
-- Automatic detection daemon for new input files
-- Structured case export for downstream analysis
-- Built-in lightweight RAG layer (SQLite FTS5) for LLM context enhancement
+## 主要能力
+
+- 统一入口：`app.py`
+- 一键部署：`deploy/start_all.ps1`（MySQL + Ollama + RAG + 全链路服务）
+- 可配置多端口监听（如 `80,3000,10086`）
+- 基于完整 HTTP 请求/响应配对的批次采集（非原始切片）
+- 自动检测守护 + LLM 研判守护 + 自动入库守护
+- 前端角色权限：普通用户 / 管理员
+- RAG 文档管理接口：新增、删除、重建
 
 ## Project Layout
 
@@ -305,8 +309,8 @@ python scripts\platform_api_demo.py
 
 Demo login accounts (frontend hard-coded):
 
-- normal user: `user / admin`
-- admin user: `admin / admin`
+- 普通用户：`user / admin`
+- 管理员：`admin / admin`
 - role is decided by the selected identity button on login page
 
 Auth:
@@ -321,7 +325,6 @@ Common:
 
 - `GET /api/v2/common/system-status`
 - `GET /api/v2/common/alerts/ticker?limit=3`
-- `GET /api/v2/common/alerts/popup?limit=5`
 - `POST /api/v2/common/alerts/{event_id}/ack`
 
 Normal user dashboard:
@@ -376,14 +379,14 @@ Admin:
 - `llm/schemas/analysis.schema.json`: output schema
 - `llm/README.md`: LLM usage notes
 
-## Roadmap
+## 项目状态与规划
 
 - [x] Automated capture and batch generation
 - [x] Automated detection daemon
 - [x] Structured suspicious case export
-- [ ] Dual-LLM inference layer for threat explanation
+- [ ] 双 LLM 协同研判（当前主链路为兼容模型 + 单 LLM）
 - [ ] Structured outputs: source IP, target IP, attack type, path, time, target
-- [ ] Frontend situation awareness dashboards
+- [x] 前端态势感知大屏与后台管理页面
 - [x] Database persistence and querying
 
 ## Responsible Use
