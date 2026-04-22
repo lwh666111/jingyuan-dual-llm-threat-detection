@@ -1,10 +1,15 @@
 ﻿import argparse
 import csv
+import json
 import io
 import random
+import re
 import secrets
+import sqlite3
+import uuid
 from contextlib import closing
 from datetime import datetime, timedelta
+from pathlib import Path
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +24,7 @@ ROLE_ADMIN = "admin"
 
 PROCESS_STATUS_SET = {"unprocessed", "processing", "done", "ignored"}
 RISK_LEVEL_SET = {"high", "medium", "low"}
+RAG_SEVERITY_SET = {"low", "medium", "high", "critical"}
 
 TOKEN_TTL_SECONDS = 12 * 3600
 SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -116,6 +122,168 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def normalize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [normalize_row(r) for r in rows]
+
+
+def get_rag_conn(rag_db_path: str):
+    conn = sqlite3.connect(rag_db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ensure_rag_schema(rag_db_path: str) -> None:
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS rag_docs USING fts5(
+              doc_id UNINDEXED,
+              title,
+              tags,
+              attack_type,
+              content,
+              evidence,
+              mitigation,
+              severity UNINDEXED,
+              source UNINDEXED,
+              tokenize='unicode61'
+            )
+            """
+        )
+        conn.commit()
+
+
+def read_rag_seed(seed_path: str) -> List[Dict[str, Any]]:
+    p = Path(seed_path)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for idx, row in enumerate(data, start=1):
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "doc_id": str(row.get("doc_id") or f"RAG-{idx:04d}"),
+                "title": str(row.get("title") or ""),
+                "tags": str(row.get("tags") or ""),
+                "attack_type": str(row.get("attack_type") or ""),
+                "content": str(row.get("content") or ""),
+                "evidence": str(row.get("evidence") or ""),
+                "mitigation": str(row.get("mitigation") or ""),
+                "severity": str(row.get("severity") or "medium").lower(),
+                "source": str(row.get("source") or "local_seed"),
+            }
+        )
+    return rows
+
+
+def rag_upsert_doc(rag_db_path: str, row: Dict[str, Any]) -> None:
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM rag_docs WHERE doc_id=?", (row["doc_id"],))
+        cur.execute(
+            """
+            INSERT INTO rag_docs(doc_id, title, tags, attack_type, content, evidence, mitigation, severity, source)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["doc_id"],
+                row["title"],
+                row["tags"],
+                row["attack_type"],
+                row["content"],
+                row["evidence"],
+                row["mitigation"],
+                row["severity"],
+                row["source"],
+            ),
+        )
+        conn.commit()
+
+
+def rag_rebuild_from_seed(rag_db_path: str, seed_path: str) -> int:
+    rows = read_rag_seed(seed_path)
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS rag_docs")
+        conn.commit()
+    ensure_rag_schema(rag_db_path)
+    for row in rows:
+        rag_upsert_doc(rag_db_path, row)
+    return len(rows)
+
+
+def rag_build_match_query(text: str, max_terms: int = 12) -> str:
+    terms = re.findall(r"[a-zA-Z0-9_./:-]{2,}", (text or "").lower())
+    uniq: List[str] = []
+    seen = set()
+    for t in terms:
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(t)
+        if len(uniq) >= max_terms:
+            break
+    if not uniq:
+        return ""
+    escaped = [f"\"{x.replace('\"', '')}\"" for x in uniq if x.strip()]
+    return " OR ".join(escaped)
+
+
+def rag_list_docs(rag_db_path: str, q: str, attack_type: str, page: int, page_size: int) -> Dict[str, Any]:
+    where_sql = ""
+    params: List[Any] = []
+    q = q.strip()
+    attack_type = attack_type.strip()
+
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        if q:
+            match_q = rag_build_match_query(q, max_terms=14)
+            if match_q:
+                where_sql = "WHERE rag_docs MATCH ?"
+                params.append(match_q)
+            else:
+                where_sql = "WHERE title LIKE ? OR tags LIKE ? OR content LIKE ?"
+                like = f"%{q}%"
+                params.extend([like, like, like])
+        if attack_type:
+            if where_sql:
+                where_sql += " AND attack_type=?"
+            else:
+                where_sql = "WHERE attack_type=?"
+            params.append(attack_type)
+
+        cur.execute(f"SELECT COUNT(*) AS c FROM rag_docs {where_sql}", tuple(params))
+        total = int((cur.fetchone() or {"c": 0})["c"])
+
+        offset = (page - 1) * page_size
+        cur.execute(
+            f"""
+            SELECT rowid, doc_id, title, tags, attack_type, content, evidence, mitigation, severity, source
+            FROM rag_docs
+            {where_sql}
+            ORDER BY rowid DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params + [page_size, offset]),
+        )
+        items = [dict(x) for x in cur.fetchall()]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+def rag_delete_doc(rag_db_path: str, doc_id: str) -> int:
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM rag_docs WHERE doc_id=?", (doc_id,))
+        changed = int(cur.rowcount)
+        conn.commit()
+    return changed
 
 
 def get_conn(mysql_conf: Dict[str, Any], autocommit: bool = False):
@@ -512,15 +680,35 @@ def build_time_range() -> Tuple[datetime, datetime]:
     return now - timedelta(hours=24), now
 
 
-def create_app(mysql_conf: Dict[str, Any], seed_demo: bool = True, force_seed: bool = False) -> Flask:
+def create_app(
+    mysql_conf: Dict[str, Any],
+    seed_demo: bool = True,
+    force_seed: bool = False,
+    rag_db_path: str = "llm/rag/rag_knowledge.db",
+    rag_seed_path: str = "llm/rag/rag_seed.json",
+    rag_force_seed: bool = False,
+) -> Flask:
     app = Flask(__name__)
     app.config["MYSQL_CONF"] = mysql_conf
+    app.config["RAG_DB_PATH"] = str(Path(rag_db_path).resolve())
+    app.config["RAG_SEED_PATH"] = str(Path(rag_seed_path).resolve())
 
     with closing(get_conn(mysql_conf, autocommit=False)) as conn:
         ensure_schema(conn)
         if seed_demo:
             seed_demo_data(conn, force_seed=force_seed)
         conn.commit()
+
+    ensure_rag_schema(app.config["RAG_DB_PATH"])
+    if rag_force_seed:
+        rag_rebuild_from_seed(app.config["RAG_DB_PATH"], app.config["RAG_SEED_PATH"])
+    elif seed_demo:
+        with closing(get_rag_conn(app.config["RAG_DB_PATH"])) as rag_conn:
+            cur = rag_conn.cursor()
+            cur.execute("SELECT COUNT(*) AS c FROM rag_docs")
+            count = int((cur.fetchone() or {"c": 0})["c"])
+        if count == 0:
+            rag_rebuild_from_seed(app.config["RAG_DB_PATH"], app.config["RAG_SEED_PATH"])
 
     @app.after_request
     def add_cors_headers(resp):
@@ -676,6 +864,82 @@ def create_app(mysql_conf: Dict[str, Any], seed_demo: bool = True, force_seed: b
         if changed == 0:
             return jsonify({"error": "event_not_found"}), 404
         return jsonify({"ok": True, "event_id": event_id})
+
+    @app.route("/api/v2/rag/docs", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    def rag_docs_list():
+        page = max(1, int(request.args.get("page", "1")))
+        page_size = max(1, min(int(request.args.get("page_size", "20")), 200))
+        q = request.args.get("q", "").strip()
+        attack_type = request.args.get("attack_type", "").strip()
+        payload = rag_list_docs(
+            app.config["RAG_DB_PATH"],
+            q=q,
+            attack_type=attack_type,
+            page=page,
+            page_size=page_size,
+        )
+        return jsonify(payload)
+
+    @app.route("/api/v2/rag/docs", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    def rag_docs_add():
+        body = request.get_json(silent=True) or {}
+        title = str(body.get("title", "")).strip()
+        tags = str(body.get("tags", "")).strip()
+        attack_type = str(body.get("attack_type", "")).strip()
+        content = str(body.get("content", "")).strip()
+        evidence = str(body.get("evidence", "")).strip()
+        mitigation = str(body.get("mitigation", "")).strip()
+        severity = str(body.get("severity", "medium")).strip().lower() or "medium"
+        source = str(body.get("source", "")).strip() or f"user:{g.session['username']}"
+
+        if not title or not content:
+            return jsonify({"error": "title_and_content_required"}), 400
+        if severity not in RAG_SEVERITY_SET:
+            return jsonify({"error": "invalid_severity"}), 400
+
+        doc_id = str(body.get("doc_id", "")).strip() or f"USR-{uuid.uuid4().hex[:10].upper()}"
+        row = {
+            "doc_id": doc_id,
+            "title": title,
+            "tags": tags,
+            "attack_type": attack_type,
+            "content": content,
+            "evidence": evidence,
+            "mitigation": mitigation,
+            "severity": severity,
+            "source": source,
+        }
+        rag_upsert_doc(app.config["RAG_DB_PATH"], row)
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(
+                conn,
+                g.session["username"],
+                g.session["role"],
+                "rag_add_doc",
+                doc_id,
+                f"title={title[:60]}",
+            )
+        return jsonify({"ok": True, "doc_id": doc_id})
+
+    @app.route("/api/v2/rag/docs/<doc_id>/delete", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    def rag_docs_delete(doc_id: str):
+        changed = rag_delete_doc(app.config["RAG_DB_PATH"], doc_id=doc_id)
+        if changed == 0:
+            return jsonify({"error": "doc_not_found"}), 404
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(conn, g.session["username"], g.session["role"], "rag_delete_doc", doc_id, "deleted")
+        return jsonify({"ok": True, "doc_id": doc_id})
+
+    @app.route("/api/v2/rag/rebuild", methods=["POST"])
+    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    def rag_rebuild_api():
+        count = rag_rebuild_from_seed(app.config["RAG_DB_PATH"], app.config["RAG_SEED_PATH"])
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(conn, g.session["username"], g.session["role"], "rag_rebuild", "seed", f"count={count}")
+        return jsonify({"ok": True, "rows": count})
 
     @app.route("/api/v2/user/dashboard/kpis", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
@@ -841,7 +1105,7 @@ def create_app(mysql_conf: Dict[str, Any], seed_demo: bool = True, force_seed: b
         return jsonify({"items": items})
 
     @app.route("/api/v2/pro/events", methods=["GET"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
     def pro_events():
         try:
             start_dt, end_dt = build_time_range()
@@ -903,7 +1167,7 @@ def create_app(mysql_conf: Dict[str, Any], seed_demo: bool = True, force_seed: b
         return jsonify({"items": normalize_rows(rows), "page": page, "page_size": page_size, "total": total})
 
     @app.route("/api/v2/pro/events/<event_id>", methods=["GET"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
     def pro_event_detail(event_id: str):
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1014,7 +1278,7 @@ def create_app(mysql_conf: Dict[str, Any], seed_demo: bool = True, force_seed: b
         )
 
     @app.route("/api/v2/pro/nodes/<node_name>/detail", methods=["GET"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
     def pro_node_detail(node_name: str):
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1369,6 +1633,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mysql-user", default="root", help="MySQL user")
     parser.add_argument("--mysql-password", default="123456", help="MySQL password")
     parser.add_argument("--mysql-database", default="traffic_pipeline", help="MySQL database")
+    parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db path")
+    parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed json path")
+    parser.add_argument("--rag-force-seed", action="store_true", help="Force rebuild RAG db from seed on startup")
     parser.add_argument("--seed-demo", action="store_true", help="Seed demo data if tables are empty")
     parser.add_argument("--force-seed", action="store_true", help="Force regenerate demo data")
     return parser.parse_args()
@@ -1383,11 +1650,21 @@ def main() -> None:
         "password": args.mysql_password,
         "database": args.mysql_database,
     }
-    app = create_app(mysql_conf=mysql_conf, seed_demo=args.seed_demo or args.force_seed, force_seed=args.force_seed)
+    app = create_app(
+        mysql_conf=mysql_conf,
+        seed_demo=args.seed_demo or args.force_seed,
+        force_seed=args.force_seed,
+        rag_db_path=args.rag_db_path,
+        rag_seed_path=args.rag_seed_file,
+        rag_force_seed=args.rag_force_seed,
+    )
     app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":
     main()
+
+
+
 
 

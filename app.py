@@ -263,6 +263,10 @@ def build_api_cmd(args, script_dir: Path) -> List[str]:
         args.mysql_password,
         "--mysql-database",
         args.mysql_database,
+        "--rag-db-path",
+        args.rag_db_path,
+        "--rag-seed-file",
+        args.rag_seed_file,
         "--seed-demo",
     ]
     return cmd

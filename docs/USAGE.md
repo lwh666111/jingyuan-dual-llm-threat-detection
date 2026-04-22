@@ -8,6 +8,7 @@
 - 结果入库守护（MySQL/SQLite）
 - Flask API（默认 `3049`）
 - Node 大屏服务（默认 `1145`）
+- RAG 知识库管理（前端可新增/删除/重建）
 
 说明：Docker 一键部署默认不启动 LLM（按当前需求）。
 
@@ -138,15 +139,22 @@ python scripts/build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/r
 - 专业用户（pro）
 - 管理员（admin）
 
+登录后推荐页面结构：
+
+- 数据大屏
+- 详情信息
+- RAG数据库设置
+- （管理员附加）全局概览 / 操作日志 / 系统配置
+
 ## 9. 快速自检
 
-### 8.1 接口可用性
+### 9.1 接口可用性
 
 ```powershell
 Invoke-WebRequest http://127.0.0.1:3049/api/v1/screen/ping
 ```
 
-### 8.2 API 联调脚本
+### 9.2 API 联调脚本
 
 ```powershell
 python scripts/platform_api_demo.py

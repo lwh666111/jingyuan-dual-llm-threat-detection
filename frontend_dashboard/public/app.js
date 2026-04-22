@@ -70,6 +70,14 @@ const state = {
     logsUsername: "",
     config: {},
   },
+  rag: {
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    q: "",
+    attackType: "",
+    items: [],
+  },
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -216,13 +224,7 @@ function renderMainLayout() {
   renderTabs();
   startGlobalTimers();
 
-  if (state.profile?.role === ROLE_NORMAL) {
-    switchView("screen");
-  } else if (state.profile?.role === ROLE_PRO) {
-    switchView("pro-query");
-  } else {
-    switchView("admin-overview");
-  }
+  switchView("screen");
 }
 
 function renderTabs() {
@@ -241,20 +243,28 @@ function renderTabs() {
 }
 
 function getTabsByRole(role) {
-  if (role === ROLE_NORMAL) {
-    return [{ id: "screen", label: "大屏展示" }];
+  if (role === ROLE_ADMIN) {
+    return [
+      { id: "screen", label: "数据大屏" },
+      { id: "pro-query", label: "详情信息" },
+      { id: "rag-settings", label: "RAG数据库设置" },
+      { id: "admin-overview", label: "全局概览" },
+      { id: "admin-logs", label: "操作日志" },
+      { id: "admin-config", label: "系统配置" },
+    ];
   }
   if (role === ROLE_PRO) {
     return [
-      { id: "pro-query", label: "数据查询" },
-      { id: "screen", label: "大屏展示" },
+      { id: "screen", label: "数据大屏" },
+      { id: "pro-query", label: "详情信息" },
+      { id: "rag-settings", label: "RAG数据库设置" },
       { id: "pro-model", label: "模型性能" },
     ];
   }
   return [
-    { id: "admin-overview", label: "全局概览" },
-    { id: "admin-logs", label: "操作日志" },
-    { id: "admin-config", label: "系统配置" },
+    { id: "screen", label: "数据大屏" },
+    { id: "pro-query", label: "详情信息" },
+    { id: "rag-settings", label: "RAG数据库设置" },
   ];
 }
 
@@ -272,6 +282,11 @@ function switchView(viewId) {
   if (viewId === "pro-query") {
     renderProQueryView();
     setViewRefresh(8000, loadProEvents);
+    return;
+  }
+  if (viewId === "rag-settings") {
+    renderRagSettingsView();
+    setViewRefresh(15000, loadRagDocs);
     return;
   }
   if (viewId === "pro-model") {
@@ -461,11 +476,12 @@ function renderTicker(items) {
 function renderProQueryView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
+  const canHandle = state.profile?.role === ROLE_PRO || state.profile?.role === ROLE_ADMIN;
   root.innerHTML = `
     <section class="panel">
       <div class="panel-head">
-        <h3 class="panel-title">专业用户 - 数据查询模式</h3>
-        <button id="btnSwitchToScreen" class="btn btn-primary">切换到大屏展示</button>
+        <h3 class="panel-title">攻击详情信息</h3>
+        <button id="btnSwitchToScreen" class="btn btn-primary">切换到数据大屏</button>
       </div>
       <div class="toolbar">
         <div class="filter-group">
@@ -497,13 +513,13 @@ function renderProQueryView() {
         <input id="pro_end_time" type="datetime-local" />
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-        <select id="pro_batch_status" style="max-width:180px;">
+        <select id="pro_batch_status" style="max-width:180px;" ${canHandle ? "" : "disabled"}>
           <option value="unprocessed">未处理</option>
           <option value="processing">处理中</option>
           <option value="done" selected>已处理</option>
           <option value="ignored">已忽略</option>
         </select>
-        <button id="pro_apply_batch" class="btn btn-danger">批量标记状态</button>
+        <button id="pro_apply_batch" class="btn btn-danger" ${canHandle ? "" : "disabled"}>批量标记状态</button>
         <span class="panel-sub">已选中 <strong id="pro_selected_count">0</strong> 条</span>
       </div>
     </section>
@@ -539,8 +555,8 @@ function renderProQueryView() {
         <div class="panel-head"><h3 class="panel-title">事件详情</h3><span class="panel-sub" id="pro_detail_hint">请选择左侧事件</span></div>
         <div id="pro_event_detail" class="detail-card">暂无详情</div>
         <div class="note-box">
-          <textarea id="pro_note_text" rows="3" placeholder="处理备注"></textarea>
-          <button id="pro_save_note" class="btn btn-success">保存备注</button>
+          <textarea id="pro_note_text" rows="3" placeholder="处理备注" ${canHandle ? "" : "disabled"}></textarea>
+          <button id="pro_save_note" class="btn btn-success" ${canHandle ? "" : "disabled"}>保存备注</button>
         </div>
         <div class="panel-head" style="margin-top:10px;"><h3 class="panel-title">节点详情</h3></div>
         <div id="pro_node_detail" class="detail-card">点击目标节点名称查看</div>
@@ -859,6 +875,198 @@ function exportProEventsCsv() {
     process_status: x.process_status,
   }));
   downloadCsv("pro_events_export.csv", rows);
+}
+
+function renderRagSettingsView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  const canRebuild = state.profile?.role === ROLE_PRO || state.profile?.role === ROLE_ADMIN;
+
+  root.innerHTML = `
+    <section class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">RAG数据库设置</h3>
+        <div style="display:flex;gap:8px;">
+          <button id="rag_refresh" class="btn btn-success">刷新</button>
+          <button id="rag_rebuild" class="btn btn-danger" ${canRebuild ? "" : "disabled"}>按种子重建</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <div class="filter-group">
+          <input id="rag_q" placeholder="关键词检索（title/tags/content）" />
+          <input id="rag_attack_type" placeholder="攻击类型（可选）" />
+        </div>
+      </div>
+      <div style="margin-top:8px;" class="panel-sub">当前共 <strong id="rag_total">0</strong> 条知识</div>
+    </section>
+
+    <section class="split" style="margin-top:10px;">
+      <article class="panel">
+        <div class="panel-head"><h3 class="panel-title">知识列表</h3></div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>doc_id</th>
+                <th>标题</th>
+                <th>攻击类型</th>
+                <th>严重度</th>
+                <th>来源</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="rag_table_body"></tbody>
+          </table>
+        </div>
+        <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px;">
+          <button id="rag_prev_page" class="btn btn-ghost">上一页</button>
+          <button id="rag_next_page" class="btn btn-ghost">下一页</button>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head"><h3 class="panel-title">新增知识</h3></div>
+        <div class="detail-grid">
+          <div><label class="panel-sub">标题</label><input id="rag_new_title" /></div>
+          <div><label class="panel-sub">攻击类型</label><input id="rag_new_attack_type" placeholder="如 SQLi/XSS/DDoS" /></div>
+          <div><label class="panel-sub">标签</label><input id="rag_new_tags" placeholder="空格分隔关键词" /></div>
+          <div>
+            <label class="panel-sub">严重度</label>
+            <select id="rag_new_severity">
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+              <option value="critical">critical</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:8px;">
+          <label class="panel-sub">正文内容</label>
+          <textarea id="rag_new_content" rows="4" placeholder="知识正文"></textarea>
+        </div>
+        <div style="margin-top:8px;">
+          <label class="panel-sub">判定证据</label>
+          <textarea id="rag_new_evidence" rows="3" placeholder="命中依据"></textarea>
+        </div>
+        <div style="margin-top:8px;">
+          <label class="panel-sub">处置建议</label>
+          <textarea id="rag_new_mitigation" rows="3" placeholder="缓解与处置建议"></textarea>
+        </div>
+        <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+          <button id="rag_add_doc" class="btn btn-primary">新增到RAG库</button>
+        </div>
+      </article>
+    </section>
+  `;
+
+  document.getElementById("rag_refresh")?.addEventListener("click", () => loadRagDocs(true));
+  document.getElementById("rag_rebuild")?.addEventListener("click", rebuildRagFromSeed);
+  document.getElementById("rag_add_doc")?.addEventListener("click", addRagDoc);
+  document.getElementById("rag_prev_page")?.addEventListener("click", () => {
+    state.rag.page = Math.max(1, state.rag.page - 1);
+    loadRagDocs().catch((err) => showToast(err.message));
+  });
+  document.getElementById("rag_next_page")?.addEventListener("click", () => {
+    const maxPage = Math.max(1, Math.ceil(state.rag.total / state.rag.pageSize));
+    state.rag.page = Math.min(maxPage, state.rag.page + 1);
+    loadRagDocs().catch((err) => showToast(err.message));
+  });
+  document.getElementById("rag_q")?.addEventListener("keyup", (ev) => {
+    if (ev.key === "Enter") loadRagDocs(true).catch((err) => showToast(err.message));
+  });
+  document.getElementById("rag_attack_type")?.addEventListener("keyup", (ev) => {
+    if (ev.key === "Enter") loadRagDocs(true).catch((err) => showToast(err.message));
+  });
+
+  loadRagDocs(true).catch((err) => showToast(`加载RAG列表失败：${err.message}`));
+}
+
+async function loadRagDocs(forcePageOne = false) {
+  if (forcePageOne) state.rag.page = 1;
+  state.rag.q = String(document.getElementById("rag_q")?.value || "").trim();
+  state.rag.attackType = String(document.getElementById("rag_attack_type")?.value || "").trim();
+  const params = new URLSearchParams();
+  params.set("page", String(state.rag.page));
+  params.set("page_size", String(state.rag.pageSize));
+  if (state.rag.q) params.set("q", state.rag.q);
+  if (state.rag.attackType) params.set("attack_type", state.rag.attackType);
+  const data = await api(`/api/v2/rag/docs?${params.toString()}`);
+  state.rag.items = Array.isArray(data.items) ? data.items : [];
+  state.rag.total = Number(data.total || 0);
+  renderRagTable();
+}
+
+function renderRagTable() {
+  const body = document.getElementById("rag_table_body");
+  const total = document.getElementById("rag_total");
+  if (total) total.textContent = String(state.rag.total || 0);
+  if (!body) return;
+  if (!state.rag.items.length) {
+    body.innerHTML = `<tr><td colspan="6" class="panel-sub">暂无RAG知识</td></tr>`;
+    return;
+  }
+  body.innerHTML = state.rag.items
+    .map(
+      (x) => `
+      <tr>
+        <td>${escapeHtml(x.doc_id || "-")}</td>
+        <td title="${escapeHtml(x.title || "")}">${escapeHtml((x.title || "-").slice(0, 36))}</td>
+        <td>${escapeHtml(x.attack_type || "-")}</td>
+        <td>${escapeHtml(x.severity || "-")}</td>
+        <td>${escapeHtml(x.source || "-")}</td>
+        <td><button class="btn btn-danger" data-rag-del="${escapeHtml(x.doc_id || "")}">删除</button></td>
+      </tr>
+    `
+    )
+    .join("");
+  body.querySelectorAll("[data-rag-del]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const docId = String(el.getAttribute("data-rag-del") || "");
+      if (!docId) return;
+      try {
+        await api(`/api/v2/rag/docs/${encodeURIComponent(docId)}/delete`, { method: "POST", body: {} });
+        showToast(`已删除 ${docId}`);
+        await loadRagDocs();
+      } catch (err) {
+        showToast(`删除失败：${err.message}`);
+      }
+    });
+  });
+}
+
+async function addRagDoc() {
+  const payload = {
+    title: String(document.getElementById("rag_new_title")?.value || "").trim(),
+    attack_type: String(document.getElementById("rag_new_attack_type")?.value || "").trim(),
+    tags: String(document.getElementById("rag_new_tags")?.value || "").trim(),
+    severity: String(document.getElementById("rag_new_severity")?.value || "medium").trim().toLowerCase(),
+    content: String(document.getElementById("rag_new_content")?.value || "").trim(),
+    evidence: String(document.getElementById("rag_new_evidence")?.value || "").trim(),
+    mitigation: String(document.getElementById("rag_new_mitigation")?.value || "").trim(),
+  };
+  if (!payload.title || !payload.content) {
+    showToast("标题和正文内容必填");
+    return;
+  }
+  const resp = await api("/api/v2/rag/docs", { method: "POST", body: payload });
+  showToast(`新增成功：${resp.doc_id || ""}`);
+  ["rag_new_title", "rag_new_attack_type", "rag_new_tags", "rag_new_content", "rag_new_evidence", "rag_new_mitigation"].forEach(
+    (id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    }
+  );
+  await loadRagDocs(true);
+}
+
+async function rebuildRagFromSeed() {
+  try {
+    const resp = await api("/api/v2/rag/rebuild", { method: "POST", body: {} });
+    showToast(`重建完成，装载 ${resp.rows || 0} 条`);
+    await loadRagDocs(true);
+  } catch (err) {
+    showToast(`重建失败：${err.message}`);
+  }
 }
 
 function renderProModelView() {

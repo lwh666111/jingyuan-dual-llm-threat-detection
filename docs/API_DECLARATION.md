@@ -88,6 +88,34 @@
 - `POST /api/v2/common/alerts/{event_id}/ack`
   - 鉴权：`normal/pro/admin`
 
+### 4.2.1 RAG 知识库（v2）
+
+- `GET /api/v2/rag/docs?page=1&page_size=20&q=&attack_type=`
+  - 鉴权：`normal/pro/admin`
+  - 说明：分页检索 RAG 文档
+- `POST /api/v2/rag/docs`
+  - 鉴权：`normal/pro/admin`
+  - body（示例）：
+
+```json
+{
+  "title": "SQLi login bypass pattern",
+  "attack_type": "SQLi",
+  "tags": "sqli login or 1=1",
+  "severity": "high",
+  "content": "Rule description...",
+  "evidence": "Evidence description...",
+  "mitigation": "Mitigation description..."
+}
+```
+
+- `POST /api/v2/rag/docs/{doc_id}/delete`
+  - 鉴权：`normal/pro/admin`
+  - 说明：删除指定文档
+- `POST /api/v2/rag/rebuild`
+  - 鉴权：`pro/admin`
+  - 说明：按 `llm/rag/rag_seed.json` 重建知识库
+
 ### 4.3 普通用户大屏（v2）
 
 - `GET /api/v2/user/dashboard/kpis`
