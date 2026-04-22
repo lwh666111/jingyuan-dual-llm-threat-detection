@@ -97,7 +97,8 @@ def run_sync(
         + f"cases={stats['cases_scanned']} "
         + f"req={stats['requests_rows']} "
         + f"rsp={stats['responses_rows']} "
-        + f"ana={stats['analyses_rows']}",
+        + f"ana={stats['analyses_rows']} "
+        + f"demo={stats.get('demo_event_rows', 0)}",
         log_file,
     )
     return stats

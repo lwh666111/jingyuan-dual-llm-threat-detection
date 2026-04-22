@@ -19,7 +19,6 @@ from pymysql.cursors import DictCursor
 
 
 ROLE_NORMAL = "normal"
-ROLE_PRO = "pro"
 ROLE_ADMIN = "admin"
 
 PROCESS_STATUS_SET = {"unprocessed", "processing", "done", "ignored"}
@@ -30,32 +29,59 @@ TOKEN_TTL_SECONDS = 12 * 3600
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 DEMO_ACCOUNTS = [
-    {"username": "admin", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
-    {"username": "admin", "password": "admin", "role": ROLE_PRO, "display_name": "专业用户"},
+    {"username": "user", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
     {"username": "admin", "password": "admin", "role": ROLE_ADMIN, "display_name": "管理员"},
 ]
 
 DEMO_SEED_USERS = [
-    {"username": "demo_normal", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
-    {"username": "demo_pro", "password": "admin", "role": ROLE_PRO, "display_name": "专业用户"},
-    {"username": "demo_admin", "password": "admin", "role": ROLE_ADMIN, "display_name": "管理员"},
+    {"username": "user", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
+    {"username": "admin", "password": "admin", "role": ROLE_ADMIN, "display_name": "管理员"},
 ]
 
 
-def find_demo_account(username: str, password: str, role_hint: str = "") -> Optional[Dict[str, Any]]:
-    candidates = [x for x in DEMO_ACCOUNTS if x["username"] == username and x["password"] == password]
-    if not candidates:
-        return None
-    if role_hint:
-        for row in candidates:
-            if row["role"] == role_hint:
-                return row
-    if len(candidates) == 1:
-        return candidates[0]
-    for row in candidates:
-        if row["role"] == ROLE_ADMIN:
-            return row
-    return candidates[0]
+def find_demo_account(conn: Any, username: str, password: str, role_hint: str = "") -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        if role_hint:
+            cur.execute(
+                """
+                SELECT id, username, password, role, display_name
+                FROM demo_users
+                WHERE username=%s AND password=%s AND role=%s
+                LIMIT 1
+                """,
+                (username, password, role_hint),
+            )
+            return cur.fetchone()
+        cur.execute(
+            """
+            SELECT id, username, password, role, display_name
+            FROM demo_users
+            WHERE username=%s AND password=%s
+              AND role IN (%s, %s)
+            ORDER BY CASE WHEN role=%s THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (username, password, ROLE_NORMAL, ROLE_ADMIN, ROLE_ADMIN),
+        )
+        return cur.fetchone()
+
+
+def list_demo_accounts(conn: Any) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT username, password, role
+            FROM demo_users
+            WHERE role IN (%s, %s)
+            ORDER BY CASE role
+                WHEN %s THEN 1
+                WHEN %s THEN 2
+                ELSE 3
+            END, username
+            """,
+            (ROLE_NORMAL, ROLE_ADMIN, ROLE_NORMAL, ROLE_ADMIN),
+        )
+        return cur.fetchall()
 
 
 ATTACK_TYPES = [
@@ -412,42 +438,64 @@ def log_action(conn: Any, username: str, role: str, action: str, target: str, de
 def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
     with conn.cursor() as cur:
         for row in DEMO_SEED_USERS:
-            cur.execute(
-                """
-                INSERT INTO demo_users(username, password, role, display_name)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                  password=VALUES(password),
-                  role=VALUES(role),
-                  display_name=VALUES(display_name)
-                """,
-                (row["username"], row["password"], row["role"], row["display_name"]),
-            )
+            if force_seed:
+                cur.execute(
+                    """
+                    INSERT INTO demo_users(username, password, role, display_name)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      password=VALUES(password),
+                      role=VALUES(role),
+                      display_name=VALUES(display_name)
+                    """,
+                    (row["username"], row["password"], row["role"], row["display_name"]),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO demo_users(username, password, role, display_name)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      role=VALUES(role),
+                      display_name=VALUES(display_name)
+                    """,
+                    (row["username"], row["password"], row["role"], row["display_name"]),
+                )
+        cur.execute(
+            """
+            UPDATE demo_users
+            SET role=%s
+            WHERE role NOT IN (%s, %s)
+            """,
+            (ROLE_NORMAL, ROLE_NORMAL, ROLE_ADMIN),
+        )
 
         defaults = {
             "alert_threshold_high": "10",
             "auto_refresh_seconds": "5",
             "sound_alert_enabled": "1",
+            "capture_batch_size": "4",
+            "monitor_ports": "80,443,8080",
         }
         for k, v in defaults.items():
             cur.execute(
                 """
                 INSERT INTO demo_system_config(config_key, config_value)
                 VALUES (%s, %s)
-                ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)
+                ON DUPLICATE KEY UPDATE config_value=config_value
                 """,
                 (k, v),
             )
 
         machines = [
-            ("node-bj-01", "10.30.1.11", "鍖椾含鏈烘埧A", "online"),
-            ("node-sh-01", "10.30.2.11", "涓婃捣鏈烘埧B", "online"),
-            ("node-gz-01", "10.30.3.11", "骞垮窞鏈烘埧C", "online"),
-            ("node-hz-01", "10.30.4.11", "鏉窞鏈烘埧D", "online"),
-            ("node-cd-01", "10.30.5.11", "鎴愰兘鏈烘埧E", "online"),
+            ("node-bj-01", "10.30.1.11", "北京机房A", "online"),
+            ("node-sh-01", "10.30.2.11", "上海机房B", "online"),
+            ("node-gz-01", "10.30.3.11", "广州机房C", "online"),
+            ("node-hz-01", "10.30.4.11", "杭州机房D", "online"),
+            ("node-cd-01", "10.30.5.11", "成都机房E", "online"),
             ("node-sg-01", "10.30.6.11", "新加坡机房F", "online"),
-            ("node-us-01", "10.30.7.11", "缇庡浗瑗块儴", "offline"),
-            ("node-de-01", "10.30.8.11", "寰峰浗娉曞叞鍏嬬", "online"),
+            ("node-us-01", "10.30.7.11", "美国西部", "online"),
+            ("node-de-01", "10.30.8.11", "德国法兰克福", "online"),
         ]
         for machine_name, ip_addr, location, online_status in machines:
             cur.execute(
@@ -723,7 +771,8 @@ def create_app(
 
     @app.route("/api/v2/auth/demo-accounts", methods=["GET"])
     def demo_accounts():
-        rows = [{"username": x["username"], "password": x["password"], "role": x["role"]} for x in DEMO_ACCOUNTS]
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            rows = list_demo_accounts(conn)
         return jsonify({"accounts": rows})
 
     @app.route("/api/v2/auth/login", methods=["POST"])
@@ -732,14 +781,15 @@ def create_app(
         username = str(body.get("username", "")).strip()
         password = str(body.get("password", "")).strip()
         role_hint = str(body.get("role", "")).strip().lower()
-        if role_hint and role_hint not in {ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN}:
+        if role_hint and role_hint not in {ROLE_NORMAL, ROLE_ADMIN}:
             return jsonify({"error": "invalid_role"}), 400
-        account = find_demo_account(username, password, role_hint)
-        if not account:
-            return jsonify({"error": "invalid_credentials"}), 401
-        token = create_session(account)
-        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            account = find_demo_account(conn, username, password, role_hint)
+            if not account:
+                return jsonify({"error": "invalid_credentials"}), 401
+            token = create_session(account)
             log_action(conn, account["username"], account["role"], "login", "auth", "login_success")
+            conn.commit()
         return jsonify(
             {
                 "token": token,
@@ -750,7 +800,7 @@ def create_app(
         )
 
     @app.route("/api/v2/auth/logout", methods=["POST"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def logout():
         SESSIONS.pop(g.token, None)
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
@@ -758,14 +808,37 @@ def create_app(
         return jsonify({"ok": True})
 
     @app.route("/api/v2/auth/profile", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def profile():
         session = dict(g.session)
         session["expires_at"] = dt_to_str(session["expires_at"])
         return jsonify(session)
 
+    @app.route("/api/v2/auth/change-password", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def auth_change_password():
+        body = request.get_json(silent=True) or {}
+        old_password = str(body.get("old_password", "")).strip()
+        new_password = str(body.get("new_password", "")).strip()
+        if not old_password or not new_password:
+            return jsonify({"error": "old_password_and_new_password_required"}), 400
+        if len(new_password) < 4:
+            return jsonify({"error": "new_password_too_short"}), 400
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT password FROM demo_users WHERE username=%s LIMIT 1", (g.session["username"],))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "user_not_found"}), 404
+                if str(row.get("password", "")) != old_password:
+                    return jsonify({"error": "old_password_incorrect"}), 400
+                cur.execute("UPDATE demo_users SET password=%s WHERE username=%s", (new_password, g.session["username"]))
+                log_action(conn, g.session["username"], g.session["role"], "change_password", "self", "self_password_updated")
+            conn.commit()
+        return jsonify({"ok": True})
+
     @app.route("/api/v2/common/system-status", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def system_status():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             refresh_machine_stats(conn)
@@ -806,7 +879,7 @@ def create_app(
         )
 
     @app.route("/api/v2/common/alerts/ticker", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def alerts_ticker():
         limit = max(1, min(int(request.args.get("limit", "3")), 10))
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
@@ -825,7 +898,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows)})
 
     @app.route("/api/v2/common/alerts/popup", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def alerts_popup():
         limit = max(1, min(int(request.args.get("limit", "5")), 20))
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
@@ -844,7 +917,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows)})
 
     @app.route("/api/v2/common/alerts/<event_id>/ack", methods=["POST"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def alert_ack(event_id: str):
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             with conn.cursor() as cur:
@@ -866,7 +939,7 @@ def create_app(
         return jsonify({"ok": True, "event_id": event_id})
 
     @app.route("/api/v2/rag/docs", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def rag_docs_list():
         page = max(1, int(request.args.get("page", "1")))
         page_size = max(1, min(int(request.args.get("page_size", "20")), 200))
@@ -882,7 +955,7 @@ def create_app(
         return jsonify(payload)
 
     @app.route("/api/v2/rag/docs", methods=["POST"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def rag_docs_add():
         body = request.get_json(silent=True) or {}
         title = str(body.get("title", "")).strip()
@@ -924,7 +997,7 @@ def create_app(
         return jsonify({"ok": True, "doc_id": doc_id})
 
     @app.route("/api/v2/rag/docs/<doc_id>/delete", methods=["POST"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def rag_docs_delete(doc_id: str):
         changed = rag_delete_doc(app.config["RAG_DB_PATH"], doc_id=doc_id)
         if changed == 0:
@@ -934,7 +1007,7 @@ def create_app(
         return jsonify({"ok": True, "doc_id": doc_id})
 
     @app.route("/api/v2/rag/rebuild", methods=["POST"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def rag_rebuild_api():
         count = rag_rebuild_from_seed(app.config["RAG_DB_PATH"], app.config["RAG_SEED_PATH"])
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
@@ -942,7 +1015,7 @@ def create_app(
         return jsonify({"ok": True, "rows": count})
 
     @app.route("/api/v2/user/dashboard/kpis", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def user_kpis():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             refresh_machine_stats(conn)
@@ -994,7 +1067,7 @@ def create_app(
         )
 
     @app.route("/api/v2/user/dashboard/trend7d", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def trend7d():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1027,7 +1100,7 @@ def create_app(
         return jsonify({"items": items})
 
     @app.route("/api/v2/user/dashboard/top-attack-types", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def top_attack_types():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1045,7 +1118,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows)})
 
     @app.route("/api/v2/user/dashboard/source-distribution", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def source_distribution():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1062,7 +1135,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows)})
 
     @app.route("/api/v2/user/dashboard/heatmap", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def heatmap():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1082,7 +1155,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows)})
 
     @app.route("/api/v2/user/dashboard/method-share", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def method_share():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1105,7 +1178,7 @@ def create_app(
         return jsonify({"items": items})
 
     @app.route("/api/v2/pro/events", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def pro_events():
         try:
             start_dt, end_dt = build_time_range()
@@ -1167,7 +1240,7 @@ def create_app(
         return jsonify({"items": normalize_rows(rows), "page": page, "page_size": page_size, "total": total})
 
     @app.route("/api/v2/pro/events/<event_id>", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def pro_event_detail(event_id: str):
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1189,7 +1262,7 @@ def create_app(
         return jsonify(normalize_row(row))
 
     @app.route("/api/v2/pro/events/batch-status", methods=["POST"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def pro_batch_status():
         body = request.get_json(silent=True) or {}
         event_ids = body.get("event_ids", [])
@@ -1219,7 +1292,7 @@ def create_app(
         return jsonify({"ok": True, "affected": affected})
 
     @app.route("/api/v2/pro/events/<event_id>/note", methods=["POST"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def pro_event_note(event_id: str):
         body = request.get_json(silent=True) or {}
         note = str(body.get("note", "")).strip()
@@ -1234,7 +1307,7 @@ def create_app(
         return jsonify({"ok": True, "event_id": event_id})
 
     @app.route("/api/v2/pro/model/performance", methods=["GET"])
-    @require_roles(ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_ADMIN)
     def pro_model_performance():
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1278,7 +1351,7 @@ def create_app(
         )
 
     @app.route("/api/v2/pro/nodes/<node_name>/detail", methods=["GET"])
-    @require_roles(ROLE_NORMAL, ROLE_PRO, ROLE_ADMIN)
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def pro_node_detail(node_name: str):
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
@@ -1309,6 +1382,54 @@ def create_app(
                 )
                 events = cur.fetchall()
         return jsonify({"machine": normalize_row(machine), "stats": normalize_row(stats), "recent_events": normalize_rows(events)})
+
+    @app.route("/api/v2/admin/users", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def admin_users_list():
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, username, role, display_name, created_at, updated_at
+                    FROM demo_users
+                    WHERE role IN (%s, %s)
+                    ORDER BY CASE role
+                        WHEN %s THEN 1
+                        WHEN %s THEN 2
+                        ELSE 3
+                    END, username
+                    """,
+                    (ROLE_NORMAL, ROLE_ADMIN, ROLE_ADMIN, ROLE_NORMAL),
+                )
+                rows = cur.fetchall()
+        return jsonify({"items": normalize_rows(rows)})
+
+    @app.route("/api/v2/admin/users/<username>/password", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def admin_user_change_password(username: str):
+        body = request.get_json(silent=True) or {}
+        new_password = str(body.get("new_password", "")).strip()
+        if not new_password:
+            return jsonify({"error": "new_password_required"}), 400
+        if len(new_password) < 4:
+            return jsonify({"error": "new_password_too_short"}), 400
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE demo_users SET password=%s WHERE username=%s", (new_password, username))
+                changed = int(cur.rowcount)
+                if changed:
+                    log_action(
+                        conn,
+                        g.session["username"],
+                        g.session["role"],
+                        "admin_change_user_password",
+                        username,
+                        "updated",
+                    )
+            conn.commit()
+        if changed == 0:
+            return jsonify({"error": "user_not_found"}), 404
+        return jsonify({"ok": True, "username": username})
 
     @app.route("/api/v2/admin/summary", methods=["GET"])
     @require_roles(ROLE_ADMIN)
@@ -1471,9 +1592,61 @@ def create_app(
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict) or not body:
             return jsonify({"error": "invalid_payload"}), 400
+        normalized: Dict[str, str] = {}
+        for key, value in body.items():
+            cfg_key = str(key).strip()
+            cfg_val = str(value).strip()
+            if not cfg_key:
+                continue
+            if cfg_key == "capture_batch_size":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_capture_batch_size"}), 400
+                if v < 1 or v > 128:
+                    return jsonify({"error": "invalid_capture_batch_size"}), 400
+                cfg_val = str(v)
+            elif cfg_key == "monitor_ports":
+                raw_parts = [x for x in re.split(r"[\s,]+", cfg_val) if x]
+                if not raw_parts:
+                    return jsonify({"error": "invalid_monitor_ports"}), 400
+                seen = set()
+                ports: List[int] = []
+                for item in raw_parts:
+                    if not item.isdigit():
+                        return jsonify({"error": "invalid_monitor_ports"}), 400
+                    port = int(item)
+                    if port < 1 or port > 65535:
+                        return jsonify({"error": "invalid_monitor_ports"}), 400
+                    if port not in seen:
+                        seen.add(port)
+                        ports.append(port)
+                cfg_val = ",".join(str(p) for p in ports)
+            elif cfg_key == "auto_refresh_seconds":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_auto_refresh_seconds"}), 400
+                if v < 1 or v > 3600:
+                    return jsonify({"error": "invalid_auto_refresh_seconds"}), 400
+                cfg_val = str(v)
+            elif cfg_key == "alert_threshold_high":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_alert_threshold_high"}), 400
+                if v < 1 or v > 100000:
+                    return jsonify({"error": "invalid_alert_threshold_high"}), 400
+                cfg_val = str(v)
+            elif cfg_key == "sound_alert_enabled":
+                if cfg_val not in {"0", "1"}:
+                    return jsonify({"error": "invalid_sound_alert_enabled"}), 400
+            normalized[cfg_key] = cfg_val
+        if not normalized:
+            return jsonify({"error": "invalid_payload"}), 400
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             with conn.cursor() as cur:
-                for key, value in body.items():
+                for key, value in normalized.items():
                     cur.execute(
                         """
                         INSERT INTO demo_system_config(config_key, config_value)
@@ -1482,7 +1655,7 @@ def create_app(
                         """,
                         (str(key), str(value)),
                     )
-                log_action(conn, g.session["username"], g.session["role"], "update_config", "system_config", str(body))
+                log_action(conn, g.session["username"], g.session["role"], "update_config", "system_config", str(normalized))
             conn.commit()
         return jsonify({"ok": True})
 

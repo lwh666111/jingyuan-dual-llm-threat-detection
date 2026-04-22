@@ -30,7 +30,7 @@
 }
 ```
 
-`role` 可选值：`normal | pro | admin`。
+`role` 可选值：`normal | admin`。
 建议传 `role`，避免同用户名场景下角色歧义。
 
 响应示例：
@@ -46,9 +46,8 @@
 
 ### 2.2 角色权限矩阵
 
-- `normal`：普通大屏与公共信息
-- `pro`：普通权限 + 专业查询与模型性能
-- `admin`：全量权限（机器管理、配置、报表、日志）
+- `normal`：数据大屏、详情信息、用户中心（改自己密码）
+- `admin`：普通权限 + RAG设置、全局概览、日志、系统配置、管理用户（可改他人密码）
 
 ## 3. 响应与错误约定
 
@@ -69,32 +68,35 @@
 ### 4.1 鉴权相关（v2）
 
 - `GET /api/v2/auth/demo-accounts`
-  - 说明：返回演示账号（当前均为 `admin/admin`）
+  - 说明：返回演示账号
 - `POST /api/v2/auth/login`
   - body：`username`, `password`, `role?`
 - `POST /api/v2/auth/logout`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
 - `GET /api/v2/auth/profile`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
+- `POST /api/v2/auth/change-password`
+  - 鉴权：`normal/admin`
+  - body：`old_password`, `new_password`
 
 ### 4.2 通用信息（v2）
 
 - `GET /api/v2/common/system-status`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
 - `GET /api/v2/common/alerts/ticker?limit=3`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
 - `GET /api/v2/common/alerts/popup?limit=5`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
 - `POST /api/v2/common/alerts/{event_id}/ack`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`normal/admin`
 
 ### 4.2.1 RAG 知识库（v2）
 
 - `GET /api/v2/rag/docs?page=1&page_size=20&q=&attack_type=`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`admin`
   - 说明：分页检索 RAG 文档
 - `POST /api/v2/rag/docs`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`admin`
   - body（示例）：
 
 ```json
@@ -110,10 +112,10 @@
 ```
 
 - `POST /api/v2/rag/docs/{doc_id}/delete`
-  - 鉴权：`normal/pro/admin`
+  - 鉴权：`admin`
   - 说明：删除指定文档
 - `POST /api/v2/rag/rebuild`
-  - 鉴权：`pro/admin`
+  - 鉴权：`admin`
   - 说明：按 `llm/rag/rag_seed.json` 重建知识库
 
 ### 4.3 普通用户大屏（v2）
@@ -125,12 +127,12 @@
 - `GET /api/v2/user/dashboard/heatmap`
 - `GET /api/v2/user/dashboard/method-share`
 
-以上接口鉴权角色：`normal/pro/admin`
+以上接口鉴权角色：`normal/admin`
 
-### 4.4 专业用户（v2）
+### 4.4 详情信息（v2）
 
 - `GET /api/v2/pro/events`
-  - 鉴权：`pro/admin`
+  - 鉴权：`normal/admin`
   - 查询参数：
     - `time_range`: `1h|6h|24h|7d|30d|custom`
     - `start_time`, `end_time`（`custom` 时必填，ISO 格式）
@@ -141,9 +143,9 @@
     - `keyword`: 模糊匹配 `event_id/source_ip/target_interface`
     - `page`, `page_size`
 - `GET /api/v2/pro/events/{event_id}`
-  - 鉴权：`pro/admin`
+  - 鉴权：`normal/admin`
 - `POST /api/v2/pro/events/batch-status`
-  - 鉴权：`pro/admin`
+  - 鉴权：`admin`
   - body：
 
 ```json
@@ -154,7 +156,7 @@
 ```
 
 - `POST /api/v2/pro/events/{event_id}/note`
-  - 鉴权：`pro/admin`
+  - 鉴权：`admin`
   - body：
 
 ```json
@@ -162,9 +164,9 @@
 ```
 
 - `GET /api/v2/pro/model/performance`
-  - 鉴权：`pro/admin`
+  - 鉴权：`admin`
 - `GET /api/v2/pro/nodes/{node_name}/detail`
-  - 鉴权：`pro/admin`
+  - 鉴权：`normal/admin`
 
 ### 4.5 管理员（v2）
 
@@ -177,13 +179,17 @@
 - `GET /api/v2/admin/user-op-logs?page=1&page_size=30&username=`
 - `GET /api/v2/admin/config`
 - `PUT /api/v2/admin/config`
+- `GET /api/v2/admin/users`
+- `PUT /api/v2/admin/users/{username}/password`
   - body（示例）：
 
 ```json
 {
   "alert_threshold_high": "10",
   "auto_refresh_seconds": "5",
-  "sound_alert_enabled": "1"
+  "sound_alert_enabled": "1",
+  "capture_batch_size": "4",
+  "monitor_ports": "80,443,8080"
 }
 ```
 

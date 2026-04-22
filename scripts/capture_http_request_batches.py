@@ -7,8 +7,14 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+try:
+    csv.field_size_limit(16 * 1024 * 1024)
+except Exception:
+    pass
 
 
 def find_executable(name: str) -> str:
@@ -138,8 +144,13 @@ def next_file_index(input_dir: Path, prefix: str = "1.1.") -> int:
 
 
 def parse_tshark_line(line: str, headers: List[str]) -> Dict[str, str]:
-    reader = csv.reader([line], delimiter="\t", quotechar='"')
-    row = next(reader, [])
+    row: List[str]
+    try:
+        reader = csv.reader([line], delimiter="\t", quotechar='"')
+        row = next(reader, [])
+    except csv.Error:
+        # 大字段或异常转义时降级解析，避免抓包进程直接崩溃。
+        row = line.rstrip("\r\n").split("\t")
     if len(row) < len(headers):
         row += [""] * (len(headers) - len(row))
     if len(row) > len(headers):
@@ -173,6 +184,28 @@ def to_float(v: str) -> Optional[float]:
         return None
 
 
+def parse_ports(port_default: int, ports_text: str) -> List[int]:
+    raw = (ports_text or "").strip()
+    if not raw:
+        return [int(port_default)]
+    parts = [x for x in re.split(r"[\s,]+", raw) if x]
+    ports: List[int] = []
+    seen = set()
+    for item in parts:
+        if not item.isdigit():
+            raise ValueError(f"非法端口: {item}")
+        port = int(item)
+        if port < 1 or port > 65535:
+            raise ValueError(f"端口越界: {port}")
+        if port in seen:
+            continue
+        seen.add(port)
+        ports.append(port)
+    if not ports:
+        raise ValueError("ports 为空")
+    return ports
+
+
 def is_mostly_readable(text: str) -> bool:
     if not text:
         return False
@@ -189,6 +222,37 @@ def is_mostly_readable(text: str) -> bool:
     if total == 0:
         return False
     return (bad / total) <= 0.1
+
+
+def looks_like_text_payload(text: str) -> bool:
+    s = clean(text)
+    if not s:
+        return False
+    if not is_mostly_readable(s):
+        return False
+
+    if re.search(r"(?:\{|\}|\[|\]|=|&|:|\"|<|>|/|\\n)", s):
+        return True
+    if re.search(r"\b(select|union|drop|insert|update|delete|or\s+1=1|username|password|token)\b", s, re.I):
+        return True
+    if re.fullmatch(r"[A-Za-z0-9._~=&%+\-/:;,@\s]{6,}", s):
+        return True
+    return False
+
+
+def maybe_unquote_payload(text: str) -> str:
+    s = clean(text)
+    if not s:
+        return s
+    if "%" not in s and "+" not in s:
+        return s
+    try:
+        decoded = urllib.parse.unquote_plus(s)
+    except Exception:
+        return s
+    if looks_like_text_payload(decoded):
+        return decoded
+    return s
 
 
 def decode_http_file_data(value: str) -> str:
@@ -213,14 +277,16 @@ def decode_http_file_data(value: str) -> str:
     except Exception:
         return raw
 
-    for enc in ("utf-8", "gb18030", "latin1"):
+    for enc in ("utf-8", "latin1"):
         try:
             decoded = data.decode(enc)
         except Exception:
             continue
-        if is_mostly_readable(decoded):
+        decoded = maybe_unquote_payload(decoded)
+        if looks_like_text_payload(decoded):
             return decoded
 
+    # 对不可读负载保留原始 hex，避免输出乱码误导检测。
     return raw
 
 
@@ -270,13 +336,13 @@ def response_block(resp: Optional[Dict]) -> str:
     return "\n".join(lines)
 
 
-def write_canonical_batch(path: Path, file_id: str, batch_size: int, port: int, cases: List[Dict]):
+def write_canonical_batch(path: Path, file_id: str, batch_size: int, port_desc: str, cases: List[Dict]):
     lines: List[str] = []
     lines.append("### BATCH_START ###")
     lines.append(f"file_id={file_id}")
     lines.append(f"batch_size={batch_size}")
     lines.append("source=live_capture")
-    lines.append(f"port={port}")
+    lines.append(f"port={port_desc}")
     lines.append("capture_mode=canonical_http_batch")
     lines.append("### BATCH_META_END ###")
     lines.append("")
@@ -353,6 +419,7 @@ def build_response_from_fields(fields: Dict[str, str], request_in_field: str) ->
 def main():
     parser = argparse.ArgumentParser(description="持续抓包并按完整 HTTP 请求/响应记录生成 1.1.n.txt")
     parser.add_argument("--port", type=int, default=10086, help="抓包端口，默认 10086")
+    parser.add_argument("--ports", default="", help="多端口监听，逗号分隔，如 80,443,8080；为空则用 --port")
     parser.add_argument("--batch-size", type=int, default=20, help="每个 batch 的完整请求/响应数量")
     parser.add_argument("--input-dir", default="input", help="输出 txt 目录")
     parser.add_argument("--interface", default="", help="手动指定网卡关键字")
@@ -361,7 +428,8 @@ def main():
     parser.add_argument("--once", action="store_true", help="仅生成一个 batch 后退出")
     args = parser.parse_args()
 
-    decode_port = args.decode_http_port if args.decode_http_port is not None else args.port
+    monitor_ports = parse_ports(args.port, args.ports)
+    decode_ports = [args.decode_http_port] if args.decode_http_port is not None else list(monitor_ports)
 
     tshark_exe = find_executable("tshark")
     request_in_field, response_in_field = detect_http_link_fields(tshark_exe)
@@ -376,8 +444,8 @@ def main():
     print("自动抓包启动（完整 HTTP 请求/响应配对模式）")
     print("tshark:", tshark_exe)
     print("网卡:", iface)
-    print("端口:", args.port)
-    print("HTTP decode 端口:", decode_port)
+    print("监听端口:", ",".join(str(p) for p in monitor_ports))
+    print("HTTP decode 端口:", ",".join(str(p) for p in decode_ports))
     print("batch 大小:", args.batch_size)
     print("input 目录:", input_dir.resolve())
     print("request_in 字段:", request_in_field)
@@ -403,6 +471,11 @@ def main():
         response_in_field,
     ]
 
+    if len(monitor_ports) == 1:
+        bpf_filter = f"tcp port {monitor_ports[0]}"
+    else:
+        bpf_filter = " or ".join(f"tcp port {p}" for p in monitor_ports)
+
     cmd = [
         tshark_exe,
         "-l",
@@ -410,11 +483,9 @@ def main():
         "-i",
         str(iface),
         "-f",
-        f"tcp port {args.port}",
+        bpf_filter,
         "-Y",
         "http.request or http.response",
-        "-d",
-        f"tcp.port=={decode_port},http",
         "-T",
         "fields",
         "-E",
@@ -424,6 +495,9 @@ def main():
         "-E",
         "occurrence=f",
     ]
+
+    for dp in decode_ports:
+        cmd.extend(["-d", f"tcp.port=={dp},http"])
 
     for h in headers:
         cmd.extend(["-e", h])
@@ -501,7 +575,13 @@ def main():
                         file_id = f"1.1.{next_idx}"
                         output_txt = input_dir / f"{file_id}.txt"
                         to_write = completed_cases[: args.batch_size]
-                        write_canonical_batch(output_txt, file_id=file_id, batch_size=args.batch_size, port=decode_port, cases=to_write)
+                        write_canonical_batch(
+                            output_txt,
+                            file_id=file_id,
+                            batch_size=args.batch_size,
+                            port_desc=",".join(str(p) for p in decode_ports),
+                            cases=to_write,
+                        )
 
                         seq_from = 1
                         seq_to = len(to_write)

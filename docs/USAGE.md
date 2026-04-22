@@ -131,20 +131,22 @@ python scripts/build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/r
 
 ## 8. 登录账号
 
-前端演示账号统一：`admin / admin`
+前端演示账号：
+
+- 普通用户：`user / admin`
+- 管理员：`admin / admin`
 
 身份由登录页角色按钮决定：
 
 - 普通用户（normal）
-- 专业用户（pro）
 - 管理员（admin）
 
 登录后推荐页面结构：
 
 - 数据大屏
 - 详情信息
-- RAG数据库设置
-- （管理员附加）全局概览 / 操作日志 / 系统配置
+- 用户中心（可改密码）
+- （管理员附加）RAG数据库设置 / 全局概览 / 操作日志 / 系统配置 / 管理用户
 
 ## 9. 快速自检
 

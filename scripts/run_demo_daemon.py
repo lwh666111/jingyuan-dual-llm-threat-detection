@@ -30,14 +30,23 @@ def load_state(path: Path) -> Dict:
             "version": 1,
             "success": {},
             "failed": {},
+            "ignored": {},
         }
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("invalid state object")
+        state.setdefault("version", 1)
+        state.setdefault("success", {})
+        state.setdefault("failed", {})
+        state.setdefault("ignored", {})
+        return state
     except Exception:
         return {
             "version": 1,
             "success": {},
             "failed": {},
+            "ignored": {},
         }
 
 
@@ -108,8 +117,29 @@ def process_one(args, state: Dict, path: Path, idx: int, log_file: Path) -> bool
     success_info = state.get("success", {}).get(key)
     if success_info:
         return False
+    ignored_info = state.get("ignored", {}).get(key)
+    if ignored_info:
+        return False
 
     failed_info = state.get("failed", {}).get(key, {})
+    if args.max_fail_attempts > 0:
+        failed_attempts = int(failed_info.get("attempts", 0))
+        if failed_attempts >= args.max_fail_attempts:
+            state.setdefault("ignored", {})[key] = {
+                "index": idx,
+                "path": str(path.resolve()),
+                "ignored_at": now_iso(),
+                "reason": "max_fail_attempts_reached",
+                "attempts": failed_attempts,
+            }
+            state.setdefault("failed", {}).pop(key, None)
+            save_state(args.state_file, state)
+            log(
+                f"SKIP #{idx}: {path.name} ignored after {failed_attempts} failed attempts",
+                log_file,
+            )
+            return False
+
     if not should_retry_failed(failed_info, args.retry_cooldown):
         return False
 
@@ -160,8 +190,25 @@ def process_one(args, state: Dict, path: Path, idx: int, log_file: Path) -> bool
         "last_returncode": result.returncode,
         "run_log": str(run_log.resolve()),
     }
+    if args.max_fail_attempts > 0 and attempts >= args.max_fail_attempts:
+        state.setdefault("ignored", {})[key] = {
+            "index": idx,
+            "path": str(path.resolve()),
+            "ignored_at": now_iso(),
+            "reason": "max_fail_attempts_reached",
+            "attempts": attempts,
+            "last_returncode": result.returncode,
+            "run_log": str(run_log.resolve()),
+        }
+        state.setdefault("failed", {}).pop(key, None)
     save_state(args.state_file, state)
-    log(f"FAIL #{idx}: {path.name} rc={result.returncode} attempts={attempts}", log_file)
+    if args.max_fail_attempts > 0 and attempts >= args.max_fail_attempts:
+        log(
+            f"FAIL #{idx}: {path.name} rc={result.returncode} attempts={attempts} -> ignored",
+            log_file,
+        )
+    else:
+        log(f"FAIL #{idx}: {path.name} rc={result.returncode} attempts={attempts}", log_file)
     return True
 
 
@@ -184,6 +231,7 @@ def main() -> None:
     parser.add_argument("--poll-seconds", type=int, default=5, help="轮询间隔秒")
     parser.add_argument("--stable-seconds", type=int, default=3, help="文件静止判定秒")
     parser.add_argument("--retry-cooldown", type=int, default=30, help="失败重试冷却秒")
+    parser.add_argument("--max-fail-attempts", type=int, default=5, help="单文件失败超过该次数后自动忽略；0=无限重试")
     parser.add_argument("--once", action="store_true", help="只扫描并处理一次后退出")
     parser.add_argument(
         "--skip-existing-at-start",

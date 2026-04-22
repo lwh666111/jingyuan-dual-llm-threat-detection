@@ -1,6 +1,7 @@
-﻿import argparse
+import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -107,14 +108,120 @@ def apply_db_config(args, parser: argparse.ArgumentParser, project_root: Path) -
         args.mysql_database = mysql_cfg["database"]
 
 
-def build_capture_cmd(args, script_dir: Path, input_dir: Path) -> List[str]:
+def parse_ports_text(text: str, fallback: List[int]) -> List[int]:
+    raw = (text or "").strip()
+    if not raw:
+        return [int(x) for x in fallback]
+    parts = [x for x in re.split(r"[\s,]+", raw) if x]
+    if not parts:
+        return [int(x) for x in fallback]
+    ports: List[int] = []
+    seen = set()
+    for part in parts:
+        if not part.isdigit():
+            raise ValueError(f"invalid port token: {part}")
+        port = int(part)
+        if port < 1 or port > 65535:
+            raise ValueError(f"invalid port range: {port}")
+        if port in seen:
+            continue
+        seen.add(port)
+        ports.append(port)
+    if not ports:
+        return [int(x) for x in fallback]
+    return ports
+
+
+def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_size: int) -> Dict:
+    cfg = {
+        "ports": [int(x) for x in fallback_ports],
+        "batch_size": int(fallback_batch_size),
+        "source": "cli",
+        "error": "",
+    }
+
+    if not getattr(args, "capture_use_db_config", True):
+        return cfg
+    if str(getattr(args, "db_backend", "")).lower() != "mysql":
+        return cfg
+
+    try:
+        import pymysql
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"pymysql_import_failed: {exc}"
+        return cfg
+
+    try:
+        conn = pymysql.connect(
+            host=args.mysql_host,
+            port=int(args.mysql_port),
+            user=args.mysql_user,
+            password=args.mysql_password,
+            database=args.mysql_database,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT config_key, config_value
+                    FROM demo_system_config
+                    WHERE config_key IN ('monitor_ports', 'capture_batch_size')
+                    """
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"mysql_read_failed: {exc}"
+        return cfg
+
+    kv = {str(x.get("config_key", "")).strip(): str(x.get("config_value", "")).strip() for x in rows}
+    try:
+        if kv.get("monitor_ports"):
+            cfg["ports"] = parse_ports_text(kv.get("monitor_ports", ""), fallback_ports)
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"invalid_monitor_ports: {exc}"
+        return cfg
+
+    if kv.get("capture_batch_size"):
+        try:
+            batch = int(kv["capture_batch_size"])
+            if 1 <= batch <= 128:
+                cfg["batch_size"] = batch
+            else:
+                cfg["error"] = f"invalid_capture_batch_size: {batch}"
+                return cfg
+        except Exception as exc:  # noqa: BLE001
+            cfg["error"] = f"invalid_capture_batch_size: {exc}"
+            return cfg
+
+    cfg["source"] = "db"
+    return cfg
+
+
+def build_capture_cmd(
+    args,
+    script_dir: Path,
+    input_dir: Path,
+    monitor_ports: Optional[List[int]] = None,
+    batch_size: Optional[int] = None,
+) -> List[str]:
+    ports = list(monitor_ports or [args.port])
+    if not ports:
+        ports = [args.port]
+    batch = int(batch_size if batch_size is not None else args.capture_batch_size)
     cmd = [
         args.python_exe,
         str(script_dir / "capture_http_request_batches.py"),
         "--port",
-        str(args.port),
+        str(ports[0]),
+        "--ports",
+        ",".join(str(p) for p in ports),
         "--batch-size",
-        str(args.capture_batch_size),
+        str(batch),
         "--input-dir",
         str(input_dir),
     ]
@@ -267,8 +374,9 @@ def build_api_cmd(args, script_dir: Path) -> List[str]:
         args.rag_db_path,
         "--rag-seed-file",
         args.rag_seed_file,
-        "--seed-demo",
     ]
+    if args.api_seed_demo:
+        cmd.append("--seed-demo")
     return cmd
 
 
@@ -312,6 +420,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
     capture_group = parser.add_argument_group("抓包设置")
     capture_group.add_argument("--port", type=int, default=80, help="监听 TCP 端口（可改成任意端口，如 3000/10086）")
+    capture_group.add_argument("--ports", default="", help="监听端口列表，逗号分隔；为空则仅监听 --port")
     capture_group.add_argument(
         "--decode-http-port",
         type=int,
@@ -325,6 +434,20 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default=4,
         help="每累计多少条完整 HTTP 请求/响应写一个 1.1.n.txt",
     )
+    capture_group.add_argument("--capture-config-poll-seconds", type=int, default=5, help="抓包配置热更新轮询间隔（秒）")
+    capture_group.add_argument(
+        "--capture-use-db-config",
+        dest="capture_use_db_config",
+        action="store_true",
+        help="优先读取数据库 demo_system_config 中的 monitor_ports/capture_batch_size",
+    )
+    capture_group.add_argument(
+        "--no-capture-use-db-config",
+        dest="capture_use_db_config",
+        action="store_false",
+        help="仅使用 CLI 抓包参数，不读取数据库抓包配置",
+    )
+    parser.set_defaults(capture_use_db_config=True)
 
     detect_group = parser.add_argument_group("自动检测设置")
     detect_group.add_argument("--poll-seconds", type=int, default=5, help="守护轮询间隔（秒）")
@@ -441,6 +564,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(enable_api=True)
     api_group.add_argument("--api-host", default="127.0.0.1", help="Flask API 绑定地址")
     api_group.add_argument("--api-port", type=int, default=3049, help="Flask API 端口")
+    api_group.add_argument(
+        "--api-seed-demo",
+        dest="api_seed_demo",
+        action="store_true",
+        help="启动 API 时自动写入演示数据（仅用于空库初始化）",
+    )
+    api_group.add_argument(
+        "--no-api-seed-demo",
+        dest="api_seed_demo",
+        action="store_false",
+        help="启动 API 时不写入演示数据",
+    )
+    parser.set_defaults(api_seed_demo=False)
 
     dashboard_group = parser.add_argument_group("前端大屏服务（默认启用）")
     dashboard_group.add_argument(
@@ -528,6 +664,33 @@ def main() -> None:
     run_api = args.enable_api and not args.only_capture
     run_dashboard = args.enable_dashboard and not args.only_capture
 
+    try:
+        cli_capture_ports = parse_ports_text(args.ports, [args.port])
+    except Exception as exc:  # noqa: BLE001
+        parser.error(f"--ports 参数无效: {exc}")
+    cli_capture_batch_size = int(args.capture_batch_size)
+    capture_runtime_cfg = {
+        "ports": cli_capture_ports,
+        "batch_size": cli_capture_batch_size,
+        "source": "cli",
+        "error": "",
+    }
+    capture_config_error_logged = ""
+    if run_capture:
+        capture_runtime_cfg = load_capture_runtime_config(args, cli_capture_ports, cli_capture_batch_size)
+        if capture_runtime_cfg.get("error"):
+            log(
+                f"capture config load failed, fallback to CLI: {capture_runtime_cfg.get('error')}",
+                output_dir / "app_runtime" / "app.log",
+            )
+            capture_runtime_cfg = {
+                "ports": cli_capture_ports,
+                "batch_size": cli_capture_batch_size,
+                "source": "cli",
+                "error": "",
+            }
+            capture_config_error_logged = "fallback_logged"
+
     dashboard_server = (project_root / args.dashboard_server_script).resolve()
 
     required_scripts = [
@@ -564,7 +727,17 @@ def main() -> None:
     dashboard_stdout = runtime_dir / "dashboard_stdout.log"
     dashboard_stderr = runtime_dir / "dashboard_stderr.log"
 
-    capture_cmd = build_capture_cmd(args, scripts_dir, input_dir) if run_capture else []
+    capture_cmd = (
+        build_capture_cmd(
+            args,
+            scripts_dir,
+            input_dir,
+            monitor_ports=capture_runtime_cfg["ports"],
+            batch_size=capture_runtime_cfg["batch_size"],
+        )
+        if run_capture
+        else []
+    )
     daemon_cmd = build_daemon_cmd(args, scripts_dir, input_dir, output_dir) if run_daemon else []
     llm_cmd = build_llm_cmd(args, scripts_dir) if run_llm else []
     db_cmd = build_db_cmd(args, scripts_dir) if run_db else []
@@ -580,6 +753,13 @@ def main() -> None:
     )
     if run_capture:
         log("capture cmd: " + " ".join(capture_cmd), app_log)
+        log(
+            "capture config: "
+            + f"source={capture_runtime_cfg.get('source')} "
+            + f"ports={capture_runtime_cfg.get('ports')} "
+            + f"batch_size={capture_runtime_cfg.get('batch_size')}",
+            app_log,
+        )
     if run_daemon:
         log("daemon  cmd: " + " ".join(daemon_cmd), app_log)
     if run_llm:
@@ -703,6 +883,9 @@ def main() -> None:
             "capture": {
                 "pid": capture_proc.pid if capture_proc else None,
                 "cmd": capture_cmd,
+                "config_source": capture_runtime_cfg.get("source"),
+                "monitor_ports": capture_runtime_cfg.get("ports"),
+                "batch_size": capture_runtime_cfg.get("batch_size"),
                 "stdout": str(capture_stdout),
                 "stderr": str(capture_stderr),
             },
@@ -742,6 +925,13 @@ def main() -> None:
         }
         write_runtime_state(state_file, runtime_state)
 
+        capture_cfg_key = (
+            f"ports={','.join(str(x) for x in capture_runtime_cfg.get('ports', []))}|"
+            f"batch={capture_runtime_cfg.get('batch_size')}"
+        )
+        next_capture_cfg_check_ts = 0.0
+        capture_cfg_poll_seconds = max(1, int(args.capture_config_poll_seconds))
+
         log("workflow is running; press Ctrl+C to stop all", app_log)
 
         while True:
@@ -758,6 +948,55 @@ def main() -> None:
             db_alive = db_proc is not None and db_rc is None
             api_alive = api_proc is not None and api_rc is None
             dashboard_alive = dashboard_proc is not None and dashboard_rc is None
+
+            if run_capture and capture_proc and cap_rc is None and time.time() >= next_capture_cfg_check_ts:
+                next_capture_cfg_check_ts = time.time() + capture_cfg_poll_seconds
+                updated_cfg = load_capture_runtime_config(args, cli_capture_ports, cli_capture_batch_size)
+                cfg_error = str(updated_cfg.get("error") or "")
+                if cfg_error:
+                    if cfg_error != capture_config_error_logged:
+                        log(f"capture config reload failed, keep current: {cfg_error}", app_log)
+                    capture_config_error_logged = cfg_error
+                else:
+                    capture_config_error_logged = ""
+                    new_cfg_key = (
+                        f"ports={','.join(str(x) for x in updated_cfg.get('ports', []))}|"
+                        f"batch={updated_cfg.get('batch_size')}"
+                    )
+                    if new_cfg_key != capture_cfg_key:
+                        new_capture_cmd = build_capture_cmd(
+                            args,
+                            scripts_dir,
+                            input_dir,
+                            monitor_ports=updated_cfg["ports"],
+                            batch_size=updated_cfg["batch_size"],
+                        )
+                        log(
+                            "capture config changed, restarting capture: "
+                            + f"source={updated_cfg.get('source')} ports={updated_cfg.get('ports')} "
+                            + f"batch_size={updated_cfg.get('batch_size')}",
+                            app_log,
+                        )
+                        terminate_process(capture_proc, "capture", app_log)
+                        capture_proc = subprocess.Popen(
+                            new_capture_cmd,
+                            cwd=str(project_root),
+                            stdout=capture_out_f,
+                            stderr=capture_err_f,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        capture_cmd = new_capture_cmd
+                        capture_runtime_cfg = updated_cfg
+                        capture_cfg_key = new_cfg_key
+                        runtime_state["capture"]["pid"] = capture_proc.pid
+                        runtime_state["capture"]["cmd"] = capture_cmd
+                        runtime_state["capture"]["config_source"] = capture_runtime_cfg.get("source")
+                        runtime_state["capture"]["monitor_ports"] = capture_runtime_cfg.get("ports")
+                        runtime_state["capture"]["batch_size"] = capture_runtime_cfg.get("batch_size")
+                        write_runtime_state(state_file, runtime_state)
+                        log(f"capture restarted pid={capture_proc.pid}", app_log)
 
             if run_capture and capture_proc and cap_rc is not None:
                 log(f"capture exited rc={cap_rc}", app_log)

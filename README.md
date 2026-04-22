@@ -269,8 +269,7 @@ python scripts\platform_api_demo.py
 
 Demo login accounts (frontend hard-coded):
 
-- normal user: `admin / admin`
-- pro user: `admin / admin`
+- normal user: `user / admin`
 - admin user: `admin / admin`
 - role is decided by the selected identity button on login page
 
@@ -280,6 +279,7 @@ Auth:
 - `POST /api/v2/auth/login`
 - `POST /api/v2/auth/logout`
 - `GET /api/v2/auth/profile`
+- `POST /api/v2/auth/change-password`
 
 Common:
 
@@ -297,13 +297,10 @@ Normal user dashboard:
 - `GET /api/v2/user/dashboard/heatmap`
 - `GET /api/v2/user/dashboard/method-share`
 
-Pro user:
+Details view:
 
 - `GET /api/v2/pro/events?time_range=24h&page=1&page_size=20`
 - `GET /api/v2/pro/events/{event_id}`
-- `POST /api/v2/pro/events/batch-status`
-- `POST /api/v2/pro/events/{event_id}/note`
-- `GET /api/v2/pro/model/performance`
 - `GET /api/v2/pro/nodes/{node_name}/detail`
 
 Admin:
@@ -317,6 +314,15 @@ Admin:
 - `GET /api/v2/admin/user-op-logs?page=1&page_size=30`
 - `GET /api/v2/admin/config`
 - `PUT /api/v2/admin/config`
+- `GET /api/v2/admin/users`
+- `PUT /api/v2/admin/users/{username}/password`
+- `GET /api/v2/rag/docs`
+- `POST /api/v2/rag/docs`
+- `POST /api/v2/rag/docs/{doc_id}/delete`
+- `POST /api/v2/rag/rebuild`
+- `POST /api/v2/pro/events/batch-status`
+- `POST /api/v2/pro/events/{event_id}/note`
+- `GET /api/v2/pro/model/performance`
 - `GET /api/v2/admin/reports/export`
 
 ## Logs and State

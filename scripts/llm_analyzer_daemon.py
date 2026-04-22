@@ -346,6 +346,19 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
     }
 
 
+def should_retry_llm_error(err_text: str) -> bool:
+    text = (err_text or "").lower()
+    retry_tokens = [
+        "timed out",
+        "connection refused",
+        "winerror 10061",
+        "llama runner process has terminated",
+        "http 500",
+        "internal server error",
+    ]
+    return any(tok in text for tok in retry_tokens)
+
+
 def process_case(
     case_dir: Path,
     input_dir: Path,
@@ -405,42 +418,55 @@ def process_case(
 
     user_payload = build_user_payload(case_obj, request_text, response_text, src_ip, dst_ip, rag_context=rag_context)
 
-    try:
-        parsed, raw_content = call_ollama_chat(
-            base_url=args.ollama_url,
-            model=args.model,
-            system_prompt=system_prompt,
-            user_payload=user_payload,
-            schema_obj=schema_obj,
-            timeout_sec=args.timeout_sec,
-            num_ctx=args.num_ctx,
-            num_gpu=args.num_gpu,
-            temperature=args.temperature,
-        )
+    models_to_try: List[str] = [args.model]
+    fallback_model = str(getattr(args, "fallback_model_resolved", "") or "").strip()
+    if fallback_model and fallback_model not in models_to_try:
+        models_to_try.append(fallback_model)
 
-        analysis = normalize_analysis(parsed, case_obj, src_ip, dst_ip, args.model)
-        analysis["rag_hits"] = len(rag_rows)
-        analysis["rag_enabled"] = bool(args.rag_enable)
-        write_json(analysis_path, analysis)
-        analysis_raw_path.write_text(raw_content or "", encoding="utf-8")
+    last_exc: Optional[Exception] = None
+    for idx, model_name in enumerate(models_to_try):
+        try:
+            parsed, raw_content = call_ollama_chat(
+                base_url=args.ollama_url,
+                model=model_name,
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                schema_obj=schema_obj,
+                timeout_sec=args.timeout_sec,
+                num_ctx=args.num_ctx,
+                num_gpu=args.num_gpu,
+                temperature=args.temperature,
+            )
 
-        case_obj["llm_status"] = "done"
-        case_obj.pop("llm_error", None)
-        case_obj.pop("llm_failed_at", None)
-        case_obj["analysis_file"] = str(analysis_path.resolve())
-        case_obj["analysis_raw_file"] = str(analysis_raw_path.resolve())
-        case_obj["rag_hits"] = len(rag_rows)
-        case_obj["analyzed_at"] = now_iso()
-        case_obj["status"] = case_obj.get("status") or "pending"
-        write_json(case_json_path, case_obj)
-        return "done"
+            analysis = normalize_analysis(parsed, case_obj, src_ip, dst_ip, model_name)
+            analysis["rag_hits"] = len(rag_rows)
+            analysis["rag_enabled"] = bool(args.rag_enable)
+            write_json(analysis_path, analysis)
+            analysis_raw_path.write_text(raw_content or "", encoding="utf-8")
 
-    except Exception as exc:  # noqa: BLE001
-        case_obj["llm_status"] = "failed"
-        case_obj["llm_error"] = str(exc)
-        case_obj["llm_failed_at"] = now_iso()
-        write_json(case_json_path, case_obj)
-        return f"failed({exc})"
+            case_obj["llm_status"] = "done"
+            case_obj.pop("llm_error", None)
+            case_obj.pop("llm_failed_at", None)
+            case_obj["analysis_file"] = str(analysis_path.resolve())
+            case_obj["analysis_raw_file"] = str(analysis_raw_path.resolve())
+            case_obj["rag_hits"] = len(rag_rows)
+            case_obj["analyzed_at"] = now_iso()
+            case_obj["status"] = case_obj.get("status") or "pending"
+            write_json(case_json_path, case_obj)
+            return "done"
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if idx < len(models_to_try) - 1 and should_retry_llm_error(str(exc)):
+                next_model = models_to_try[idx + 1]
+                log(f"{case_dir.name}: model={model_name} failed ({exc}), retry with {next_model}")
+                continue
+            break
+
+    case_obj["llm_status"] = "failed"
+    case_obj["llm_error"] = str(last_exc) if last_exc else "unknown_error"
+    case_obj["llm_failed_at"] = now_iso()
+    write_json(case_json_path, case_obj)
+    return f"failed({last_exc})"
 
 
 def main() -> None:
@@ -460,6 +486,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--once", action="store_true", help="仅扫描一次并处理后退出")
     parser.add_argument("--max-cases", type=int, default=0, help="每轮最多处理多少条，0=不限制")
+    parser.add_argument("--fallback-model", default="", help="主模型失败时的回退模型，留空则自动选择已安装的其他模型")
+    parser.add_argument(
+        "--processing-timeout-sec",
+        type=int,
+        default=180,
+        help="case 长时间停留 processing 的超时秒数，超时后自动重置为 pending",
+    )
     parser.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="启用 RAG 检索增强")
     parser.add_argument("--no-rag", dest="rag_enable", action="store_false", help="关闭 RAG 检索增强")
     parser.set_defaults(rag_enable=True)
@@ -497,6 +530,19 @@ def main() -> None:
         log("RAG disabled")
 
     args.model = resolve_model_name(args.ollama_url, args.model, timeout_sec=10)
+    installed_models = fetch_available_models(base_url=args.ollama_url, timeout_sec=10)
+    fallback_model = str(args.fallback_model or "").strip()
+    if fallback_model and fallback_model not in installed_models:
+        log(f"configured fallback model '{fallback_model}' not found, ignore fallback")
+        fallback_model = ""
+    if not fallback_model:
+        for m in installed_models:
+            if m != args.model:
+                fallback_model = m
+                break
+    args.fallback_model_resolved = fallback_model
+    if args.fallback_model_resolved:
+        log(f"fallback model enabled: {args.fallback_model_resolved}")
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
     log(f"result_dir={result_dir}")
 
@@ -507,6 +553,27 @@ def main() -> None:
         for case_dir in case_dirs:
             case_obj = read_json(case_dir / "case.json", default={})
             llm_status = str(case_obj.get("llm_status") or "pending").lower()
+
+            if llm_status == "processing":
+                started_at = str(case_obj.get("llm_started_at") or "").strip()
+                stale = False
+                if started_at:
+                    try:
+                        elapsed = time.time() - datetime.fromisoformat(started_at).timestamp()
+                        stale = elapsed >= max(30, int(args.processing_timeout_sec))
+                    except Exception:
+                        stale = True
+                else:
+                    stale = True
+
+                if stale:
+                    case_obj["llm_status"] = "pending"
+                    case_obj["llm_recovered_at"] = now_iso()
+                    write_json(case_dir / "case.json", case_obj)
+                    log(f"{case_dir.name}: stale processing recovered -> pending")
+                    llm_status = "pending"
+                else:
+                    continue
 
             if llm_status not in ("pending", "failed"):
                 continue

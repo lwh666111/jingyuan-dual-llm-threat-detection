@@ -1,17 +1,14 @@
 const ROLE_NORMAL = "normal";
-const ROLE_PRO = "pro";
 const ROLE_ADMIN = "admin";
 
 const DEMO_CREDENTIALS = {
-  normal: { username: "admin", password: "admin" },
-  pro: { username: "admin", password: "admin" },
+  normal: { username: "user", password: "admin" },
   admin: { username: "admin", password: "admin" },
 };
 
 const ROLE_LABEL = {
-  normal: "普通用户",
-  pro: "专业用户",
-  admin: "管理员",
+  normal: "\u666e\u901a\u7528\u6237",
+  admin: "\u7ba1\u7406\u5458",
 };
 
 const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -69,6 +66,7 @@ const state = {
     logsTotal: 0,
     logsUsername: "",
     config: {},
+    users: [],
   },
   rag: {
     page: 1,
@@ -124,7 +122,6 @@ function renderLoginPage() {
           <label>身份快捷切换</label>
           <div class="role-switch">
             <button class="btn active" data-login-role="${ROLE_NORMAL}">普通用户</button>
-            <button class="btn" data-login-role="${ROLE_PRO}">专业用户</button>
             <button class="btn" data-login-role="${ROLE_ADMIN}">管理员</button>
           </div>
         </div>
@@ -245,26 +242,20 @@ function renderTabs() {
 function getTabsByRole(role) {
   if (role === ROLE_ADMIN) {
     return [
-      { id: "screen", label: "数据大屏" },
-      { id: "pro-query", label: "详情信息" },
-      { id: "rag-settings", label: "RAG数据库设置" },
-      { id: "admin-overview", label: "全局概览" },
-      { id: "admin-logs", label: "操作日志" },
-      { id: "admin-config", label: "系统配置" },
-    ];
-  }
-  if (role === ROLE_PRO) {
-    return [
-      { id: "screen", label: "数据大屏" },
-      { id: "pro-query", label: "详情信息" },
-      { id: "rag-settings", label: "RAG数据库设置" },
-      { id: "pro-model", label: "模型性能" },
+      { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
+      { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
+      { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
+      { id: "rag-settings", label: "\u77e5\u8bc6\u5e93\u8bbe\u7f6e\uff08RAG\uff09" },
+      { id: "admin-overview", label: "\u5168\u5c40\u6982\u89c8" },
+      { id: "admin-logs", label: "\u64cd\u4f5c\u65e5\u5fd7" },
+      { id: "admin-config", label: "\u7cfb\u7edf\u914d\u7f6e" },
+      { id: "admin-users", label: "\u7ba1\u7406\u7528\u6237" },
     ];
   }
   return [
-    { id: "screen", label: "数据大屏" },
-    { id: "pro-query", label: "详情信息" },
-    { id: "rag-settings", label: "RAG数据库设置" },
+    { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
+    { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
+    { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
   ];
 }
 
@@ -289,9 +280,8 @@ function switchView(viewId) {
     setViewRefresh(15000, loadRagDocs);
     return;
   }
-  if (viewId === "pro-model") {
-    renderProModelView();
-    setViewRefresh(15000, refreshProModelPerformance);
+  if (viewId === "user-center") {
+    renderUserCenterView();
     return;
   }
   if (viewId === "admin-overview") {
@@ -306,6 +296,10 @@ function switchView(viewId) {
   }
   if (viewId === "admin-config") {
     renderAdminConfigView();
+    return;
+  }
+  if (viewId === "admin-users") {
+    renderAdminUsersView();
     return;
   }
 }
@@ -476,7 +470,7 @@ function renderTicker(items) {
 function renderProQueryView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
-  const canHandle = state.profile?.role === ROLE_PRO || state.profile?.role === ROLE_ADMIN;
+  const canHandle = state.profile?.role === ROLE_ADMIN;
   root.innerHTML = `
     <section class="panel">
       <div class="panel-head">
@@ -505,7 +499,7 @@ function renderProQueryView() {
         </div>
         <div class="ops-group">
           <button id="pro_refresh" class="btn btn-success">刷新</button>
-          <button id="pro_export" class="btn btn-ghost">导出Excel(CSV)</button>
+          <button id="pro_export" class="btn btn-ghost">导出表格（CSV）</button>
         </div>
       </div>
       <div id="pro_custom_time" class="filter-group hidden" style="margin-top:8px;grid-template-columns:repeat(2,minmax(220px,1fr));">
@@ -706,11 +700,11 @@ function renderProTable() {
             <td><span class="link-btn" data-pro-event="${escapeHtml(row.event_id)}">${escapeHtml(row.event_id)}</span></td>
             <td>${escapeHtml(row.occurred_at || "-")}</td>
             <td>${riskBadge(row.risk_level)}</td>
-            <td>${escapeHtml(row.attack_type || "-")}</td>
+            <td>${escapeHtml(formatAttackType(row.attack_type || "-"))}</td>
             <td>${escapeHtml(row.source_ip || "-")}</td>
             <td><span class="link-btn" data-pro-node="${escapeHtml(row.target_node || "")}">${escapeHtml(row.target_node || "-")}</span></td>
-            <td>${escapeHtml(row.attack_result || "-")}</td>
-            <td>${escapeHtml(row.process_status || "-")}</td>
+            <td>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</td>
+            <td>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</td>
           </tr>
         `;
       })
@@ -776,12 +770,12 @@ function renderProEventDetail() {
       <div class="kv"><strong>事件ID：</strong>${escapeHtml(row.event_id || "-")}</div>
       <div class="kv"><strong>发生时间：</strong>${escapeHtml(row.occurred_at || "-")}</div>
       <div class="kv"><strong>风险等级：</strong>${riskBadge(row.risk_level)}</div>
-      <div class="kv"><strong>攻击类型：</strong>${escapeHtml(row.attack_type || "-")}</div>
+      <div class="kv"><strong>攻击类型：</strong>${escapeHtml(formatAttackType(row.attack_type || "-"))}</div>
       <div class="kv"><strong>来源IP：</strong>${escapeHtml(row.source_ip || "-")} (${escapeHtml(row.source_region || "-")})</div>
       <div class="kv"><strong>目标节点：</strong>${escapeHtml(row.target_node || "-")}</div>
       <div class="kv"><strong>目标接口：</strong>${escapeHtml(row.target_interface || "-")}</div>
-      <div class="kv"><strong>攻击结果：</strong>${escapeHtml(row.attack_result || "-")}</div>
-      <div class="kv"><strong>处理状态：</strong>${escapeHtml(row.process_status || "-")}</div>
+      <div class="kv"><strong>攻击结果：</strong>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</div>
+      <div class="kv"><strong>处理状态：</strong>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</div>
       <div class="kv"><strong>响应耗时：</strong>${escapeHtml(String(row.response_ms || 0))} ms</div>
     </div>
     <div style="margin-top:8px;" class="kv"><strong>攻击载荷：</strong></div>
@@ -880,12 +874,12 @@ function exportProEventsCsv() {
 function renderRagSettingsView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
-  const canRebuild = state.profile?.role === ROLE_PRO || state.profile?.role === ROLE_ADMIN;
+  const canRebuild = state.profile?.role === ROLE_ADMIN;
 
   root.innerHTML = `
     <section class="panel">
       <div class="panel-head">
-        <h3 class="panel-title">RAG数据库设置</h3>
+        <h3 class="panel-title">知识库设置（RAG）</h3>
         <div style="display:flex;gap:8px;">
           <button id="rag_refresh" class="btn btn-success">刷新</button>
           <button id="rag_rebuild" class="btn btn-danger" ${canRebuild ? "" : "disabled"}>按种子重建</button>
@@ -907,7 +901,7 @@ function renderRagSettingsView() {
           <table>
             <thead>
               <tr>
-                <th>doc_id</th>
+                <th>文档ID</th>
                 <th>标题</th>
                 <th>攻击类型</th>
                 <th>严重度</th>
@@ -933,10 +927,10 @@ function renderRagSettingsView() {
           <div>
             <label class="panel-sub">严重度</label>
             <select id="rag_new_severity">
-              <option value="low">low</option>
-              <option value="medium" selected>medium</option>
-              <option value="high">high</option>
-              <option value="critical">critical</option>
+              <option value="low">低</option>
+              <option value="medium" selected>中</option>
+              <option value="high">高</option>
+              <option value="critical">严重</option>
             </select>
           </div>
         </div>
@@ -953,7 +947,7 @@ function renderRagSettingsView() {
           <textarea id="rag_new_mitigation" rows="3" placeholder="缓解与处置建议"></textarea>
         </div>
         <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-          <button id="rag_add_doc" class="btn btn-primary">新增到RAG库</button>
+          <button id="rag_add_doc" class="btn btn-primary">新增到知识库</button>
         </div>
       </article>
     </section>
@@ -1220,7 +1214,7 @@ function renderAdminMachineTable() {
         <td><span class="link-btn" data-adm-machine="${x.id}">${escapeHtml(x.machine_name || "-")}</span></td>
         <td>${escapeHtml(x.ip_address || "-")}</td>
         <td>${escapeHtml(x.deploy_location || "-")}</td>
-        <td>${escapeHtml(x.online_status || "-")}</td>
+        <td>${escapeHtml(formatOnlineStatus(x.online_status || "-"))}</td>
         <td>${escapeHtml(String(x.today_attack_count || 0))}</td>
         <td>${escapeHtml(String(x.current_alert_count || 0))}</td>
         <td>${escapeHtml(x.last_heartbeat || "-")}</td>
@@ -1252,11 +1246,11 @@ async function loadAdminMachineDetail(machineId) {
       <div class="kv"><strong>机器：</strong>${escapeHtml(machine.machine_name || "-")}</div>
       <div class="kv"><strong>IP：</strong>${escapeHtml(machine.ip_address || "-")}</div>
       <div class="kv"><strong>部署位置：</strong>${escapeHtml(machine.deploy_location || "-")}</div>
-      <div class="kv"><strong>在线状态：</strong>${escapeHtml(machine.online_status || "-")}</div>
+      <div class="kv"><strong>在线状态：</strong>${escapeHtml(formatOnlineStatus(machine.online_status || "-"))}</div>
       <div class="kv"><strong>CPU：</strong>${escapeHtml(String(machine.cpu_usage || 0))}%</div>
       <div class="kv"><strong>内存：</strong>${escapeHtml(String(machine.memory_usage || 0))}%</div>
       <div class="kv"><strong>GPU：</strong>${escapeHtml(String(machine.gpu_usage || 0))}%</div>
-      <div class="kv"><strong>模型状态：</strong>${escapeHtml(machine.model_status || "-")}</div>
+      <div class="kv"><strong>模型状态：</strong>${escapeHtml(formatModelStatus(machine.model_status || "-"))}</div>
     </div>
     <div style="margin-top:8px;"><button id="adm_restart_service" class="btn btn-danger">远程重启防护服务</button></div>
     <div style="margin-top:8px;" class="kv"><strong>近期攻击记录：</strong></div>
@@ -1345,7 +1339,7 @@ async function loadAdminLogs() {
       <tr>
         <td>${escapeHtml(String(x.id || ""))}</td>
         <td>${escapeHtml(x.username || "-")}</td>
-        <td>${escapeHtml(x.role || "-")}</td>
+        <td>${escapeHtml(ROLE_LABEL[x.role] || x.role || "-")}</td>
         <td>${escapeHtml(x.action || "-")}</td>
         <td>${escapeHtml(x.target || "-")}</td>
         <td>${escapeHtml(x.detail || "-")}</td>
@@ -1387,6 +1381,14 @@ function renderAdminConfigView() {
           <label>声音告警开关(1开/0关)</label>
           <input id="cfg_sound_alert_enabled" type="number" min="0" max="1" />
         </div>
+        <div>
+          <label>数据包分组数量</label>
+          <input id="cfg_capture_batch_size" type="number" min="1" />
+        </div>
+        <div>
+          <label>监测端口(逗号分隔)</label>
+          <input id="cfg_monitor_ports" placeholder="80,443,8080" />
+        </div>
       </div>
       <div style="margin-top:10px;display:flex;justify-content:flex-end;">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
@@ -1410,6 +1412,8 @@ async function loadAdminConfig() {
   setInputValue("cfg_alert_threshold_high", map.alert_threshold_high || "10");
   setInputValue("cfg_auto_refresh_seconds", map.auto_refresh_seconds || "5");
   setInputValue("cfg_sound_alert_enabled", map.sound_alert_enabled || "1");
+  setInputValue("cfg_capture_batch_size", map.capture_batch_size || "4");
+  setInputValue("cfg_monitor_ports", map.monitor_ports || "80,443,8080");
 }
 
 async function saveAdminConfig() {
@@ -1417,6 +1421,8 @@ async function saveAdminConfig() {
     alert_threshold_high: String(document.getElementById("cfg_alert_threshold_high")?.value || "10"),
     auto_refresh_seconds: String(document.getElementById("cfg_auto_refresh_seconds")?.value || "5"),
     sound_alert_enabled: String(document.getElementById("cfg_sound_alert_enabled")?.value || "1"),
+    capture_batch_size: String(document.getElementById("cfg_capture_batch_size")?.value || "4"),
+    monitor_ports: String(document.getElementById("cfg_monitor_ports")?.value || "80,443,8080"),
   };
   await api("/api/v2/admin/config", { method: "PUT", body: payload });
   showToast("配置保存成功");
@@ -1434,6 +1440,135 @@ async function exportAdminReport() {
   a.remove();
   URL.revokeObjectURL(url);
   showToast("报表导出成功");
+}
+
+function renderUserCenterView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  root.innerHTML = `
+    <section class="panel">
+      <div class="panel-head"><h3 class="panel-title">\u7528\u6237\u4e2d\u5fc3</h3></div>
+      <div class="detail-grid">
+        <div><label class="panel-sub">\u5f53\u524d\u8d26\u53f7</label><input value="${escapeHtml(state.profile?.username || "-")}" disabled /></div>
+        <div><label class="panel-sub">\u5f53\u524d\u89d2\u8272</label><input value="${escapeHtml(ROLE_LABEL[state.profile?.role] || state.profile?.role || "-")}" disabled /></div>
+        <div><label class="panel-sub">\u65e7\u5bc6\u7801</label><input id="uc_old_password" type="password" autocomplete="current-password" /></div>
+        <div><label class="panel-sub">\u65b0\u5bc6\u7801</label><input id="uc_new_password" type="password" autocomplete="new-password" /></div>
+        <div><label class="panel-sub">\u786e\u8ba4\u65b0\u5bc6\u7801</label><input id="uc_confirm_password" type="password" autocomplete="new-password" /></div>
+      </div>
+      <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+        <button id="uc_save_password" class="btn btn-primary">\u4fee\u6539\u5bc6\u7801</button>
+      </div>
+    </section>
+  `;
+  document.getElementById("uc_save_password")?.addEventListener("click", () => updateSelfPassword());
+}
+
+async function updateSelfPassword() {
+  const oldPassword = String(document.getElementById("uc_old_password")?.value || "").trim();
+  const newPassword = String(document.getElementById("uc_new_password")?.value || "").trim();
+  const confirmPassword = String(document.getElementById("uc_confirm_password")?.value || "").trim();
+  if (!oldPassword || !newPassword || !confirmPassword) {
+    showToast("\u8bf7\u5b8c\u6574\u586b\u5199\u5bc6\u7801\u4fe1\u606f");
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    showToast("\u4e24\u6b21\u8f93\u5165\u7684\u65b0\u5bc6\u7801\u4e0d\u4e00\u81f4");
+    return;
+  }
+  if (newPassword.length < 4) {
+    showToast("\u65b0\u5bc6\u7801\u81f3\u5c114\u4f4d");
+    return;
+  }
+  await api("/api/v2/auth/change-password", {
+    method: "POST",
+    body: { old_password: oldPassword, new_password: newPassword },
+  });
+  setInputValue("uc_old_password", "");
+  setInputValue("uc_new_password", "");
+  setInputValue("uc_confirm_password", "");
+  showToast("\u5bc6\u7801\u4fee\u6539\u6210\u529f");
+}
+
+function renderAdminUsersView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  root.innerHTML = `
+    <section class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">\u7ba1\u7406\u5458 - \u7528\u6237\u7ba1\u7406</h3>
+        <button id="adm_users_refresh" class="btn btn-success">\u5237\u65b0\u7528\u6237</button>
+      </div>
+      <div class="table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>\u7528\u6237\u540d</th>
+              <th>\u89d2\u8272</th>
+              <th>\u663e\u793a\u540d</th>
+              <th>\u66f4\u65b0\u65f6\u95f4</th>
+              <th>\u91cd\u7f6e\u5bc6\u7801</th>
+            </tr>
+          </thead>
+          <tbody id="adm_users_body"></tbody>
+        </table>
+      </div>
+    </section>
+  `;
+  document.getElementById("adm_users_refresh")?.addEventListener("click", () => loadAdminUsers());
+  loadAdminUsers().catch((err) => showToast(`\u52a0\u8f7d\u7528\u6237\u5931\u8d25\uff1a${err.message}`));
+}
+
+async function loadAdminUsers() {
+  const data = await api("/api/v2/admin/users");
+  state.admin.users = Array.isArray(data.items) ? data.items : [];
+  const body = document.getElementById("adm_users_body");
+  if (!body) return;
+  if (!state.admin.users.length) {
+    body.innerHTML = `<tr><td colspan="6" class="panel-sub">\u6682\u65e0\u7528\u6237</td></tr>`;
+    return;
+  }
+  body.innerHTML = state.admin.users
+    .map(
+      (x) => `
+      <tr>
+        <td>${escapeHtml(String(x.id || ""))}</td>
+        <td>${escapeHtml(x.username || "-")}</td>
+        <td>${escapeHtml(ROLE_LABEL[x.role] || x.role || "-")}</td>
+        <td>${escapeHtml(x.display_name || "-")}</td>
+        <td>${escapeHtml(x.updated_at || "-")}</td>
+        <td>
+          <div style="display:flex;gap:8px;">
+            <input type="password" data-adm-user-pass="${escapeHtml(x.username || "")}" placeholder="\u65b0\u5bc6\u7801" style="max-width:160px;" />
+            <button class="btn btn-danger" data-adm-user-save="${escapeHtml(x.username || "")}">\u66f4\u65b0</button>
+          </div>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+  body.querySelectorAll("[data-adm-user-save]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const username = String(el.getAttribute("data-adm-user-save") || "");
+      if (!username) return;
+      const input = el.closest("tr")?.querySelector("[data-adm-user-pass]");
+      const newPassword = String(input?.value || "").trim();
+      if (!newPassword) {
+        showToast("\u8bf7\u8f93\u5165\u65b0\u5bc6\u7801");
+        return;
+      }
+      if (newPassword.length < 4) {
+        showToast("\u65b0\u5bc6\u7801\u81f3\u5c114\u4f4d");
+        return;
+      }
+      await api(`/api/v2/admin/users/${encodeURIComponent(username)}/password`, {
+        method: "PUT",
+        body: { new_password: newPassword },
+      });
+      if (input) input.value = "";
+      showToast(`\u5df2\u66f4\u65b0 ${username} \u5bc6\u7801`);
+    });
+  });
 }
 
 function renderTrendChart(containerId, rows) {
@@ -1787,10 +1922,82 @@ function animateTextNumber(id, value, suffix = "") {
 }
 
 function riskBadge(level) {
-  const safe = escapeHtml(level || "-");
+  const safe = escapeHtml(formatRiskLevel(level || "-"));
   if (level === "high") return `<span class="badge badge-high">${safe}</span>`;
   if (level === "medium") return `<span class="badge badge-medium">${safe}</span>`;
   return `<span class="badge badge-low">${safe}</span>`;
+}
+
+function formatRiskLevel(level) {
+  const map = {
+    high: "高危",
+    medium: "中危",
+    low: "低危",
+    critical: "严重",
+  };
+  return map[String(level || "").toLowerCase()] || level || "-";
+}
+
+function formatProcessStatus(status) {
+  const map = {
+    unprocessed: "未处理",
+    processing: "处理中",
+    done: "已处理",
+    ignored: "已忽略",
+  };
+  return map[String(status || "").toLowerCase()] || status || "-";
+}
+
+function formatAttackResult(result) {
+  const map = {
+    blocked: "已拦截",
+    intercepted: "已拦截",
+    success: "攻击成功",
+    failed: "攻击失败",
+    timeout: "请求超时",
+  };
+  return map[String(result || "").toLowerCase()] || result || "-";
+}
+
+function formatOnlineStatus(status) {
+  const map = {
+    online: "在线",
+    offline: "离线",
+    warning: "告警",
+    abnormal: "异常",
+  };
+  return map[String(status || "").toLowerCase()] || status || "-";
+}
+
+function formatModelStatus(status) {
+  const map = {
+    running: "运行中",
+    stopped: "已停止",
+    healthy: "健康",
+    unhealthy: "异常",
+    degraded: "退化",
+  };
+  return map[String(status || "").toLowerCase()] || status || "-";
+}
+
+function formatAttackType(attackType) {
+  const key = String(attackType || "").trim().toLowerCase();
+  const map = {
+    sqli: "SQL注入",
+    sql_injection: "SQL注入",
+    "sql injection": "SQL注入",
+    xss: "XSS跨站脚本",
+    ddos: "DDoS攻击",
+    "brute force": "暴力破解",
+    brute_force: "暴力破解",
+    bruteforce: "暴力破解",
+    port_scan: "端口扫描",
+    "port scan": "端口扫描",
+    "command injection": "命令注入",
+    command_injection: "命令注入",
+    rce: "远程代码执行",
+  };
+  return map[key] || attackType || "-";
 }
 
 function bindGlobalTooltip() {

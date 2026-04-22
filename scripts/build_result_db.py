@@ -3,6 +3,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal
 
@@ -135,6 +136,79 @@ def normalize_attack_type(analysis_obj: Dict[str, Any]) -> str | None:
         return None
     text = str(val).strip()
     return text or None
+
+
+def parse_mysql_datetime(v: Any) -> datetime:
+    if v is None:
+        return datetime.now()
+    text = str(v).strip()
+    if not text:
+        return datetime.now()
+
+    normalized = text.replace("T", " ").replace("Z", "")
+    normalized = re.sub(r"[+-]\d{2}:\d{2}$", "", normalized).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except Exception:
+            continue
+    return datetime.now()
+
+
+def infer_attack_type_text(analysis_obj: Dict[str, Any], request_row: Dict[str, Any], request_content: str) -> str:
+    for key in ("attack_type", "attack_method", "verdict"):
+        val = str(analysis_obj.get(key) or "").strip()
+        if val:
+            return val
+
+    text = "\n".join(
+        [
+            str(request_row.get("uri") or ""),
+            str(request_row.get("request_text_summary") or ""),
+            str(request_content or ""),
+        ]
+    ).lower()
+    rules = [
+        (r"(?:\bor\b\s+1=1|union\s+select|information_schema|sleep\()", "SQL注入"),
+        (r"(<script|javascript:|onerror=|onload=)", "XSS"),
+        (r"(\.\./|\.\.\\|/etc/passwd|\\windows\\system32)", "路径遍历"),
+        (r"(cmd\.exe|/bin/sh|powershell|;\s*cat\s+)", "命令注入"),
+        (r"(multipart/form-data|\.php|\.jsp|\.aspx)", "文件上传"),
+        (r"(scan|masscan|nmap)", "端口扫描"),
+    ]
+    for pattern, label in rules:
+        if re.search(pattern, text, re.I):
+            return label
+    return "可疑流量"
+
+
+def infer_risk_level(analysis_obj: Dict[str, Any], request_row: Dict[str, Any]) -> str:
+    sev = str(analysis_obj.get("severity") or "").strip().lower()
+    if sev in {"critical", "high", "medium", "low"}:
+        return "high" if sev == "critical" else sev
+
+    conf = to_float(analysis_obj.get("confidence"))
+    if conf is None:
+        conf = to_float(request_row.get("raw_score"))
+    if conf is None:
+        conf = 0.0
+
+    label = str(request_row.get("label") or "").strip().lower()
+    if conf >= 0.8:
+        return "high"
+    if conf >= 0.45 or label == "suspicious":
+        return "medium"
+    return "low"
+
+
+def infer_attack_result(status_code: int | None) -> str:
+    if status_code is None:
+        return "success"
+    if status_code in {401, 403, 404, 406, 409, 429}:
+        return "blocked"
+    if status_code >= 500:
+        return "blocked"
+    return "success"
 
 
 def validate_mysql_identifier(name: str) -> str:
@@ -352,6 +426,35 @@ def ensure_schema_mysql(conn: Any) -> None:
           KEY idx_analyses_llm_status (llm_status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
+        """
+        CREATE TABLE IF NOT EXISTS demo_attack_events (
+          event_id VARCHAR(40) PRIMARY KEY,
+          occurred_at DATETIME(3) NOT NULL,
+          risk_level VARCHAR(16) NOT NULL,
+          attack_type VARCHAR(64) NOT NULL,
+          source_ip VARCHAR(64) NOT NULL,
+          source_region VARCHAR(64) NOT NULL,
+          target_node VARCHAR(64) NOT NULL,
+          target_interface VARCHAR(255) NOT NULL,
+          attack_result VARCHAR(16) NOT NULL,
+          process_status VARCHAR(16) NOT NULL DEFAULT 'unprocessed',
+          acked TINYINT(1) NOT NULL DEFAULT 0,
+          attack_payload LONGTEXT NULL,
+          request_log LONGTEXT NULL,
+          protection_action TEXT NULL,
+          handling_suggestion TEXT NULL,
+          note TEXT NULL,
+          response_ms INT NOT NULL DEFAULT 0,
+          anomaly_detected TINYINT(1) NOT NULL DEFAULT 0,
+          machine_id INT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          KEY idx_event_time (occurred_at),
+          KEY idx_event_risk (risk_level),
+          KEY idx_event_type (attack_type),
+          KEY idx_event_node (target_node)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
     ]
     with conn.cursor() as cur:
         for ddl in ddl_list:
@@ -558,8 +661,44 @@ def upsert_analyses_mysql(conn: Any, row: Dict[str, Any]) -> None:
         )
 
 
+def upsert_demo_attack_event_mysql(conn: Any, row: Dict[str, Any]) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO demo_attack_events(
+              event_id, occurred_at, risk_level, attack_type, source_ip, source_region,
+              target_node, target_interface, attack_result, process_status, acked,
+              attack_payload, request_log, protection_action, handling_suggestion, note,
+              response_ms, anomaly_detected, machine_id
+            ) VALUES (
+              %(event_id)s, %(occurred_at)s, %(risk_level)s, %(attack_type)s, %(source_ip)s, %(source_region)s,
+              %(target_node)s, %(target_interface)s, %(attack_result)s, %(process_status)s, %(acked)s,
+              %(attack_payload)s, %(request_log)s, %(protection_action)s, %(handling_suggestion)s, %(note)s,
+              %(response_ms)s, %(anomaly_detected)s, %(machine_id)s
+            )
+            ON DUPLICATE KEY UPDATE
+              occurred_at=VALUES(occurred_at),
+              risk_level=VALUES(risk_level),
+              attack_type=VALUES(attack_type),
+              source_ip=VALUES(source_ip),
+              source_region=VALUES(source_region),
+              target_node=VALUES(target_node),
+              target_interface=VALUES(target_interface),
+              attack_result=VALUES(attack_result),
+              attack_payload=VALUES(attack_payload),
+              request_log=VALUES(request_log),
+              protection_action=VALUES(protection_action),
+              handling_suggestion=VALUES(handling_suggestion),
+              response_ms=VALUES(response_ms),
+              anomaly_detected=VALUES(anomaly_detected),
+              machine_id=VALUES(machine_id)
+            """,
+            row,
+        )
+
+
 def count_rows(conn: Any, backend: Backend, table: str) -> int:
-    if table not in {"requests", "responses", "analyses"}:
+    if table not in {"requests", "responses", "analyses", "demo_attack_events"}:
         raise ValueError(f"unsupported table: {table}")
 
     if backend == "sqlite":
@@ -596,6 +735,17 @@ def sync_result_to_db(
         conn = connect_mysql(cfg)
         ensure_schema_mysql(conn)
         target = f"mysql://{cfg.user}@{cfg.host}:{cfg.port}/{cfg.database}"
+
+    machine_targets: List[Dict[str, Any]] = []
+    if backend == "mysql":
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT id, machine_name FROM demo_machines ORDER BY id")
+                machine_targets = [x for x in cur.fetchall() if x.get("machine_name")]
+            except Exception:
+                machine_targets = []
+    if not machine_targets:
+        machine_targets = [{"id": None, "machine_name": "node-local-01"}]
 
     total = 0
     with_analysis = 0
@@ -684,6 +834,39 @@ def sync_result_to_db(
             upsert_analyses_sqlite(conn, analysis_row)
         else:
             upsert_analyses_mysql(conn, analysis_row)
+            src_ip_match = re.search(r"(?mi)^src_ip=([^\r\n]+)", request_content or "")
+            source_ip = (
+                normalize_attack_ip(case_obj, analysis_obj)
+                or (src_ip_match.group(1).strip() if src_ip_match else "")
+                or "unknown"
+            )
+            target_interface = normalize_target_interface(case_obj, analysis_obj) or str(request_row.get("uri") or "-")
+            attack_type = infer_attack_type_text(analysis_obj, request_row, request_content)
+            risk_level = infer_risk_level(analysis_obj, request_row)
+            status_code = to_int(request_row.get("status_code"))
+            machine = machine_targets[hash(case_id) % len(machine_targets)]
+            event_row = {
+                "event_id": str(case_id)[:40],
+                "occurred_at": parse_mysql_datetime(analysis_row.get("attack_event_time") or case_obj.get("export_time")),
+                "risk_level": risk_level,
+                "attack_type": str(attack_type)[:64] if attack_type else "可疑流量",
+                "source_ip": str(source_ip)[:64],
+                "source_region": "未知",
+                "target_node": str(machine.get("machine_name") or "node-local-01")[:64],
+                "target_interface": str(target_interface)[:255],
+                "attack_result": infer_attack_result(status_code),
+                "process_status": "unprocessed",
+                "acked": 0,
+                "attack_payload": str(request_row.get("request_text_summary") or "")[:20000],
+                "request_log": request_content,
+                "protection_action": str(analysis_obj.get("summary") or "自动识别到可疑流量，已进入人工复核流程。")[:4000],
+                "handling_suggestion": "核查登录接口参数化与WAF规则，限制异常重试并记录审计日志。",
+                "note": "",
+                "response_ms": 0,
+                "anomaly_detected": 1 if risk_level == "high" else 0,
+                "machine_id": machine.get("id"),
+            }
+            upsert_demo_attack_event_mysql(conn, event_row)
 
         total += 1
         if analysis_obj:
@@ -694,6 +877,7 @@ def sync_result_to_db(
     req_count = count_rows(conn, backend, "requests")
     rsp_count = count_rows(conn, backend, "responses")
     an_count = count_rows(conn, backend, "analyses")
+    demo_count = count_rows(conn, backend, "demo_attack_events") if backend == "mysql" else 0
     conn.close()
 
     return {
@@ -704,6 +888,7 @@ def sync_result_to_db(
         "requests_rows": req_count,
         "responses_rows": rsp_count,
         "analyses_rows": an_count,
+        "demo_event_rows": demo_count,
     }
 
 
@@ -748,6 +933,8 @@ def main() -> None:
     print(f"requests rows: {stats['requests_rows']}")
     print(f"responses rows: {stats['responses_rows']}")
     print(f"analyses rows: {stats['analyses_rows']}")
+    if "demo_event_rows" in stats:
+        print(f"demo_attack_events rows: {stats['demo_event_rows']}")
 
 
 if __name__ == "__main__":
