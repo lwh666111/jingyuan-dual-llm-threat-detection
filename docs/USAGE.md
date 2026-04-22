@@ -10,7 +10,7 @@
 - Node 大屏服务（默认 `1145`）
 - RAG 知识库管理（前端可新增/删除/重建）
 
-说明：Docker 一键部署默认不启动 LLM（按当前需求）。
+说明：现已提供“全链路一键部署脚本”，可自动拉起 MySQL + Ollama + 项目服务，并初始化 RAG SQLite。
 
 ## 2. 目录结构（关键）
 
@@ -80,6 +80,39 @@ python -m pip install -r requirements.txt
 说明：CLI 参数优先级高于配置文件参数。
 
 ## 5. 启动方式
+
+### 5.0 全链路一键部署（推荐）
+
+首次执行（生成配置模板）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
+```
+
+编辑 `deploy/.env` 后正式启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
+```
+
+说明：
+
+- 自动部署 MySQL（业务库）
+- 自动构建 SQLite RAG 库（`llm/rag/rag_knowledge.db`）
+- 自动部署 Ollama，并拉取 `deploy/.env` 中配置的模型
+- 自动启动 `app.py` 全链路服务（抓包/检测/入库/API/前端）
+
+停止服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
+```
+
+停止并清理 MySQL/Ollama 数据卷：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1 -RemoveInfraData
+```
 
 ### 5.1 本机一键启动（不启 LLM）
 

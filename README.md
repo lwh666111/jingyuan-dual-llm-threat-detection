@@ -75,6 +75,42 @@ python app.py --only-detect --no-llm --db-config config/db_config.json --api-por
 python app.py --help
 ```
 
+## One-Click Full Deploy (Recommended)
+
+This project now supports one-click deployment for:
+
+- MySQL database (business/event data)
+- SQLite FTS5 RAG database (`llm/rag/rag_knowledge.db`)
+- Ollama service and model pull
+- Python runtime dependencies
+- Unified app services (`capture + daemon + db + api + dashboard`)
+
+Steps:
+
+1. First run (generate env template):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
+```
+
+2. Edit `deploy/.env` if needed (ports, model, DB password), then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
+```
+
+Stop services:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
+```
+
+Stop and remove infra data volumes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1 -RemoveInfraData
+```
+
 ## Database Config File
 
 - local config: `config/db_config.json`
@@ -97,7 +133,7 @@ Format:
 }
 ```
 
-## Docker One-Click Deploy (No LLM)
+## Legacy Docker App-Only Deploy (No LLM)
 
 This deployment includes:
 

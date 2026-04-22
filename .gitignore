@@ -41,3 +41,6 @@ models/*.joblib
 
 # RAG artifacts
 llm/rag/rag_knowledge.db
+
+# Local deploy env
+deploy/.env
