@@ -38,3 +38,6 @@ Thumbs.db
 models/*.pth
 models/*.pt
 models/*.joblib
+
+# RAG artifacts
+llm/rag/rag_knowledge.db
