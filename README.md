@@ -49,34 +49,30 @@
 
 ## Quick Start
 
-1. Install dependencies:
+默认使用一键部署，不再需要手工“下库”或分别启动多服务。
+
+1. 首次执行（自动生成 `deploy/.env` 模板）：
 
 ```powershell
-python -m pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
 ```
 
-2. Start the full workflow (capture + detect + LLM + DB + API + Dashboard):
+2. 按需修改 `deploy/.env`（模型、端口、数据库密码等）后再次执行：
 
 ```powershell
-python app.py --port 80 --capture-batch-size 4
+powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
 ```
 
-For local demo (one-command startup, without packet capture):
+3. 访问服务：
+
+- 前端大屏：`http://127.0.0.1:1145`
+- API：`http://127.0.0.1:3049`
+- Ollama：`http://127.0.0.1:11434`
+
+4. 停止服务：
 
 ```powershell
-python app.py --only-detect --no-llm --db-backend mysql --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user root --mysql-password 123456 --mysql-database traffic_pipeline --api-port 3049 --dashboard-port 1145
-```
-
-Use DB config file (recommended):
-
-```powershell
-python app.py --only-detect --no-llm --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
-```
-
-3. Show all options:
-
-```powershell
-python app.py --help
+powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
 ```
 
 ## One-Click Full Deploy (Recommended)
@@ -113,6 +109,40 @@ Stop and remove infra data volumes:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1 -RemoveInfraData
+```
+
+## Manual Mode (Optional / Advanced)
+
+以下仅用于调试或兼容场景，日常推荐使用一键部署：
+
+Install dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Start the full workflow (capture + detect + LLM + DB + API + Dashboard):
+
+```powershell
+python app.py --port 80 --capture-batch-size 4
+```
+
+Local demo (without packet capture):
+
+```powershell
+python app.py --only-detect --no-llm --db-backend mysql --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user root --mysql-password 123456 --mysql-database traffic_pipeline --api-port 3049 --dashboard-port 1145
+```
+
+Use DB config file:
+
+```powershell
+python app.py --only-detect --no-llm --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
+```
+
+Show all options:
+
+```powershell
+python app.py --help
 ```
 
 ## Database Config File
