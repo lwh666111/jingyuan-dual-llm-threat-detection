@@ -1,0 +1,134 @@
+[
+  {
+    "doc_id": "RAG-001",
+    "title": "SQL Injection Login Bypass",
+    "tags": "sqli sql injection login bypass or 1=1 union select --",
+    "attack_type": "SQLi",
+    "content": "SQL injection often appears in login endpoints where user input is concatenated into SQL. Typical payload patterns include quote breaking, OR true expression, UNION queries, and SQL comments.",
+    "evidence": "Payload contains patterns like ' or 1=1 --, union select, sleep(), benchmark().",
+    "mitigation": "Use parameterized queries, strict input validation, WAF signatures, and least-privilege DB accounts.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-002",
+    "title": "XSS Script Injection",
+    "tags": "xss cross site scripting script alert onerror svg javascript",
+    "attack_type": "XSS",
+    "content": "XSS attacks inject executable script into reflected or stored content, leading to session hijack and browser-side payload execution.",
+    "evidence": "Request/body contains <script>, javascript:, onerror=, or suspicious HTML event handlers.",
+    "mitigation": "Apply output encoding, CSP, input sanitization, and framework-level template escaping.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-003",
+    "title": "Brute Force Credential Attack",
+    "tags": "bruteforce brute force password spray login retry failed auth",
+    "attack_type": "BruteForce",
+    "content": "Brute force and password spray attacks generate many authentication attempts with changing credentials in short time windows.",
+    "evidence": "High-frequency login requests from same source IP with repeated failed status codes.",
+    "mitigation": "Enable rate limit, lockout policy, MFA, and IP reputation controls.",
+    "severity": "medium",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-004",
+    "title": "DDoS High-Frequency Flood",
+    "tags": "ddos flood high frequency traffic burst syn flood",
+    "attack_type": "DDoS",
+    "content": "DDoS behavior usually appears as sudden traffic spikes and repeated requests across one or more endpoints causing service degradation.",
+    "evidence": "Abnormal request rate, repeated identical paths, elevated 5xx and timeout responses.",
+    "mitigation": "Apply rate limiting, traffic scrubbing/CDN, autoscaling, and upstream ACL controls.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-005",
+    "title": "Command Injection",
+    "tags": "command injection cmd whoami ping && ; | shell",
+    "attack_type": "CommandInjection",
+    "content": "Command injection uses shell metacharacters to execute system commands when backend invokes shell with untrusted input.",
+    "evidence": "Parameters contain command separators like ;, &&, ||, |, backticks, or suspicious shell commands.",
+    "mitigation": "Avoid shell invocation, use allow-list validation, and run processes with restricted privileges.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-006",
+    "title": "Path Traversal",
+    "tags": "path traversal ../ ..\\ /etc/passwd windows win.ini",
+    "attack_type": "PathTraversal",
+    "content": "Path traversal attacks attempt to escape expected directories and read sensitive files.",
+    "evidence": "URI or parameters include ../, ..\\\\, encoded traversal sequences, or sensitive file names.",
+    "mitigation": "Normalize paths, deny parent traversal, and map only approved resource IDs.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-007",
+    "title": "SSRF Metadata Access",
+    "tags": "ssrf 169.254.169.254 internal metadata localhost",
+    "attack_type": "SSRF",
+    "content": "SSRF abuses server-side URL fetch functionality to access internal services and cloud metadata endpoints.",
+    "evidence": "User-controlled URL points to internal IP ranges, localhost, or cloud metadata services.",
+    "mitigation": "Restrict outbound destinations, enforce URL allow-list, and block metadata endpoints.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-008",
+    "title": "Malicious File Upload",
+    "tags": "file upload webshell php jsp aspx executable multipart",
+    "attack_type": "FileUpload",
+    "content": "Attackers may upload webshell or executable payload disguised as normal files.",
+    "evidence": "Multipart upload contains executable signatures or suspicious extensions with mismatched MIME types.",
+    "mitigation": "Validate file type/content, store outside webroot, and scan with antivirus engines.",
+    "severity": "high",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-009",
+    "title": "Port Scan Reconnaissance",
+    "tags": "port scan syn probe nmap reconnaissance 22 80 443 3306",
+    "attack_type": "PortScan",
+    "content": "Port scanning probes multiple ports/services to identify attack surface before exploitation.",
+    "evidence": "Burst of connection attempts across many destination ports from same source.",
+    "mitigation": "Use IDS/IPS scan detection, tarpits, and strict ingress filtering policies.",
+    "severity": "medium",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-010",
+    "title": "API Auth Abuse",
+    "tags": "api auth token refresh abuse replay credential stuffing",
+    "attack_type": "AuthAbuse",
+    "content": "Authentication abuse includes token replay, credential stuffing, and repeated refresh or login abuse patterns.",
+    "evidence": "Frequent auth endpoint hits with unusual headers, repeated failures, or replay signatures.",
+    "mitigation": "Use device binding, token rotation, anomaly detection, and strict rate control.",
+    "severity": "medium",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-011",
+    "title": "RCE Exploit Attempt",
+    "tags": "rce remote code execution template injection jndi deserialization",
+    "attack_type": "RCE",
+    "content": "RCE attempts seek direct code execution through vulnerable template engines, deserialization paths, or framework CVEs.",
+    "evidence": "Payload includes template expressions, class loading chains, or exploit gadget indicators.",
+    "mitigation": "Patch dependencies, disable dangerous interpreters, and isolate runtime permissions.",
+    "severity": "critical",
+    "source": "local_seed_v1"
+  },
+  {
+    "doc_id": "RAG-012",
+    "title": "HTTP 5xx/504 as Risk Signal",
+    "tags": "status 500 502 503 504 timeout gateway",
+    "attack_type": "OperationalSignal",
+    "content": "A high rate of 5xx/504 responses can indicate active attack pressure or service instability. It is not proof alone but should increase risk confidence when combined with malicious payload evidence.",
+    "evidence": "Request includes suspicious payload and response shows timeout or server error repeatedly.",
+    "mitigation": "Correlate payload signature + traffic frequency + status anomalies before final severity decision.",
+    "severity": "medium",
+    "source": "local_seed_v1"
+  }
+]

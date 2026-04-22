@@ -86,6 +86,12 @@ python -m pip install -r requirements.txt
 python app.py --only-detect --no-llm --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
 ```
 
+### 5.1.1 本机启动并启用 LLM + RAG
+
+```powershell
+python app.py --only-detect --enable-llm --rag-enable --rag-db-path llm/rag/rag_knowledge.db --rag-top-k 3 --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
+```
+
 ### 5.2 Docker 一键启动（不启 LLM）
 
 ```powershell
@@ -98,13 +104,31 @@ docker compose up -d --build
 docker compose down
 ```
 
-## 6. 访问地址
+## 6. RAG 知识库
+
+- 构建脚本：`scripts/build_rag_db.py`
+- 种子数据：`llm/rag/rag_seed.json`
+- 生成库：`llm/rag/rag_knowledge.db`
+
+手动构建：
+
+```powershell
+python scripts/build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/rag/rag_knowledge.db
+```
+
+说明：
+
+- 采用 SQLite FTS5，部署成本低，无需额外向量服务
+- `llm_analyzer_daemon.py` 会把检索到的 top-k 知识条目注入到 LLM 上下文
+- 默认启用自动构建（db 不存在时按 seed 自动生成）
+
+## 7. 访问地址
 
 - 前端大屏：`http://127.0.0.1:1145`
 - 后端 API：`http://127.0.0.1:3049`
 - MySQL：`127.0.0.1:3306`
 
-## 7. 登录账号
+## 8. 登录账号
 
 前端演示账号统一：`admin / admin`
 
@@ -114,7 +138,7 @@ docker compose down
 - 专业用户（pro）
 - 管理员（admin）
 
-## 8. 快速自检
+## 9. 快速自检
 
 ### 8.1 接口可用性
 
@@ -128,7 +152,7 @@ Invoke-WebRequest http://127.0.0.1:3049/api/v1/screen/ping
 python scripts/platform_api_demo.py
 ```
 
-## 9. 运行日志与排障
+## 10. 运行日志与排障
 
 - 总控日志：`output/app_runtime/app.log`
 - API 日志：`output/app_runtime/api_stdout.log`、`output/app_runtime/api_stderr.log`

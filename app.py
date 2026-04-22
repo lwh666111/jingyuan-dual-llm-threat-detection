@@ -192,6 +192,26 @@ def build_llm_cmd(args, script_dir: Path) -> List[str]:
         "--max-cases",
         str(args.llm_max_cases),
     ]
+    if args.rag_enable:
+        cmd.append("--rag-enable")
+    else:
+        cmd.append("--no-rag")
+    cmd.extend(
+        [
+            "--rag-db-path",
+            args.rag_db_path,
+            "--rag-seed-file",
+            args.rag_seed_file,
+            "--rag-top-k",
+            str(args.rag_top_k),
+            "--rag-max-chars",
+            str(args.rag_max_chars),
+        ]
+    )
+    if args.rag_auto_build:
+        cmd.append("--rag-auto-build")
+    else:
+        cmd.append("--no-rag-auto-build")
     return cmd
 
 
@@ -364,6 +384,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu，0=CPU 更稳")
     llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM 采样温度")
     llm_group.add_argument("--llm-max-cases", type=int, default=0, help="每轮最多处理多少 case，0=不限制")
+    llm_group.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="启用 RAG 检索增强")
+    llm_group.add_argument("--no-rag", dest="rag_enable", action="store_false", help="关闭 RAG 检索增强")
+    parser.set_defaults(rag_enable=True)
+    llm_group.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db 文件路径")
+    llm_group.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 文件路径")
+    llm_group.add_argument("--rag-top-k", type=int, default=3, help="RAG 每次检索条数")
+    llm_group.add_argument("--rag-max-chars", type=int, default=3200, help="注入 LLM 的 RAG 上下文最大字符数")
+    llm_group.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="若 RAG db 不存在则自动构建")
+    llm_group.add_argument("--no-rag-auto-build", dest="rag_auto_build", action="store_false", help="不自动构建 RAG db")
+    parser.set_defaults(rag_auto_build=True)
 
     db_group = parser.add_argument_group("结果入库守护（默认启用）")
     db_group.add_argument(
@@ -502,7 +532,7 @@ def main() -> None:
         "demo_workflow.py",
     ]
     if run_llm:
-        required_scripts.append("llm_analyzer_daemon.py")
+        required_scripts.extend(["llm_analyzer_daemon.py", "build_rag_db.py"])
     if run_db:
         required_scripts.extend(["result_db_daemon.py", "build_result_db.py"])
     if run_api:

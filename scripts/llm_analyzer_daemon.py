@@ -1,6 +1,7 @@
 ﻿import argparse
 import json
 import re
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -81,7 +82,14 @@ def parse_case_ips_from_input(input_file: Path, seq_id: int) -> Tuple[Optional[s
     return None, None
 
 
-def build_user_payload(case_obj: Dict, request_text: str, response_text: str, src_ip: str, dst_ip: str) -> str:
+def build_user_payload(
+    case_obj: Dict,
+    request_text: str,
+    response_text: str,
+    src_ip: str,
+    dst_ip: str,
+    rag_context: str = "",
+) -> str:
     safe_case = {
         "case_id": case_obj.get("case_id"),
         "file_id": case_obj.get("file_id"),
@@ -98,8 +106,110 @@ def build_user_payload(case_obj: Dict, request_text: str, response_text: str, sr
         "meta": safe_case,
         "request_block": request_text[:12000],
         "response_block": response_text[:12000],
+        "retrieved_knowledge": rag_context[:6000] if rag_context else "",
     }
     return json.dumps(body, ensure_ascii=False)
+
+
+def ensure_rag_db(db_path: Path, seed_path: Path, auto_build: bool = True) -> None:
+    if db_path.exists():
+        return
+    if not auto_build:
+        log(f"RAG db not found and auto build disabled: {db_path}")
+        return
+    if not seed_path.exists():
+        log(f"RAG seed file not found, skip auto build: {seed_path}")
+        return
+    try:
+        from build_rag_db import build_rag_db, read_seed
+
+        rows = read_seed(seed_path)
+        count = build_rag_db(db_path, rows)
+        log(f"RAG db auto built: {db_path} rows={count}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"RAG db auto build failed: {exc}")
+
+
+def build_rag_match_query(text: str, max_terms: int = 12) -> str:
+    terms = re.findall(r"[a-zA-Z0-9_./:-]{2,}", (text or "").lower())
+    uniq: List[str] = []
+    seen = set()
+    for t in terms:
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(t)
+        if len(uniq) >= max_terms:
+            break
+    if not uniq:
+        return ""
+    escaped = [f'"{t.replace("\"", "")}"' for t in uniq if t.strip()]
+    return " OR ".join(escaped)
+
+
+def retrieve_rag_docs(db_path: Path, query_text: str, top_k: int = 3) -> List[Dict]:
+    if not db_path.exists():
+        return []
+
+    rows: List[Dict] = []
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        match_query = build_rag_match_query(query_text, max_terms=14)
+
+        if match_query:
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                      doc_id, title, attack_type, evidence, mitigation, severity, source,
+                      bm25(rag_docs) AS score
+                    FROM rag_docs
+                    WHERE rag_docs MATCH ?
+                    ORDER BY score ASC
+                    LIMIT ?
+                    """,
+                    (match_query, max(1, top_k)),
+                )
+                for row in cur.fetchall():
+                    rows.append(dict(row))
+            except sqlite3.OperationalError:
+                rows = []
+
+        if rows:
+            return rows
+
+        fallback_tokens = re.findall(r"[a-zA-Z0-9_./:-]{2,}", (query_text or "").lower())
+        keyword = fallback_tokens[0] if fallback_tokens else "login"
+        pattern = f"%{keyword}%"
+        cur.execute(
+            """
+            SELECT
+              doc_id, title, attack_type, evidence, mitigation, severity, source,
+              0.0 AS score
+            FROM rag_docs
+            WHERE tags LIKE ? OR content LIKE ? OR title LIKE ?
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, max(1, top_k)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def format_rag_context(rows: List[Dict], max_chars: int = 3200) -> str:
+    if not rows:
+        return ""
+    lines: List[str] = []
+    for idx, row in enumerate(rows, start=1):
+        lines.append(
+            (
+                f"[RAG#{idx}] title={row.get('title','')} attack_type={row.get('attack_type','')} "
+                f"severity={row.get('severity','')} evidence={row.get('evidence','')} "
+                f"mitigation={row.get('mitigation','')}"
+            )
+        )
+    text = "\n".join(lines)
+    return text[:max_chars]
 
 
 def call_ollama_chat(
@@ -277,7 +387,23 @@ def process_case(
     if not dst_ip:
         dst_ip = parse_ip_from_text(response_text) or "unknown"
 
-    user_payload = build_user_payload(case_obj, request_text, response_text, src_ip, dst_ip)
+    rag_rows: List[Dict] = []
+    rag_context = ""
+    if args.rag_enable:
+        query_text = "\n".join(
+            [
+                str(case_obj.get("attack_type") or ""),
+                str(case_obj.get("method") or ""),
+                str(case_obj.get("uri") or ""),
+                str(case_obj.get("host") or ""),
+                request_text[:2500],
+                response_text[:1200],
+            ]
+        )
+        rag_rows = retrieve_rag_docs(args.rag_db_path, query_text=query_text, top_k=args.rag_top_k)
+        rag_context = format_rag_context(rag_rows, max_chars=args.rag_max_chars)
+
+    user_payload = build_user_payload(case_obj, request_text, response_text, src_ip, dst_ip, rag_context=rag_context)
 
     try:
         parsed, raw_content = call_ollama_chat(
@@ -293,6 +419,8 @@ def process_case(
         )
 
         analysis = normalize_analysis(parsed, case_obj, src_ip, dst_ip, args.model)
+        analysis["rag_hits"] = len(rag_rows)
+        analysis["rag_enabled"] = bool(args.rag_enable)
         write_json(analysis_path, analysis)
         analysis_raw_path.write_text(raw_content or "", encoding="utf-8")
 
@@ -301,6 +429,7 @@ def process_case(
         case_obj.pop("llm_failed_at", None)
         case_obj["analysis_file"] = str(analysis_path.resolve())
         case_obj["analysis_raw_file"] = str(analysis_raw_path.resolve())
+        case_obj["rag_hits"] = len(rag_rows)
         case_obj["analyzed_at"] = now_iso()
         case_obj["status"] = case_obj.get("status") or "pending"
         write_json(case_json_path, case_obj)
@@ -331,12 +460,24 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--once", action="store_true", help="仅扫描一次并处理后退出")
     parser.add_argument("--max-cases", type=int, default=0, help="每轮最多处理多少条，0=不限制")
+    parser.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="启用 RAG 检索增强")
+    parser.add_argument("--no-rag", dest="rag_enable", action="store_false", help="关闭 RAG 检索增强")
+    parser.set_defaults(rag_enable=True)
+    parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db 文件路径")
+    parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 文件路径")
+    parser.add_argument("--rag-top-k", type=int, default=3, help="RAG 每次检索条数")
+    parser.add_argument("--rag-max-chars", type=int, default=3200, help="注入 LLM 的 RAG 上下文最大字符数")
+    parser.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="若 RAG db 不存在则自动构建")
+    parser.add_argument("--no-rag-auto-build", dest="rag_auto_build", action="store_false", help="不自动构建 RAG db")
+    parser.set_defaults(rag_auto_build=True)
     args = parser.parse_args()
 
     result_dir = (project_root / args.result_dir).resolve()
     input_dir = (project_root / args.input_dir).resolve()
     prompt_path = (project_root / args.prompt).resolve()
     schema_path = (project_root / args.schema).resolve()
+    args.rag_db_path = (project_root / args.rag_db_path).resolve()
+    args.rag_seed_file = (project_root / args.rag_seed_file).resolve()
 
     result_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -348,6 +489,12 @@ def main() -> None:
     schema_obj = read_json(schema_path, default={})
     if not schema_obj:
         raise RuntimeError(f"schema 无效: {schema_path}")
+
+    if args.rag_enable:
+        ensure_rag_db(args.rag_db_path, args.rag_seed_file, auto_build=args.rag_auto_build)
+        log(f"RAG enabled db={args.rag_db_path} top_k={args.rag_top_k}")
+    else:
+        log("RAG disabled")
 
     args.model = resolve_model_name(args.ollama_url, args.model, timeout_sec=10)
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
@@ -381,3 +528,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

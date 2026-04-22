@@ -21,6 +21,7 @@ Recommended repo name: `jingyuan-dual-llm-threat-detection`
 - Batch by complete HTTP request/response records (not raw packet slicing)
 - Automatic detection daemon for new input files
 - Structured case export for downstream analysis
+- Built-in lightweight RAG layer (SQLite FTS5) for LLM context enhancement
 
 ## Project Layout
 
@@ -163,10 +164,28 @@ python scripts\llm_analyzer_daemon.py --once --model qwen3:8b --num-gpu 0
 python scripts\llm_analyzer_daemon.py --model qwen3:8b --num-gpu 0
 ```
 
+Build RAG knowledge DB (SQLite FTS5):
+
+```powershell
+python scripts\build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/rag/rag_knowledge.db
+```
+
+Run LLM daemon with RAG enabled:
+
+```powershell
+python scripts\llm_analyzer_daemon.py --model qwen3:8b --rag-enable --rag-db-path llm/rag/rag_knowledge.db --rag-top-k 3
+```
+
 Disable LLM in unified app entry:
 
 ```powershell
 python app.py --no-llm
+```
+
+RAG controls in unified app entry (effective when LLM enabled):
+
+```powershell
+python app.py --rag-enable --rag-db-path llm/rag/rag_knowledge.db --rag-top-k 3
 ```
 
 Run DB sync daemon:
