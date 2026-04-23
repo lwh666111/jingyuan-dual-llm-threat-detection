@@ -11,10 +11,7 @@
 - MySQL 持久化（`requests` / `responses` / `analyses` 三表）
 - Flask API（3049）+ Node 前端大屏（1145）
 
-## GitHub 仓库简介（中文建议）
-
-可直接粘贴到 GitHub 仓库 Description：
-
+## GitHub 仓库简介
 `靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库与大屏展示，已支持一键部署（MySQL + Ollama + 全链路服务）。`
 
 ## 主要能力
