@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2560 1440" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <radialGradient id="base" cx="50%" cy="44%" r="78%">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="28%" stop-color="#dceaff"/>
+      <stop offset="56%" stop-color="#b9d3ff"/>
+      <stop offset="78%" stop-color="#8fb8ff"/>
+      <stop offset="100%" stop-color="#6e9ff4"/>
+    </radialGradient>
+    <radialGradient id="pink" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffd9ec" stop-opacity=".95"/>
+      <stop offset="70%" stop-color="#ffb8db" stop-opacity=".45"/>
+      <stop offset="100%" stop-color="#ffb8db" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="mint" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#cffff5" stop-opacity=".86"/>
+      <stop offset="68%" stop-color="#b6f9ef" stop-opacity=".35"/>
+      <stop offset="100%" stop-color="#b6f9ef" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violet" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#dcd4ff" stop-opacity=".9"/>
+      <stop offset="66%" stop-color="#c4b7ff" stop-opacity=".38"/>
+      <stop offset="100%" stop-color="#c4b7ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur60" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="58"/>
+    </filter>
+    <filter id="blur80" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="82"/>
+    </filter>
+  </defs>
+
+  <rect width="2560" height="1440" fill="url(#base)"/>
+
+  <ellipse cx="470" cy="260" rx="560" ry="400" fill="url(#pink)" filter="url(#blur80)"/>
+  <ellipse cx="2220" cy="230" rx="560" ry="380" fill="url(#mint)" filter="url(#blur80)"/>
+  <ellipse cx="1550" cy="1190" rx="760" ry="420" fill="url(#violet)" filter="url(#blur80)"/>
+  <ellipse cx="760" cy="1080" rx="600" ry="380" fill="url(#mint)" filter="url(#blur60)"/>
+  <ellipse cx="2020" cy="830" rx="560" ry="320" fill="url(#pink)" filter="url(#blur60)"/>
+
+  <g opacity=".18">
+    <path d="M 0 970 C 420 860 660 1130 1030 1050 C 1370 975 1660 760 2030 840 C 2250 888 2410 980 2560 960 L 2560 1440 L 0 1440 Z" fill="#ffffff"/>
+  </g>
+</svg>

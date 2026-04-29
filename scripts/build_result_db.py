@@ -1,7 +1,10 @@
-﻿import argparse
+import argparse
+import ipaddress
 import json
 import re
 import sqlite3
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +95,178 @@ def to_float(v: Any) -> float | None:
         return None
 
 
+def normalize_ip_literal(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text))
+    except Exception:
+        return ""
+
+
+def is_public_ip(ip_text: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+    except Exception:
+        return False
+    return bool(ip_obj.is_global)
+
+
+def normalize_attack_type_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "可疑流量"
+    t = raw.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+    if any(x in t for x in ["sql", "sqli", "unionselect", "or1=1", "informationschema", "sleep("]):
+        return "SQL注入"
+    if "sql娉" in t or "sql??" in t:
+        return "SQL注入"
+    if "xss" in t or "<script" in t:
+        return "XSS"
+    if "ddos" in t:
+        return "DDoS"
+    if "ssrf" in t:
+        return "SSRF"
+    if "rce" in t or "remotecode" in t or "远程代码" in raw:
+        return "RCE"
+    if any(x in raw for x in ["暴力破解", "爆破", "鏆村姏鐮磋В"]) or "bruteforce" in t:
+        return "暴力破解"
+    if any(x in raw for x in ["端口扫描", "绔彛鎵弿"]) or "portscan" in t or "nmap" in t:
+        return "端口扫描"
+    if any(x in raw for x in ["路径遍历", "璺緞閬嶅巻"]) or "traversal" in t:
+        return "路径遍历"
+    if any(x in raw for x in ["文件上传", "鏂囦欢涓婁紶"]) or "upload" in t:
+        return "文件上传"
+    if any(x in raw for x in ["命令注入", "鍛戒护娉ㄥ叆"]) or "cmd" in t or "commandinject" in t:
+        return "命令注入"
+    return "可疑流量"
+
+
+def normalize_region_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "未知"
+
+    mapping = {
+        "鍖椾含": "北京",
+        "涓婃捣": "上海",
+        "骞夸笢": "广东",
+        "娴欐睙": "浙江",
+        "姹熻嫃": "江苏",
+        "灞变笢": "山东",
+        "娌冲崡": "河南",
+        "鍥涘窛": "四川",
+        "棣欐腐": "香港",
+        "缇庡浗": "美国",
+        "寰峰浗": "德国",
+        "鍙枒娴侀噺": "未知",
+    }
+    if raw in mapping:
+        return mapping[raw]
+
+    low = raw.lower()
+    if low in {"unknown", "n/a", "none", "null", "-", "--"} or "未知" in raw:
+        return "未知"
+    if any(x in low for x in ["private", "localhost", "loopback"]) or "内网" in raw:
+        return "内网"
+    return raw
+
+
+def _http_get_json(url: str, timeout_sec: float = 2.5) -> Dict[str, Any]:
+    req = urllib.request.Request(url, headers={"User-Agent": "traffic-pipeline/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        charset = "utf-8"
+        try:
+            charset = resp.headers.get_content_charset() or "utf-8"
+        except Exception:
+            charset = "utf-8"
+        text = resp.read().decode(charset, errors="replace")
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _join_region(country: str, region: str, city: str) -> str:
+    c = str(country or "").strip()
+    r = str(region or "").strip()
+    ct = str(city or "").strip()
+    if not c and not r and not ct:
+        return "未知"
+    if c.lower() in {"cn", "china"} or c == "中国":
+        if r and ct:
+            return f"{r}/{ct}"
+        return r or ct or "中国"
+    parts = [x for x in [c, r, ct] if x]
+    return "/".join(parts) if parts else "未知"
+
+
+def fetch_region_by_ip_remote(ip_text: str) -> str:
+    ip_norm = normalize_ip_literal(ip_text)
+    if not ip_norm:
+        return "未知"
+    if not is_public_ip(ip_norm):
+        return "内网"
+
+    try:
+        data = _http_get_json(f"https://ipwho.is/{ip_norm}")
+        if data.get("success") is True:
+            return normalize_region_label(
+                _join_region(data.get("country"), data.get("region"), data.get("city"))
+            )
+    except urllib.error.URLError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        data = _http_get_json(f"http://ip-api.com/json/{ip_norm}?lang=zh-CN")
+        if str(data.get("status", "")).lower() == "success":
+            return normalize_region_label(
+                _join_region(data.get("country"), data.get("regionName"), data.get("city"))
+            )
+    except urllib.error.URLError:
+        pass
+    except Exception:
+        pass
+
+    return "未知"
+
+
+def resolve_source_region_mysql(conn: Any, source_ip: str) -> str:
+    ip_norm = normalize_ip_literal(source_ip)
+    if not ip_norm:
+        return "未知"
+    if not is_public_ip(ip_norm):
+        return "内网"
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT region FROM ip_geo_cache WHERE ip=%s LIMIT 1", (ip_norm,))
+        row = cur.fetchone() or {}
+    cached_raw = row.get("region")
+    if cached_raw is not None and str(cached_raw).strip():
+        return normalize_region_label(cached_raw)
+
+    region = normalize_region_label(fetch_region_by_ip_remote(ip_norm))
+    source = "remote" if region not in {"未知", "内网"} else "fallback"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ip_geo_cache(ip, region, source)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              region=VALUES(region),
+              source=VALUES(source),
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (ip_norm, region, source),
+        )
+    return region
+
+
 def normalize_attack_event_time(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) -> str | None:
     val = first_non_none(
         analysis_obj.get("attack_time"),
@@ -138,6 +313,81 @@ def normalize_attack_type(analysis_obj: Dict[str, Any]) -> str | None:
     return text or None
 
 
+def _parse_input_src_ip_map(input_file: Path) -> Dict[int, str]:
+    text = read_text(input_file, default="")
+    out: Dict[int, str] = {}
+    if not text.strip():
+        return out
+
+    case_blocks = re.findall(r"### CASE_START ###(.*?)### CASE_END ###", text, flags=re.DOTALL)
+    if case_blocks:
+        for block in case_blocks:
+            seq_m = re.search(r"(?mi)^seq_id=(\d+)\s*$", block)
+            src_m = re.search(r"(?mi)^src_ip=([^\r\n]+)\s*$", block)
+            if not src_m:
+                continue
+            src_ip = normalize_ip_literal(src_m.group(1))
+            if not src_ip:
+                continue
+            seq_id = int(seq_m.group(1)) if seq_m else (len(out) + 1)
+            out[seq_id] = src_ip
+        if out:
+            return out
+
+    src_m = re.search(r"(?mi)^src_ip=([^\r\n]+)\s*$", text)
+    src_ip = normalize_ip_literal(src_m.group(1)) if src_m else ""
+    if src_ip:
+        out[1] = src_ip
+    return out
+
+
+def _source_ip_from_input_file(
+    input_dir: Path,
+    file_id: str,
+    seq_id: int | None,
+    cache: Dict[str, Dict[int, str]],
+) -> str:
+    fid = str(file_id or "").strip()
+    if not fid:
+        return ""
+    if fid not in cache:
+        cache[fid] = _parse_input_src_ip_map(input_dir / f"{fid}.txt")
+    seq_map = cache.get(fid) or {}
+    if not seq_map:
+        return ""
+    if seq_id is not None and seq_id in seq_map:
+        return seq_map[seq_id]
+    return seq_map.get(1, "")
+
+
+def resolve_source_ip_for_case(
+    case_obj: Dict[str, Any],
+    analysis_obj: Dict[str, Any],
+    request_content: str,
+    request_summary: str,
+    input_dir: Path,
+    file_id: str,
+    seq_id: int | None,
+    input_ip_cache: Dict[str, Dict[int, str]],
+) -> str:
+    src = normalize_ip_literal(normalize_attack_ip(case_obj, analysis_obj))
+    if src:
+        return src
+
+    merged = "\n".join([request_content or "", request_summary or ""])
+    patterns = [
+        r"(?mi)^src_ip=([^\r\n]+)",
+        r"(?mi)\bsrc(?:_| )?ip[:=]\s*([0-9a-fA-F:.]+)",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, merged):
+            ip_text = normalize_ip_literal(m.group(1))
+            if ip_text:
+                return ip_text
+
+    return _source_ip_from_input_file(input_dir, file_id, seq_id, input_ip_cache)
+
+
 def parse_mysql_datetime(v: Any) -> datetime:
     if v is None:
         return datetime.now()
@@ -159,7 +409,7 @@ def infer_attack_type_text(analysis_obj: Dict[str, Any], request_row: Dict[str, 
     for key in ("attack_type", "attack_method", "verdict"):
         val = str(analysis_obj.get(key) or "").strip()
         if val:
-            return val
+            return normalize_attack_type_label(val)
 
     text = "\n".join(
         [
@@ -169,17 +419,20 @@ def infer_attack_type_text(analysis_obj: Dict[str, Any], request_row: Dict[str, 
         ]
     ).lower()
     rules = [
-        (r"(?:\bor\b\s+1=1|union\s+select|information_schema|sleep\()", "SQL注入"),
+        (
+            r"(?:\bor\b\s+1=1|union\s+select|information_schema|sleep\(|benchmark\(|ascii\s*\(|substr\s*\(|database\s*\(|\band\b.+--|'\s*or\s*'?\d)",
+            "\u0053\u0051\u004c\u6ce8\u5165",
+        ),
         (r"(<script|javascript:|onerror=|onload=)", "XSS"),
-        (r"(\.\./|\.\.\\|/etc/passwd|\\windows\\system32)", "路径遍历"),
-        (r"(cmd\.exe|/bin/sh|powershell|;\s*cat\s+)", "命令注入"),
-        (r"(multipart/form-data|\.php|\.jsp|\.aspx)", "文件上传"),
-        (r"(scan|masscan|nmap)", "端口扫描"),
+        (r"(\.\./|\.\.\\|/etc/passwd|\\windows\\system32)", "\u8def\u5f84\u904d\u5386"),
+        (r"(cmd\.exe|/bin/sh|powershell|;\s*cat\s+)", "\u547d\u4ee4\u6ce8\u5165"),
+        (r"(multipart/form-data|\.php|\.jsp|\.aspx)", "\u6587\u4ef6\u4e0a\u4f20"),
+        (r"(scan|masscan|nmap)", "\u7aef\u53e3\u626b\u63cf"),
     ]
     for pattern, label in rules:
         if re.search(pattern, text, re.I):
-            return label
-    return "可疑流量"
+            return normalize_attack_type_label(label)
+    return "\u53ef\u7591\u6d41\u91cf"
 
 
 def infer_risk_level(analysis_obj: Dict[str, Any], request_row: Dict[str, Any]) -> str:
@@ -453,6 +706,14 @@ def ensure_schema_mysql(conn: Any) -> None:
           KEY idx_event_risk (risk_level),
           KEY idx_event_type (attack_type),
           KEY idx_event_node (target_node)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS ip_geo_cache (
+          ip VARCHAR(64) PRIMARY KEY,
+          region VARCHAR(128) NOT NULL,
+          source VARCHAR(32) NOT NULL DEFAULT 'fallback',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
     ]
@@ -747,6 +1008,10 @@ def sync_result_to_db(
     if not machine_targets:
         machine_targets = [{"id": None, "machine_name": "node-local-01"}]
 
+    input_dir = result_dir.parent / "input"
+    input_ip_cache: Dict[str, Dict[int, str]] = {}
+    region_cache: Dict[str, str] = {}
+
     total = 0
     with_analysis = 0
     for case_dir in case_dirs:
@@ -802,6 +1067,25 @@ def sync_result_to_db(
         else:
             evidence_json = "[]"
 
+        inferred_attack_type = infer_attack_type_text(analysis_obj, request_row, request_content)
+        resolved_attack_type = normalize_attack_type_label(
+            (
+                normalize_attack_type(analysis_obj)
+                or str(case_obj.get("attack_type") or "").strip()
+                or inferred_attack_type
+            )
+        )
+        resolved_source_ip = resolve_source_ip_for_case(
+            case_obj=case_obj,
+            analysis_obj=analysis_obj,
+            request_content=request_content,
+            request_summary=str(request_row.get("request_text_summary") or ""),
+            input_dir=input_dir,
+            file_id=str(file_id or ""),
+            seq_id=seq_id,
+            input_ip_cache=input_ip_cache,
+        )
+
         analysis_row = {
             "case_id": case_id,
             "file_id": file_id,
@@ -813,45 +1097,47 @@ def sync_result_to_db(
             "analyzed_at": first_non_none(case_obj.get("analyzed_at"), analysis_obj.get("analyzed_at")),
             "model_name": first_non_none(analysis_obj.get("model_name"), case_obj.get("model_name")),
             "verdict": analysis_obj.get("verdict"),
-            "source_ip": analysis_obj.get("source_ip"),
-            "destination_ip": analysis_obj.get("destination_ip"),
-            "attack_interface": analysis_obj.get("attack_interface"),
+            "source_ip": first_non_none(analysis_obj.get("source_ip"), case_obj.get("source_ip"), resolved_source_ip),
+            "destination_ip": first_non_none(analysis_obj.get("destination_ip"), case_obj.get("destination_ip")),
+            "attack_interface": first_non_none(analysis_obj.get("attack_interface"), case_obj.get("uri")),
             "attack_method": analysis_obj.get("attack_method"),
             "attack_path": analysis_obj.get("attack_path"),
             "attack_time": analysis_obj.get("attack_time"),
             "severity": analysis_obj.get("severity"),
-            "confidence": to_float(analysis_obj.get("confidence")),
+            "confidence": to_float(first_non_none(analysis_obj.get("confidence"), request_row.get("raw_score"))),
             "summary": analysis_obj.get("summary"),
             "evidence_json": evidence_json,
             "analysis_raw": analysis_raw,
             "attack_event_time": normalize_attack_event_time(case_obj, analysis_obj),
             "attack_ip": normalize_attack_ip(case_obj, analysis_obj),
             "target_interface": normalize_target_interface(case_obj, analysis_obj),
-            "attack_type": normalize_attack_type(analysis_obj),
-            "attack_confidence": to_float(analysis_obj.get("confidence")),
+            "attack_type": resolved_attack_type,
+            "attack_confidence": to_float(first_non_none(analysis_obj.get("confidence"), request_row.get("raw_score"))),
         }
         if backend == "sqlite":
             upsert_analyses_sqlite(conn, analysis_row)
         else:
             upsert_analyses_mysql(conn, analysis_row)
-            src_ip_match = re.search(r"(?mi)^src_ip=([^\r\n]+)", request_content or "")
-            source_ip = (
-                normalize_attack_ip(case_obj, analysis_obj)
-                or (src_ip_match.group(1).strip() if src_ip_match else "")
-                or "unknown"
-            )
+            source_ip = resolved_source_ip or "unknown"
             target_interface = normalize_target_interface(case_obj, analysis_obj) or str(request_row.get("uri") or "-")
-            attack_type = infer_attack_type_text(analysis_obj, request_row, request_content)
+            attack_type = resolved_attack_type
             risk_level = infer_risk_level(analysis_obj, request_row)
             status_code = to_int(request_row.get("status_code"))
             machine = machine_targets[hash(case_id) % len(machine_targets)]
+            source_ip_norm = normalize_ip_literal(source_ip)
+            if source_ip_norm in region_cache:
+                source_region = region_cache[source_ip_norm]
+            else:
+                source_region = resolve_source_region_mysql(conn, source_ip)
+                if source_ip_norm:
+                    region_cache[source_ip_norm] = source_region
             event_row = {
                 "event_id": str(case_id)[:40],
                 "occurred_at": parse_mysql_datetime(analysis_row.get("attack_event_time") or case_obj.get("export_time")),
                 "risk_level": risk_level,
-                "attack_type": str(attack_type)[:64] if attack_type else "可疑流量",
+                "attack_type": str(attack_type)[:64] if attack_type else "\u53ef\u7591\u6d41\u91cf",
                 "source_ip": str(source_ip)[:64],
-                "source_region": "未知",
+                "source_region": str(source_region)[:64],
                 "target_node": str(machine.get("machine_name") or "node-local-01")[:64],
                 "target_interface": str(target_interface)[:255],
                 "attack_result": infer_attack_result(status_code),
@@ -859,8 +1145,8 @@ def sync_result_to_db(
                 "acked": 0,
                 "attack_payload": str(request_row.get("request_text_summary") or "")[:20000],
                 "request_log": request_content,
-                "protection_action": str(analysis_obj.get("summary") or "自动识别到可疑流量，已进入人工复核流程。")[:4000],
-                "handling_suggestion": "核查登录接口参数化与WAF规则，限制异常重试并记录审计日志。",
+                "protection_action": str(analysis_obj.get("summary") or "\u81ea\u52a8\u8bc6\u522b\u5230\u53ef\u7591\u6d41\u91cf\uff0c\u5df2\u8fdb\u5165\u4eba\u5de5\u590d\u6838\u6d41\u7a0b\u3002")[:4000],
+                "handling_suggestion": "\u6838\u67e5\u767b\u5f55\u63a5\u53e3\u53c2\u6570\u5316\u4e0eWAF\u89c4\u5219\uff0c\u9650\u5236\u5f02\u5e38\u91cd\u8bd5\u5e76\u8bb0\u5f55\u5ba1\u8ba1\u65e5\u5fd7\u3002",
                 "note": "",
                 "response_ms": 0,
                 "anomaly_detected": 1 if risk_level == "high" else 0,

@@ -1,5 +1,6 @@
-﻿import argparse
+import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +74,32 @@ def get_candidate_score(cand: dict) -> float:
             continue
     return 0.0
 
+
+
+def infer_attack_type(cand: dict) -> str:
+    text = "\n".join(
+        [
+            str(cand.get("uri") or ""),
+            str(cand.get("request_text") or ""),
+            str(cand.get("raw_request_block") or ""),
+            str(cand.get("raw_response_block") or ""),
+        ]
+    ).lower()
+    rules = [
+        (
+            r"(?:\bor\b\s+1=1|union\s+select|information_schema|sleep\(|benchmark\(|ascii\s*\(|substr\s*\(|database\s*\(|\band\b.+--|'\s*or\s*'?\d)",
+            "\u0053\u0051\u004c\u6ce8\u5165",
+        ),
+        (r"(<script|javascript:|onerror=|onload=)", "XSS"),
+        (r"(\.\./|\.\.\\|/etc/passwd|\\windows\\system32)", "\u8def\u5f84\u904d\u5386"),
+        (r"(cmd\.exe|/bin/sh|powershell|;\s*cat\s+)", "\u547d\u4ee4\u6ce8\u5165"),
+        (r"(multipart/form-data|\.php|\.jsp|\.aspx)", "\u6587\u4ef6\u4e0a\u4f20"),
+        (r"(scan|masscan|nmap)", "\u7aef\u53e3\u626b\u63cf"),
+    ]
+    for pattern, label in rules:
+        if re.search(pattern, text, re.I):
+            return label
+    return "\u53ef\u7591\u6d41\u91cf"
 
 def main():
     parser = argparse.ArgumentParser(description="将 demo_candidates 导出到 result 目录")
@@ -148,11 +175,16 @@ def main():
             "norm_score": cand.get("norm_score"),
             "label": cand.get("label"),
             "model_name": cand.get("model_name"),
+            "source_ip": cand.get("source_ip"),
+            "destination_ip": cand.get("destination_ip"),
+            "source_port": cand.get("source_port"),
+            "destination_port": cand.get("destination_port"),
             "method": cand.get("method"),
             "uri": cand.get("uri"),
             "host": cand.get("host"),
             "status_code": cand.get("status_code"),
             "request_text": cand.get("request_text"),
+            "attack_type": infer_attack_type(cand),
             "llm_task": cand.get("llm_task") or DEFAULT_LLM_TASK,
             "export_time": export_time,
             "status": "pending",
@@ -167,6 +199,8 @@ def main():
             "case_id": case_id,
             "file_id": file_id,
             "seq_id": seq_id,
+            "source_ip": cand.get("source_ip"),
+            "destination_ip": cand.get("destination_ip"),
             "uri": cand.get("uri"),
             "raw_score": cand.get("raw_score"),
             "norm_score": cand.get("norm_score"),

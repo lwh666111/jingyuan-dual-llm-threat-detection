@@ -16,7 +16,7 @@
 
 ## 2. 认证与角色
 
-### 2.1 登录
+### 2.1 登录（JWT）
 
 `POST /api/v2/auth/login`
 
@@ -40,14 +40,45 @@
   "token": "xxx",
   "expires_in": 43200,
   "role": "normal",
-  "display_name": "普通用户"
+  "display_name": "普通用户",
+  "username": "user"
 }
 ```
 
-### 2.2 角色权限矩阵
+说明：
 
-- `normal`：数据大屏、详情信息、用户中心（改自己密码）
-- `admin`：普通权限 + RAG设置、全局概览、日志、系统配置、管理用户（可改他人密码）
+- `token` 为 JWT（HS256）
+- 默认有效期 `12` 小时（可通过 API 启动参数调整）
+- 调用需要鉴权的 v2 接口时，在请求头携带：
+  - `Authorization: Bearer <token>`
+
+### 2.2 注册（普通用户）
+
+`POST /api/v2/auth/register`
+
+请求体示例：
+
+```json
+{
+  "username": "test_user01",
+  "password": "abc12345",
+  "display_name": "测试账号",
+  "role": "normal"
+}
+```
+
+约束：
+
+- 仅允许注册 `normal` 角色
+- 用户名：`3-32` 位，允许字母/数字/下划线
+- 密码：至少 `6` 位
+
+响应成功后会直接返回 JWT，可立即登录态使用。
+
+### 2.3 角色权限矩阵
+
+- `normal`：数据大屏、详情信息、扩展插件、用户中心（改自己密码）
+- `admin`：普通权限 + RAG设置、日志、系统配置、管理用户（可改他人密码）
 
 ## 3. 响应与错误约定
 
@@ -71,6 +102,8 @@
   - 说明：返回演示账号
 - `POST /api/v2/auth/login`
   - body：`username`, `password`, `role?`
+- `POST /api/v2/auth/register`
+  - body：`username`, `password`, `display_name?`, `role=normal`
 - `POST /api/v2/auth/logout`
   - 鉴权：`normal/admin`
 - `GET /api/v2/auth/profile`
@@ -90,7 +123,15 @@
 - `POST /api/v2/common/alerts/{event_id}/ack`
   - 鉴权：`normal/admin`
 
-### 4.2.1 RAG 知识库（v2）
+### 4.2.1 扩展插件（v2）
+
+- `POST /api/v2/plugins/phishing/check`
+  - 鉴权：`normal/admin`
+  - body：`url`, `token`
+  - 约束：`url` 必须以 `http://` 或 `https://` 开头
+  - 返回字段：`action`, `verdict`, `confidence`, `reason`, `evidence[]`
+
+### 4.2.2 RAG 知识库（v2）
 
 - `GET /api/v2/rag/docs?page=1&page_size=20&q=&attack_type=`
   - 鉴权：`admin`
@@ -162,6 +203,11 @@
 ```json
 {"note":"已处置并加固WAF规则"}
 ```
+
+- `POST /api/v2/pro/events/{event_id}/block-ip`
+  - 鉴权：`normal/admin`
+  - body（可选）：`reason`
+  - 说明：按事件来源 IP 执行封禁（重复封禁会返回 `already_blocked=true`）
 
 - `GET /api/v2/pro/model/performance`
   - 鉴权：`admin`

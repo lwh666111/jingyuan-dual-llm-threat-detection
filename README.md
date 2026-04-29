@@ -23,6 +23,8 @@
 - 自动检测守护 + LLM 研判守护 + 自动入库守护
 - 前端角色权限：普通用户 / 管理员
 - RAG 文档管理接口：新增、删除、重建
+- 扩展插件：钓鱼网站检测工具（后端代理调用）
+- 攻击详情支持一键封禁来源 IP
 
 ## Project Layout
 
@@ -75,6 +77,44 @@ powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
 ```
+
+## No-Docker One-Click (Windows Server Friendly)
+
+适用于“不要 Docker，只配置数据库地址”的部署方式。
+
+能力：
+
+- 自动安装 Node.js / Wireshark(TShark) / Ollama（通过 winget）
+- 自动安装 Python 依赖
+- 自动拉取 Ollama 模型
+- 自动构建 RAG sqlite 库
+- 自动写入 MySQL 运行配置并启动 `app.py` 全链路
+
+步骤：
+
+1. 先安装 Python（并加入 PATH）。
+2. 首次执行（自动生成配置模板）：
+
+```bat
+deploy\start_all_nodocker.bat
+```
+
+3. 修改 `deploy/.env.nodocker`（至少改 MySQL 地址/账号/密码）后，再次执行：
+
+```bat
+deploy\start_all_nodocker.bat
+```
+
+可选参数示例：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/start_all_nodocker.ps1 -NoModelPull
+```
+
+说明：
+
+- 该模式依赖 `winget`；若目标机没有 `winget`，请先手工安装 Node.js / Wireshark / Ollama 后再运行。
+- 抓包建议使用管理员权限终端运行（脚本会自动尝试提权）。
 
 ## One-Click Full Deploy (Recommended)
 
@@ -347,10 +387,23 @@ Demo login accounts (frontend hard-coded):
 Auth:
 
 - `GET /api/v2/auth/demo-accounts`
+- `POST /api/v2/auth/register` (register normal user and return JWT)
 - `POST /api/v2/auth/login`
 - `POST /api/v2/auth/logout`
 - `GET /api/v2/auth/profile`
 - `POST /api/v2/auth/change-password`
+
+Auth note:
+
+- v2 uses JWT Bearer token (`Authorization: Bearer <token>`)
+
+Plugins:
+
+- `POST /api/v2/plugins/phishing/check`
+
+Event handling:
+
+- `POST /api/v2/pro/events/{event_id}/block-ip`
 
 Common:
 

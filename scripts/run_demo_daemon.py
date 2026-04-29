@@ -55,14 +55,15 @@ def save_state(path: Path, state: Dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def list_input_files(input_dir: Path) -> List[Tuple[int, Path]]:
+def list_input_files(input_dir: Path, file_order: str = "newest") -> List[Tuple[int, Path]]:
     items: List[Tuple[int, Path]] = []
     for p in input_dir.glob("1.1.*.txt"):
         m = FILE_PATTERN.match(p.name)
         if not m:
             continue
         items.append((int(m.group(1)), p))
-    items.sort(key=lambda x: x[0])
+    reverse = str(file_order).lower() == "newest"
+    items.sort(key=lambda x: x[0], reverse=reverse)
     return items
 
 
@@ -230,6 +231,12 @@ def main() -> None:
     parser.add_argument("--log-file", default="output/demo_daemon.log", help="守护日志路径")
     parser.add_argument("--poll-seconds", type=int, default=5, help="轮询间隔秒")
     parser.add_argument("--stable-seconds", type=int, default=3, help="文件静止判定秒")
+    parser.add_argument(
+        "--file-order",
+        choices=["newest", "oldest"],
+        default="newest",
+        help="处理顺序：newest=新文件优先，oldest=旧文件优先",
+    )
     parser.add_argument("--retry-cooldown", type=int, default=30, help="失败重试冷却秒")
     parser.add_argument("--max-fail-attempts", type=int, default=5, help="单文件失败超过该次数后自动忽略；0=无限重试")
     parser.add_argument("--once", action="store_true", help="只扫描并处理一次后退出")
@@ -242,7 +249,7 @@ def main() -> None:
     parser.add_argument("--python-exe", default=sys.executable, help="调用 demo_workflow 的 Python")
     parser.add_argument("--preprocessor", default="", help="传给 demo_workflow 的 preprocessor 路径")
     parser.add_argument("--model", default="", help="传给 demo_workflow 的 model 路径")
-    parser.add_argument("--label-threshold", type=float, default=0.35)
+    parser.add_argument("--label-threshold", type=float, default=0.46)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--export-min-score", type=float, default=0.3)
     parser.add_argument("--update-existing-export", action="store_true")
@@ -275,7 +282,7 @@ def main() -> None:
 
     if args.skip_existing_at_start and not state.get("success"):
         seeded = 0
-        for idx, path in list_input_files(args.input_dir):
+        for idx, path in list_input_files(args.input_dir, file_order=args.file_order):
             key = path.name
             state.setdefault("success", {})[key] = {
                 "index": idx,
@@ -290,10 +297,11 @@ def main() -> None:
     log("DEMO daemon started", args.log_file)
     log(f"watch dir: {args.input_dir}", args.log_file)
     log(f"state file: {args.state_file}", args.log_file)
+    log(f"file order: {args.file_order}", args.log_file)
 
     while True:
         processed_in_round = 0
-        files = list_input_files(args.input_dir)
+        files = list_input_files(args.input_dir, file_order=args.file_order)
 
         for idx, path in files:
             did = process_one(args, state, path, idx, args.log_file)
@@ -309,3 +317,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

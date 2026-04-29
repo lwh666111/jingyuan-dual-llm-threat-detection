@@ -1,4 +1,4 @@
-const ROLE_NORMAL = "normal";
+﻿const ROLE_NORMAL = "normal";
 const ROLE_ADMIN = "admin";
 
 const DEMO_CREDENTIALS = {
@@ -11,13 +11,23 @@ const ROLE_LABEL = {
   admin: "\u7ba1\u7406\u5458",
 };
 
-const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const WEEKDAY_LABELS = [
+  "\u5468\u4e00",
+  "\u5468\u4e8c",
+  "\u5468\u4e09",
+  "\u5468\u56db",
+  "\u5468\u4e94",
+  "\u5468\u516d",
+  "\u5468\u65e5",
+];
 
 const appEl = document.getElementById("app");
 const tooltipEl = document.getElementById("tooltip");
+const chartRegistry = {};
+let viewTransitionSeq = 0;
 
 const state = {
-  token: localStorage.getItem("attack_demo_token") || "",
+  token: "",
   profile: null,
   currentView: "",
   systemStatus: null,
@@ -52,6 +62,13 @@ const state = {
     selectedEventId: "",
     selectedEventDetail: null,
     selectedNodeDetail: null,
+    blocked: {
+      q: "",
+      page: 1,
+      pageSize: 10,
+      total: 0,
+      items: [],
+    },
   },
   admin: {
     summary: null,
@@ -76,6 +93,25 @@ const state = {
     attackType: "",
     items: [],
   },
+  plugins: {
+    activeTool: "phishing",
+    phishing: {
+      url: "",
+      token: "",
+      result: null,
+      checkedAt: "",
+    },
+    ipAnalyze: {
+      ip: "",
+      result: null,
+      checkedAt: "",
+    },
+    localStatus: {
+      result: null,
+      checkedAt: "",
+      loading: false,
+    },
+  },
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -83,17 +119,58 @@ document.addEventListener("DOMContentLoaded", () => {
   bootstrap();
 });
 
-async function bootstrap() {
-  if (state.token) {
+window.addEventListener("resize", () => {
+  Object.values(chartRegistry).forEach((ins) => {
     try {
-      state.profile = await api("/api/v2/auth/profile");
-      renderMainLayout();
-      return;
-    } catch (err) {
-      console.warn("restore profile failed", err);
-      state.token = "";
-      localStorage.removeItem("attack_demo_token");
+      ins?.resize?.();
+    } catch {}
+  });
+});
+
+function disposeAllCharts() {
+  Object.keys(chartRegistry).forEach((k) => {
+    try {
+      chartRegistry[k]?.dispose?.();
+    } catch {}
+    delete chartRegistry[k];
+  });
+}
+
+function animateViewRoot(direction = "right") {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  const token = ++viewTransitionSeq;
+  root.classList.remove("page-enter", "page-enter-left");
+  void root.offsetWidth;
+  root.classList.add(direction === "left" ? "page-enter-left" : "page-enter");
+  setTimeout(() => {
+    if (token === viewTransitionSeq) {
+      root.classList.remove("page-enter", "page-enter-left");
     }
+  }, 560);
+}
+
+function getEchartsInstance(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el || typeof window.echarts === "undefined") return null;
+  if (chartRegistry[containerId] && !chartRegistry[containerId].isDisposed?.()) {
+    return chartRegistry[containerId];
+  }
+  const ins = window.echarts.init(el, null, { renderer: "canvas" });
+  chartRegistry[containerId] = ins;
+  return ins;
+}
+
+async function bootstrap() {
+  // Move to cookie-based session persistence. Drop legacy local token cache.
+  localStorage.removeItem("attack_demo_token");
+  try {
+    state.profile = await api("/api/v2/auth/profile");
+    renderMainLayout();
+    return;
+  } catch (err) {
+    console.warn("restore profile failed", err);
+    state.token = "";
   }
   renderLoginPage();
 }
@@ -106,28 +183,50 @@ function renderLoginPage() {
   appEl.innerHTML = `
     <section class="login-shell">
       <div class="login-card">
-        <h1 class="login-title">AI攻击态势感知平台</h1>
-        <p class="login-subtitle">请选择身份后自动填充账号，点击登录进入对应专属页面</p>
+        <h1 class="login-title">AI\u653b\u51fb\u6001\u52bf\u611f\u77e5\u5e73\u53f0</h1>
+        <p class="login-subtitle">\u8bf7\u9009\u62e9\u8eab\u4efd\u540e\u81ea\u52a8\u586b\u5145\u8d26\u53f7\uff0c\u70b9\u51fb\u767b\u5f55\u8fdb\u5165\u5bf9\u5e94\u9875\u9762</p>
 
         <div class="form-row">
-          <label for="loginUsername">用户名</label>
+          <label for="loginUsername">\u7528\u6237\u540d</label>
           <input id="loginUsername" type="text" autocomplete="username" />
         </div>
         <div class="form-row">
-          <label for="loginPassword">密码</label>
+          <label for="loginPassword">\u5bc6\u7801</label>
           <input id="loginPassword" type="password" autocomplete="current-password" />
         </div>
 
         <div class="form-row">
-          <label>身份快捷切换</label>
+          <label>\u8eab\u4efd\u5feb\u6377\u5207\u6362</label>
           <div class="role-switch">
-            <button class="btn active" data-login-role="${ROLE_NORMAL}">普通用户</button>
-            <button class="btn" data-login-role="${ROLE_ADMIN}">管理员</button>
+            <button class="btn active" data-login-role="${ROLE_NORMAL}">\u666e\u901a\u7528\u6237</button>
+            <button class="btn" data-login-role="${ROLE_ADMIN}">\u7ba1\u7406\u5458</button>
           </div>
         </div>
 
-        <button id="loginBtn" class="btn btn-primary" style="width:100%;">登录系统</button>
+        <button id="loginBtn" class="btn btn-primary" style="width:100%;">\u767b\u5f55\u7cfb\u7edf</button>
+        <button id="toggleRegisterBtn" class="btn btn-ghost" style="width:100%;margin-top:8px;">\u6ce8\u518c\u65b0\u8d26\u53f7</button>
         <div id="loginError" class="login-error"></div>
+
+        <div id="registerPanel" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(95,152,206,0.25);">
+          <div class="form-row">
+            <label for="registerDisplayName">\u663e\u793a\u540d\u79f0</label>
+            <input id="registerDisplayName" type="text" autocomplete="nickname" />
+          </div>
+          <div class="form-row">
+            <label for="registerUsername">\u6ce8\u518c\u7528\u6237\u540d\uff08\u5b57\u6bcd/\u6570\u5b57/\u4e0b\u5212\u7ebf\uff09</label>
+            <input id="registerUsername" type="text" autocomplete="username" />
+          </div>
+          <div class="form-row">
+            <label for="registerPassword">\u6ce8\u518c\u5bc6\u7801\uff08\u81f3\u5c116\u4f4d\uff09</label>
+            <input id="registerPassword" type="password" autocomplete="new-password" />
+          </div>
+          <div class="form-row">
+            <label for="registerPassword2">\u786e\u8ba4\u5bc6\u7801</label>
+            <input id="registerPassword2" type="password" autocomplete="new-password" />
+          </div>
+          <button id="registerBtn" class="btn btn-success" style="width:100%;">\u63d0\u4ea4\u6ce8\u518c</button>
+          <div id="registerError" class="login-error"></div>
+        </div>
       </div>
     </section>
   `;
@@ -149,7 +248,7 @@ function renderLoginPage() {
     const password = String(appEl.querySelector("#loginPassword")?.value || "").trim();
     const errorEl = appEl.querySelector("#loginError");
     if (!username || !password) {
-      if (errorEl) errorEl.textContent = "请输入用户名和密码";
+      if (errorEl) errorEl.textContent = "\u8bf7\u8f93\u5165\u7528\u6237\u540d\u548c\u5bc6\u7801";
       return;
     }
 
@@ -161,13 +260,58 @@ function renderLoginPage() {
         method: "POST",
         body: { username, password, role: selectedRole },
       });
-      state.token = resp.token;
-      localStorage.setItem("attack_demo_token", state.token);
+      state.token = resp.token || "";
+      localStorage.removeItem("attack_demo_token");
       state.profile = await api("/api/v2/auth/profile");
       renderMainLayout();
-      showToast(`登录成功，欢迎 ${state.profile.display_name || ""}`);
+      showToast(`\u767b\u5f55\u6210\u529f\uff0c\u6b22\u8fce ${state.profile.display_name || ""}`);
     } catch (err) {
-      if (errorEl) errorEl.textContent = `登录失败：${err.message}`;
+      if (errorEl) errorEl.textContent = `\u767b\u5f55\u5931\u8d25\uff1a${err.message}`;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  appEl.querySelector("#toggleRegisterBtn")?.addEventListener("click", () => {
+    const panel = appEl.querySelector("#registerPanel");
+    if (!panel) return;
+    panel.classList.toggle("hidden");
+  });
+
+  appEl.querySelector("#registerBtn")?.addEventListener("click", async () => {
+    const displayName = String(appEl.querySelector("#registerDisplayName")?.value || "").trim();
+    const username = String(appEl.querySelector("#registerUsername")?.value || "").trim();
+    const password = String(appEl.querySelector("#registerPassword")?.value || "").trim();
+    const password2 = String(appEl.querySelector("#registerPassword2")?.value || "").trim();
+    const errorEl = appEl.querySelector("#registerError");
+    if (errorEl) errorEl.textContent = "";
+    if (!username || !password) {
+      if (errorEl) errorEl.textContent = "\u8bf7\u8f93\u5165\u6ce8\u518c\u7528\u6237\u540d\u548c\u5bc6\u7801";
+      return;
+    }
+    if (password !== password2) {
+      if (errorEl) errorEl.textContent = "\u4e24\u6b21\u8f93\u5165\u5bc6\u7801\u4e0d\u4e00\u81f4";
+      return;
+    }
+
+    const btn = appEl.querySelector("#registerBtn");
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await api("/api/v2/auth/register", {
+        method: "POST",
+        body: {
+          username,
+          password,
+          display_name: displayName || username,
+        },
+      });
+      state.token = resp.token || "";
+      localStorage.removeItem("attack_demo_token");
+      state.profile = await api("/api/v2/auth/profile");
+      renderMainLayout();
+      showToast(`\u6ce8\u518c\u5e76\u767b\u5f55\u6210\u529f\uff0c\u6b22\u8fce ${state.profile.display_name || ""}`);
+    } catch (err) {
+      if (errorEl) errorEl.textContent = `\u6ce8\u518c\u5931\u8d25\uff1a${err.message}`;
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -179,7 +323,7 @@ function fillLoginCredential(role) {
   const usernameEl = appEl.querySelector("#loginUsername");
   const passwordEl = appEl.querySelector("#loginPassword");
   if (usernameEl) usernameEl.value = row.username;
-  if (passwordEl) passwordEl.value = row.password;
+  if (passwordEl) passwordEl.value = "";
 }
 
 function renderMainLayout() {
@@ -244,9 +388,9 @@ function getTabsByRole(role) {
     return [
       { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
       { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
+      { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
       { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
       { id: "rag-settings", label: "\u77e5\u8bc6\u5e93\u8bbe\u7f6e\uff08RAG\uff09" },
-      { id: "admin-overview", label: "\u5168\u5c40\u6982\u89c8" },
       { id: "admin-logs", label: "\u64cd\u4f5c\u65e5\u5fd7" },
       { id: "admin-config", label: "\u7cfb\u7edf\u914d\u7f6e" },
       { id: "admin-users", label: "\u7ba1\u7406\u7528\u6237" },
@@ -255,51 +399,65 @@ function getTabsByRole(role) {
   return [
     { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
     { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
+    { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
     { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
   ];
 }
 
 function switchView(viewId) {
   if (!viewId) return;
+  const prevView = state.currentView;
   state.currentView = viewId;
   renderTabs();
   clearIntervalSafe("view");
+  disposeAllCharts();
+  const tabs = getTabsByRole(state.profile?.role || ROLE_NORMAL);
+  const prevIdx = tabs.findIndex((x) => x.id === prevView);
+  const nextIdx = tabs.findIndex((x) => x.id === viewId);
+  const direction = prevIdx >= 0 && nextIdx >= 0 && nextIdx < prevIdx ? "left" : "right";
 
   if (viewId === "screen") {
     renderScreenView();
     setViewRefresh(5000, refreshScreenData);
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "pro-query") {
     renderProQueryView();
-    setViewRefresh(8000, loadProEvents);
+    setViewRefresh(8000, refreshProWorkspace);
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "rag-settings") {
     renderRagSettingsView();
     setViewRefresh(15000, loadRagDocs);
+    animateViewRoot(direction);
+    return;
+  }
+  if (viewId === "plugins") {
+    renderPluginHubView();
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "user-center") {
     renderUserCenterView();
-    return;
-  }
-  if (viewId === "admin-overview") {
-    renderAdminOverview();
-    setViewRefresh(8000, refreshAdminOverview);
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "admin-logs") {
     renderAdminLogsView();
     setViewRefresh(12000, loadAdminLogs);
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "admin-config") {
     renderAdminConfigView();
+    animateViewRoot(direction);
     return;
   }
   if (viewId === "admin-users") {
     renderAdminUsersView();
+    animateViewRoot(direction);
     return;
   }
 }
@@ -372,7 +530,7 @@ function renderScreenView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
   root.innerHTML = `
-    <section class="grid-6">
+    <section class="grid-6 dashboard-kpi-grid">
       <article class="kpi-card"><div class="kpi-label">今日遭遇攻击总数</div><div id="kpi_today_attack" class="kpi-value">0</div><div id="kpi_yoy" class="kpi-label">同比：-</div></article>
       <article class="kpi-card"><div class="kpi-label">当前活跃高危告警数</div><div id="kpi_high_alert" class="kpi-value">0</div></article>
       <article class="kpi-card"><div class="kpi-label">攻击拦截成功率</div><div id="kpi_intercept" class="kpi-value">0%</div></article>
@@ -381,18 +539,18 @@ function renderScreenView() {
       <article class="kpi-card"><div class="kpi-label">在线防护节点数</div><div id="kpi_nodes" class="kpi-value">0</div></article>
     </section>
 
-    <section class="grid-2" style="margin-top:10px;">
+    <section class="grid-2 dashboard-main-grid">
       <article class="panel">
-        <div class="panel-head"><h3 class="panel-title">近7天攻击趋势（总攻击 / 被拦截）</h3><span class="panel-sub">峰值红点标记</span></div>
+        <div class="panel-head"><h3 class="panel-title">近7天攻击趋势（总攻击 / 被拦截）</h3><span class="panel-sub">鼠标悬停查看明细</span></div>
         <div id="chartTrend7d" class="chart-box"></div>
       </article>
       <article class="panel">
-        <div class="panel-head"><h3 class="panel-title">攻击类型 TOP10</h3><span class="panel-sub">Top3 红色渐变</span></div>
+        <div class="panel-head"><h3 class="panel-title">攻击类型 TOP10</h3><span class="panel-sub">按数量降序</span></div>
         <div id="chartTopTypes" class="chart-box"></div>
       </article>
     </section>
 
-    <section class="grid-3" style="margin-top:10px;">
+    <section class="grid-3 dashboard-sub-grid">
       <article class="panel">
         <div class="panel-head"><h3 class="panel-title">攻击来源地区分布</h3></div>
         <div id="chartSourcePie" class="chart-box short"></div>
@@ -475,7 +633,11 @@ function renderProQueryView() {
     <section class="panel">
       <div class="panel-head">
         <h3 class="panel-title">攻击详情信息</h3>
-        <button id="btnSwitchToScreen" class="btn btn-primary">切换到数据大屏</button>
+        <div class="ops-group">
+          <button id="btnSwitchToScreen" class="btn btn-primary">切换到数据大屏</button>
+          <button id="pro_refresh" class="btn btn-success">刷新</button>
+          <button id="pro_export" class="btn btn-ghost">导出表格（CSV）</button>
+        </div>
       </div>
       <div class="toolbar">
         <div class="filter-group">
@@ -498,28 +660,24 @@ function renderProQueryView() {
           <input id="pro_keyword" placeholder="关键词（事件ID/IP/接口）" />
         </div>
         <div class="ops-group">
-          <button id="pro_refresh" class="btn btn-success">刷新</button>
-          <button id="pro_export" class="btn btn-ghost">导出表格（CSV）</button>
+          <select id="pro_batch_status" style="min-width:180px;" ${canHandle ? "" : "disabled"}>
+            <option value="unprocessed">未处理</option>
+            <option value="processing">处理中</option>
+            <option value="done" selected>已处理</option>
+            <option value="ignored">已忽略</option>
+          </select>
+          <button id="pro_apply_batch" class="btn btn-danger" ${canHandle ? "" : "disabled"}>批量标记状态</button>
+          <span class="panel-sub">已选中 <strong id="pro_selected_count">0</strong> 条</span>
         </div>
       </div>
-      <div id="pro_custom_time" class="filter-group hidden" style="margin-top:8px;grid-template-columns:repeat(2,minmax(220px,1fr));">
+      <div id="pro_custom_time" class="filter-group hidden pro-custom-time">
         <input id="pro_start_time" type="datetime-local" />
         <input id="pro_end_time" type="datetime-local" />
       </div>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-        <select id="pro_batch_status" style="max-width:180px;" ${canHandle ? "" : "disabled"}>
-          <option value="unprocessed">未处理</option>
-          <option value="processing">处理中</option>
-          <option value="done" selected>已处理</option>
-          <option value="ignored">已忽略</option>
-        </select>
-        <button id="pro_apply_batch" class="btn btn-danger" ${canHandle ? "" : "disabled"}>批量标记状态</button>
-        <span class="panel-sub">已选中 <strong id="pro_selected_count">0</strong> 条</span>
-      </div>
     </section>
 
-    <section class="split" style="margin-top:10px;">
-      <article class="panel">
+    <section class="pro-workspace">
+      <article class="panel pro-events-panel">
         <div class="panel-head"><h3 class="panel-title">攻击事件列表（按时间倒序）</h3><span class="panel-sub" id="pro_total_info">总计 0</span></div>
         <div class="table-shell">
           <table>
@@ -534,27 +692,60 @@ function renderProQueryView() {
                 <th>目标节点</th>
                 <th>攻击结果</th>
                 <th>处理状态</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody id="pro_table_body"></tbody>
           </table>
         </div>
-        <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px;">
+        <div class="table-pager">
           <button id="pro_prev_page" class="btn btn-ghost">上一页</button>
           <button id="pro_next_page" class="btn btn-ghost">下一页</button>
         </div>
       </article>
 
-      <article class="panel">
+      <article class="panel pro-detail-panel">
         <div class="panel-head"><h3 class="panel-title">事件详情</h3><span class="panel-sub" id="pro_detail_hint">请选择左侧事件</span></div>
         <div id="pro_event_detail" class="detail-card">暂无详情</div>
         <div class="note-box">
           <textarea id="pro_note_text" rows="3" placeholder="处理备注" ${canHandle ? "" : "disabled"}></textarea>
           <button id="pro_save_note" class="btn btn-success" ${canHandle ? "" : "disabled"}>保存备注</button>
         </div>
-        <div class="panel-head" style="margin-top:10px;"><h3 class="panel-title">节点详情</h3></div>
+        <div class="panel-head pro-node-head"><h3 class="panel-title">节点详情</h3></div>
         <div id="pro_node_detail" class="detail-card">点击目标节点名称查看</div>
       </article>
+    </section>
+
+    <section class="panel blocked-ip-panel">
+      <div class="panel-head">
+        <h3 class="panel-title">已封禁IP列表</h3>
+        <div class="ops-group">
+          <input id="blocked_ip_q" placeholder="按IP/事件ID/操作人搜索" />
+          <button id="blocked_ip_refresh" class="btn btn-success">刷新列表</button>
+        </div>
+      </div>
+      <div class="table-shell blocked-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>IP地址</th>
+              <th>来源事件ID</th>
+              <th>封禁原因</th>
+              <th>操作人</th>
+              <th>封禁时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="blocked_ip_table_body"></tbody>
+        </table>
+      </div>
+      <div class="table-pager">
+        <span class="panel-sub" id="blocked_ip_total">总计 0 条</span>
+        <div class="ops-group">
+          <button id="blocked_ip_prev" class="btn btn-ghost">上一页</button>
+          <button id="blocked_ip_next" class="btn btn-ghost">下一页</button>
+        </div>
+      </div>
     </section>
   `;
 
@@ -571,6 +762,19 @@ function renderProQueryView() {
     const maxPage = Math.max(1, Math.ceil(state.pro.total / state.pro.pageSize));
     state.pro.listPage = Math.min(maxPage, state.pro.listPage + 1);
     loadProEvents().catch((err) => showToast(err.message));
+  });
+  document.getElementById("blocked_ip_refresh")?.addEventListener("click", () => loadBlockedIpList(true));
+  document.getElementById("blocked_ip_q")?.addEventListener("keyup", (ev) => {
+    if (ev.key === "Enter") loadBlockedIpList(true).catch((err) => showToast(err.message));
+  });
+  document.getElementById("blocked_ip_prev")?.addEventListener("click", () => {
+    state.pro.blocked.page = Math.max(1, state.pro.blocked.page - 1);
+    loadBlockedIpList().catch((err) => showToast(err.message));
+  });
+  document.getElementById("blocked_ip_next")?.addEventListener("click", () => {
+    const maxPage = Math.max(1, Math.ceil(state.pro.blocked.total / state.pro.blocked.pageSize));
+    state.pro.blocked.page = Math.min(maxPage, state.pro.blocked.page + 1);
+    loadBlockedIpList().catch((err) => showToast(err.message));
   });
 
   const timeSelect = document.getElementById("pro_time_range");
@@ -610,6 +814,12 @@ function renderProQueryView() {
 
   initProOptions().catch((err) => showToast(`加载筛选项失败：${err.message}`));
   loadProEvents().catch((err) => showToast(`加载事件失败：${err.message}`));
+  loadBlockedIpList(true).catch((err) => showToast(`加载封禁列表失败：${err.message}`));
+}
+
+async function refreshProWorkspace() {
+  await loadProEvents();
+  await loadBlockedIpList();
 }
 
 async function initProOptions() {
@@ -689,11 +899,12 @@ function renderProTable() {
   const bodyEl = document.getElementById("pro_table_body");
   if (!bodyEl) return;
   if (!state.pro.items.length) {
-    bodyEl.innerHTML = `<tr><td colspan="9" class="panel-sub">暂无数据</td></tr>`;
+    bodyEl.innerHTML = `<tr><td colspan="10" class="panel-sub">暂无数据</td></tr>`;
   } else {
     bodyEl.innerHTML = state.pro.items
       .map((row) => {
         const checked = state.pro.selectedIds.has(row.event_id) ? "checked" : "";
+        const ipBlocked = Number(row.ip_blocked || 0) === 1;
         return `
           <tr class="${row.event_id === state.pro.selectedEventId ? "active" : ""}">
             <td><input type="checkbox" data-pro-check="${escapeHtml(row.event_id)}" ${checked} /></td>
@@ -705,6 +916,7 @@ function renderProTable() {
             <td><span class="link-btn" data-pro-node="${escapeHtml(row.target_node || "")}">${escapeHtml(row.target_node || "-")}</span></td>
             <td>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</td>
             <td>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</td>
+            <td><button type="button" class="btn ${ipBlocked ? "btn-ghost" : "btn-danger"}" data-pro-ipaction="${escapeHtml(row.event_id)}" data-pro-ipblocked="${ipBlocked ? "1" : "0"}">${ipBlocked ? "解封IP" : "封禁IP"}</button></td>
           </tr>
         `;
       })
@@ -742,6 +954,76 @@ function renderProTable() {
       loadProNodeDetail(nodeName).catch((err) => showToast(err.message));
     });
   });
+  bodyEl.querySelectorAll("[data-pro-ipaction]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const eventId = el.getAttribute("data-pro-ipaction");
+      const ipBlocked = el.getAttribute("data-pro-ipblocked") === "1";
+      if (!eventId) return;
+      if (ipBlocked) {
+        unblockProEventIp(eventId).catch((err) => showToast(err.message));
+      } else {
+        blockProEventIp(eventId).catch((err) => showToast(err.message));
+      }
+    });
+  });
+}
+
+async function loadBlockedIpList(forcePageOne = false) {
+  if (forcePageOne) state.pro.blocked.page = 1;
+  state.pro.blocked.q = String(document.getElementById("blocked_ip_q")?.value || "").trim();
+  const params = new URLSearchParams();
+  params.set("page", String(state.pro.blocked.page));
+  params.set("page_size", String(state.pro.blocked.pageSize));
+  if (state.pro.blocked.q) params.set("q", state.pro.blocked.q);
+  const data = await api(`/api/v2/pro/blocked-ips?${params.toString()}`);
+  state.pro.blocked.items = Array.isArray(data.items) ? data.items : [];
+  state.pro.blocked.total = Number(data.total || 0);
+  renderBlockedIpTable();
+}
+
+function renderBlockedIpTable() {
+  const bodyEl = document.getElementById("blocked_ip_table_body");
+  const totalEl = document.getElementById("blocked_ip_total");
+  if (totalEl) {
+    const maxPage = Math.max(1, Math.ceil(state.pro.blocked.total / state.pro.blocked.pageSize));
+    totalEl.textContent = `总计 ${state.pro.blocked.total} 条，当前第 ${state.pro.blocked.page}/${maxPage} 页`;
+  }
+  if (!bodyEl) return;
+  if (!state.pro.blocked.items.length) {
+    bodyEl.innerHTML = `<tr><td colspan="6" class="panel-sub">暂无封禁记录</td></tr>`;
+    return;
+  }
+  bodyEl.innerHTML = state.pro.blocked.items
+    .map(
+      (x) => `
+      <tr>
+        <td>${escapeHtml(x.ip_address || "-")}</td>
+        <td>${escapeHtml(x.source_event_id || "-")}</td>
+        <td>${escapeHtml(x.reason || "-")}</td>
+        <td>${escapeHtml(x.blocked_by || "-")} (${escapeHtml(x.blocked_role || "-")})</td>
+        <td>${escapeHtml(x.blocked_at || "-")}</td>
+        <td><button class="btn btn-ghost" data-unblock-ip="${escapeHtml(x.ip_address || "")}">解封该IP</button></td>
+      </tr>
+    `
+    )
+    .join("");
+  bodyEl.querySelectorAll("[data-unblock-ip]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const ip = String(el.getAttribute("data-unblock-ip") || "").trim();
+      if (!ip) return;
+      try {
+        await api("/api/v2/pro/blocked-ips/unblock", {
+          method: "POST",
+          body: { ip_address: ip, reason: "manual_unblock_from_blocked_list" },
+        });
+        showToast(`已解封IP：${ip}`);
+        await loadProEvents();
+        await loadBlockedIpList();
+      } catch (err) {
+        showToast(`解封失败：${err.message}`);
+      }
+    });
+  });
 }
 
 async function loadProEventDetail(eventId) {
@@ -772,6 +1054,7 @@ function renderProEventDetail() {
       <div class="kv"><strong>风险等级：</strong>${riskBadge(row.risk_level)}</div>
       <div class="kv"><strong>攻击类型：</strong>${escapeHtml(formatAttackType(row.attack_type || "-"))}</div>
       <div class="kv"><strong>来源IP：</strong>${escapeHtml(row.source_ip || "-")} (${escapeHtml(row.source_region || "-")})</div>
+      <div class="kv"><strong>IP\u5c01\u7981\u72b6\u6001\uff1a</strong>${Number(row.ip_blocked || 0) === 1 ? "\u5df2\u5c01\u7981" : "\u672a\u5c01\u7981"}</div>
       <div class="kv"><strong>目标节点：</strong>${escapeHtml(row.target_node || "-")}</div>
       <div class="kv"><strong>目标接口：</strong>${escapeHtml(row.target_interface || "-")}</div>
       <div class="kv"><strong>攻击结果：</strong>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</div>
@@ -853,6 +1136,69 @@ async function saveProEventNote() {
   }
 }
 
+
+async function blockProEventIp(eventId) {
+  const btn = document.querySelector(`[data-pro-ipaction="${escapeHtml(eventId)}"]`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "封禁中...";
+  }
+  try {
+    const resp = await api(`/api/v2/pro/events/${encodeURIComponent(eventId)}/block-ip`, {
+      method: "POST",
+      body: { reason: "manual_block_from_ui", block_mode: "source" },
+    });
+    const ips = Array.isArray(resp.blocked_ips) ? resp.blocked_ips : [];
+    const tip = ips.length ? ips.join(", ") : (resp.source_ip || "-");
+    showToast(`已封禁来源IP（双向）：${tip}`);
+    await loadProEvents();
+    await loadBlockedIpList();
+    if (state.pro.selectedEventId) {
+      await loadProEventDetail(state.pro.selectedEventId);
+    }
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.includes("管理员权限") || msg.includes("firewall")) {
+      showToast("封禁失败：请用管理员权限启动 app.py 后重试");
+    } else {
+      showToast(`封禁失败：${msg || "未知错误"}`);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function unblockProEventIp(eventId) {
+  const btn = document.querySelector(`[data-pro-ipaction="${escapeHtml(eventId)}"]`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "解封中...";
+  }
+  try {
+    const resp = await api(`/api/v2/pro/events/${encodeURIComponent(eventId)}/unblock-ip`, {
+      method: "POST",
+      body: { reason: "manual_unblock_from_ui", block_mode: "source" },
+    });
+    const ips = Array.isArray(resp.unblocked_ips) ? resp.unblocked_ips : [];
+    const tip = ips.length ? ips.join(", ") : (resp.source_ip || "-");
+    showToast(`已解封来源IP：${tip}`);
+    await loadProEvents();
+    await loadBlockedIpList();
+    if (state.pro.selectedEventId) {
+      await loadProEventDetail(state.pro.selectedEventId);
+    }
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.includes("管理员权限") || msg.includes("firewall")) {
+      showToast("解封失败：请用管理员权限启动 app.py 后重试");
+    } else {
+      showToast(`解封失败：${msg || "未知错误"}`);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function exportProEventsCsv() {
   if (!state.pro.items.length) {
     showToast("暂无可导出数据");
@@ -880,7 +1226,7 @@ function renderRagSettingsView() {
     <section class="panel">
       <div class="panel-head">
         <h3 class="panel-title">知识库设置（RAG）</h3>
-        <div style="display:flex;gap:8px;">
+        <div class="ops-group">
           <button id="rag_refresh" class="btn btn-success">刷新</button>
           <button id="rag_rebuild" class="btn btn-danger" ${canRebuild ? "" : "disabled"}>按种子重建</button>
         </div>
@@ -891,10 +1237,10 @@ function renderRagSettingsView() {
           <input id="rag_attack_type" placeholder="攻击类型（可选）" />
         </div>
       </div>
-      <div style="margin-top:8px;" class="panel-sub">当前共 <strong id="rag_total">0</strong> 条知识</div>
+      <div class="panel-sub top-gap-sm">当前共 <strong id="rag_total">0</strong> 条知识</div>
     </section>
 
-    <section class="split" style="margin-top:10px;">
+    <section class="split">
       <article class="panel">
         <div class="panel-head"><h3 class="panel-title">知识列表</h3></div>
         <div class="table-shell">
@@ -912,7 +1258,7 @@ function renderRagSettingsView() {
             <tbody id="rag_table_body"></tbody>
           </table>
         </div>
-        <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px;">
+        <div class="table-pager">
           <button id="rag_prev_page" class="btn btn-ghost">上一页</button>
           <button id="rag_next_page" class="btn btn-ghost">下一页</button>
         </div>
@@ -934,19 +1280,19 @@ function renderRagSettingsView() {
             </select>
           </div>
         </div>
-        <div style="margin-top:8px;">
+        <div class="top-gap-sm">
           <label class="panel-sub">正文内容</label>
           <textarea id="rag_new_content" rows="4" placeholder="知识正文"></textarea>
         </div>
-        <div style="margin-top:8px;">
+        <div class="top-gap-sm">
           <label class="panel-sub">判定证据</label>
           <textarea id="rag_new_evidence" rows="3" placeholder="命中依据"></textarea>
         </div>
-        <div style="margin-top:8px;">
+        <div class="top-gap-sm">
           <label class="panel-sub">处置建议</label>
           <textarea id="rag_new_mitigation" rows="3" placeholder="缓解与处置建议"></textarea>
         </div>
-        <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+        <div class="row-actions">
           <button id="rag_add_doc" class="btn btn-primary">新增到知识库</button>
         </div>
       </article>
@@ -1063,6 +1409,260 @@ async function rebuildRagFromSeed() {
   }
 }
 
+
+function renderPluginHubView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  const active = String(state.plugins.activeTool || "phishing");
+  root.innerHTML = `
+    <section class="split">
+      <article class="panel plugin-tools-panel">
+        <div class="panel-head">
+          <h3 class="panel-title">\u6269\u5c55\u63d2\u4ef6</h3>
+          <span class="panel-sub">\u5b9e\u7528\u5de5\u5177\u5217\u8868</span>
+        </div>
+        <div class="plugin-tool-list">
+          <button id="pluginToolPhishing" class="plugin-tool-item ${active === "phishing" ? "active" : ""}">
+            <div class="plugin-tool-name">\u9493\u9c7c\u7f51\u7ad9\u68c0\u6d4b\u5de5\u5177</div>
+            <div class="plugin-tool-desc">\u68c0\u6d4b\u76ee\u6807URL\u662f\u5426\u5b58\u5728\u9493\u9c7c\u98ce\u9669\u5e76\u8fd4\u56de\u8bc1\u636e\u94fe</div>
+          </button>
+          <button id="pluginToolIpAnalyze" class="plugin-tool-item ${active === "ip_analyze" ? "active" : ""}">
+            <div class="plugin-tool-name">IP地址分析工具</div>
+            <div class="plugin-tool-desc">输入IP地址，返回归属地区与公网/内网判定</div>
+          </button>
+          <button id="pluginToolLocalStatus" class="plugin-tool-item ${active === "local_status" ? "active" : ""}">
+            <div class="plugin-tool-name">本机状态工具</div>
+            <div class="plugin-tool-desc">查看本机CPU、内存、磁盘和运行时长状态</div>
+          </button>
+        </div>
+      </article>
+
+      <article class="panel plugin-detail-panel">
+        <div class="panel-head">
+          <h3 class="panel-title">\u5b9e\u7528\u5de5\u5177</h3>
+          <span class="panel-sub">\u8bf7\u8f93\u5165\u53c2\u6570\u540e\u6267\u884c\u68c0\u6d4b</span>
+        </div>
+        <div id="pluginDetailBody"></div>
+      </article>
+    </section>
+  `;
+  document.getElementById("pluginToolPhishing")?.addEventListener("click", () => {
+    activatePluginTool("phishing");
+  });
+  document.getElementById("pluginToolIpAnalyze")?.addEventListener("click", () => {
+    activatePluginTool("ip_analyze");
+  });
+  document.getElementById("pluginToolLocalStatus")?.addEventListener("click", () => {
+    activatePluginTool("local_status");
+    if (!state.plugins.localStatus.result && !state.plugins.localStatus.loading) {
+      loadPluginLocalStatus().catch((err) => showToast(`加载本机状态失败：${err.message}`));
+    }
+  });
+  renderPluginDetailBody();
+}
+
+function activatePluginTool(toolName) {
+  state.plugins.activeTool = toolName;
+  renderPluginHubView();
+}
+
+function renderPluginDetailBody() {
+  const box = document.getElementById("pluginDetailBody");
+  if (!box) return;
+  const activeTool = String(state.plugins.activeTool || "phishing");
+  if (activeTool === "phishing") {
+    renderPluginPhishingDetail(box);
+    return;
+  }
+  if (activeTool === "ip_analyze") {
+    renderPluginIpAnalyzeDetail(box);
+    return;
+  }
+  if (activeTool === "local_status") {
+    renderPluginLocalStatusDetail(box);
+    return;
+  }
+  box.innerHTML = `<div class="panel-sub">\u6682\u65e0\u5de5\u5177</div>`;
+}
+
+function renderPluginPhishingDetail(box) {
+  const p = state.plugins.phishing;
+  const result = p.result || {};
+  const evidence = Array.isArray(result.evidence) ? result.evidence : [];
+  const verdict = String(result.verdict || "").toLowerCase();
+  let verdictClass = "badge-gray";
+  if (verdict === "phishing") verdictClass = "badge-red";
+  else if (verdict === "safe") verdictClass = "badge-green";
+  else if (verdict) verdictClass = "badge-yellow";
+
+  box.innerHTML = `
+    <div class="detail-grid">
+      <div>
+        <label class="panel-sub">\u68c0\u6d4b URL\uff08\u5fc5\u987b http/https\uff09</label>
+        <input id="pluginPhishingUrl" value="${escapeHtml(p.url || "")}" placeholder="https://example.com/login" />
+      </div>
+      <div>
+        <label class="panel-sub">Token</label>
+        <input id="pluginPhishingToken" value="${escapeHtml(p.token || "")}" placeholder="\u8bf7\u8f93\u5165\u68c0\u6d4b token" />
+      </div>
+    </div>
+    <div class="plugin-actions-row">
+      <button id="pluginPhishingSubmit" class="btn btn-primary">\u5f00\u59cb\u68c0\u6d4b</button>
+      <span class="panel-sub" id="pluginPhishingHint">${escapeHtml(p.checkedAt ? `\u6700\u8fd1\u68c0\u6d4b\uff1a${p.checkedAt}` : "\u5c1a\u672a\u68c0\u6d4b")}</span>
+    </div>
+    <div class="plugin-result-shell">
+      <div class="plugin-result-row"><span>\u52a8\u4f5c</span><strong>${escapeHtml(result.action || "-")}</strong></div>
+      <div class="plugin-result-row"><span>\u5224\u5b9a\u7ed3\u679c</span><strong class="${verdictClass}">${escapeHtml(result.verdict || "-")}</strong></div>
+      <div class="plugin-result-row"><span>\u7f6e\u4fe1\u5ea6</span><strong>${result.confidence === undefined || result.confidence === null ? "-" : escapeHtml(String(result.confidence))}</strong></div>
+      <div class="plugin-result-row"><span>\u5224\u5b9a\u4f9d\u636e</span><strong>${escapeHtml(result.reason || "-")}</strong></div>
+      <div class="plugin-result-evidence">
+        <div class="panel-sub">\u8bc1\u636e\u94fe</div>
+        <ul>
+          ${evidence.length ? evidence.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("") : "<li>-</li>"}
+        </ul>
+      </div>
+    </div>
+  `;
+  document.getElementById("pluginPhishingSubmit")?.addEventListener("click", runPluginPhishingCheck);
+}
+
+function renderPluginIpAnalyzeDetail(box) {
+  const p = state.plugins.ipAnalyze;
+  const result = p.result || {};
+  const isPublic = result.is_public === undefined ? "-" : (result.is_public ? "公网IP" : "内网/保留地址");
+  box.innerHTML = `
+    <div class="detail-grid">
+      <div>
+        <label class="panel-sub">IP地址</label>
+        <input id="pluginIpInput" value="${escapeHtml(p.ip || "")}" placeholder="例如：8.8.8.8 或 192.168.1.10" />
+      </div>
+    </div>
+    <div class="plugin-actions-row">
+      <button id="pluginIpSubmit" class="btn btn-primary">开始分析</button>
+      <span class="panel-sub">${escapeHtml(p.checkedAt ? `最近分析：${p.checkedAt}` : "尚未分析")}</span>
+    </div>
+    <div class="plugin-result-shell">
+      <div class="plugin-result-row"><span>IP地址</span><strong>${escapeHtml(result.ip || "-")}</strong></div>
+      <div class="plugin-result-row"><span>地区</span><strong>${escapeHtml(result.region || "-")}</strong></div>
+      <div class="plugin-result-row"><span>网络类型</span><strong>${escapeHtml(isPublic)}</strong></div>
+      <div class="plugin-result-row"><span>数据来源</span><strong>${escapeHtml(result.source || "-")}</strong></div>
+      <div class="plugin-result-row"><span>更新时间</span><strong>${escapeHtml(result.updated_at || "-")}</strong></div>
+    </div>
+  `;
+  document.getElementById("pluginIpSubmit")?.addEventListener("click", runPluginIpAnalyze);
+}
+
+function renderPluginLocalStatusDetail(box) {
+  const p = state.plugins.localStatus;
+  const s = p.result || {};
+  const mem = s.memory || {};
+  const disk = s.disk || {};
+  const loadingText = p.loading ? "加载中..." : "刷新";
+  box.innerHTML = `
+    <div class="plugin-actions-row">
+      <button id="pluginLocalStatusRefresh" class="btn btn-success">${loadingText}</button>
+      <span class="panel-sub">${escapeHtml(p.checkedAt ? `最近刷新：${p.checkedAt}` : "尚未刷新")}</span>
+    </div>
+    <div class="plugin-status-grid">
+      <div class="plugin-status-card"><span>主机名</span><strong>${escapeHtml(s.hostname || "-")}</strong></div>
+      <div class="plugin-status-card"><span>本机IP</span><strong>${escapeHtml(s.local_ip || "-")}</strong></div>
+      <div class="plugin-status-card"><span>操作系统</span><strong>${escapeHtml(s.os || "-")}</strong></div>
+      <div class="plugin-status-card"><span>CPU占用</span><strong>${s.cpu_percent === undefined || s.cpu_percent === null ? "-" : `${escapeHtml(String(s.cpu_percent))}%`}</strong></div>
+      <div class="plugin-status-card"><span>内存占用</span><strong>${mem.used_percent === undefined || mem.used_percent === null ? "-" : `${escapeHtml(String(mem.used_percent))}%`}</strong></div>
+      <div class="plugin-status-card"><span>磁盘占用</span><strong>${disk.used_percent === undefined || disk.used_percent === null ? "-" : `${escapeHtml(String(disk.used_percent))}%`}</strong></div>
+      <div class="plugin-status-card"><span>内存(已用/总量)</span><strong>${formatBytes(mem.used_bytes)} / ${formatBytes(mem.total_bytes)}</strong></div>
+      <div class="plugin-status-card"><span>磁盘(已用/总量)</span><strong>${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)}</strong></div>
+      <div class="plugin-status-card"><span>运行时长</span><strong>${s.uptime_hours === undefined || s.uptime_hours === null ? "-" : `${escapeHtml(String(s.uptime_hours))} 小时`}</strong></div>
+    </div>
+  `;
+  document.getElementById("pluginLocalStatusRefresh")?.addEventListener("click", () => {
+    loadPluginLocalStatus().catch((err) => showToast(`加载本机状态失败：${err.message}`));
+  });
+}
+
+async function runPluginPhishingCheck() {
+  const url = String(document.getElementById("pluginPhishingUrl")?.value || "").trim();
+  const token = String(document.getElementById("pluginPhishingToken")?.value || "").trim();
+  if (!/^https?:\/\//i.test(url)) {
+    showToast("URL \u5fc5\u987b\u4ee5 http:// \u6216 https:// \u5f00\u5934");
+    return;
+  }
+  if (!token) {
+    showToast("\u8bf7\u8f93\u5165 token");
+    return;
+  }
+  const btn = document.getElementById("pluginPhishingSubmit");
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api("/api/v2/plugins/phishing/check", {
+      method: "POST",
+      body: { url, token },
+    });
+    state.plugins.phishing.url = url;
+    state.plugins.phishing.token = token;
+    state.plugins.phishing.result = resp || {};
+    state.plugins.phishing.checkedAt = formatDateTime(new Date(), false);
+    renderPluginDetailBody();
+    showToast("\u68c0\u6d4b\u5b8c\u6210");
+  } catch (err) {
+    showToast(`\u68c0\u6d4b\u5931\u8d25\uff1a${err.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runPluginIpAnalyze() {
+  const ip = String(document.getElementById("pluginIpInput")?.value || "").trim();
+  if (!ip) {
+    showToast("请输入IP地址");
+    return;
+  }
+  const btn = document.getElementById("pluginIpSubmit");
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api("/api/v2/plugins/ip-analyze", {
+      method: "POST",
+      body: { ip },
+    });
+    state.plugins.ipAnalyze.ip = ip;
+    state.plugins.ipAnalyze.result = resp || {};
+    state.plugins.ipAnalyze.checkedAt = formatDateTime(new Date(), false);
+    renderPluginDetailBody();
+    showToast("IP分析完成");
+  } catch (err) {
+    showToast(`IP分析失败：${err.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadPluginLocalStatus() {
+  state.plugins.localStatus.loading = true;
+  renderPluginDetailBody();
+  try {
+    const resp = await api("/api/v2/plugins/local-status");
+    state.plugins.localStatus.result = resp || {};
+    state.plugins.localStatus.checkedAt = formatDateTime(new Date(), false);
+  } finally {
+    state.plugins.localStatus.loading = false;
+    renderPluginDetailBody();
+  }
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let idx = 0;
+  while (v >= 1024 && idx < units.length - 1) {
+    v /= 1024;
+    idx += 1;
+  }
+  return `${v.toFixed(v >= 100 || idx === 0 ? 0 : 2)} ${units[idx]}`;
+}
+
+
 function renderProModelView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
@@ -1123,7 +1723,7 @@ function renderAdminOverview() {
       <article class="metric-item"><div class="label">异常离线机器数</div><div id="adm_offline_machine" class="value">0</div></article>
     </section>
 
-    <section class="grid-2" style="margin-top:10px;">
+    <section class="grid-2">
       <article class="panel">
         <div class="panel-head"><h3 class="panel-title">各机器攻击数量排名</h3></div>
         <div id="chartAdminRanking" class="chart-box"></div>
@@ -1134,7 +1734,7 @@ function renderAdminOverview() {
       </article>
     </section>
 
-    <section class="split" style="margin-top:10px;">
+    <section class="split">
       <article class="panel">
         <div class="panel-head"><h3 class="panel-title">机器运行状态列表</h3><button id="adm_refresh" class="btn btn-success">刷新</button></div>
         <div class="table-shell">
@@ -1252,8 +1852,8 @@ async function loadAdminMachineDetail(machineId) {
       <div class="kv"><strong>GPU：</strong>${escapeHtml(String(machine.gpu_usage || 0))}%</div>
       <div class="kv"><strong>模型状态：</strong>${escapeHtml(formatModelStatus(machine.model_status || "-"))}</div>
     </div>
-    <div style="margin-top:8px;"><button id="adm_restart_service" class="btn btn-danger">远程重启防护服务</button></div>
-    <div style="margin-top:8px;" class="kv"><strong>近期攻击记录：</strong></div>
+    <div class="top-gap-sm"><button id="adm_restart_service" class="btn btn-danger">远程重启防护服务</button></div>
+    <div class="top-gap-sm kv"><strong>近期攻击记录：</strong></div>
     <pre>${escapeHtml(events.map((x) => `${x.occurred_at} | ${x.risk_level} | ${x.attack_type} | ${x.source_ip} | ${x.attack_result}`).join("\n"))}</pre>
   `;
   document.getElementById("adm_restart_service")?.addEventListener("click", async () => {
@@ -1275,7 +1875,7 @@ function renderAdminLogsView() {
       <div class="panel-head">
         <h3 class="panel-title">管理员 - 用户操作日志</h3>
         <div class="ops-group">
-          <input id="adm_log_user" placeholder="按用户名筛选" style="max-width:160px;" />
+          <input id="adm_log_user" placeholder="按用户名筛选" class="input-sm" />
           <button id="adm_log_search" class="btn btn-success">查询</button>
         </div>
       </div>
@@ -1295,11 +1895,11 @@ function renderAdminLogsView() {
           <tbody id="adm_log_body"></tbody>
         </table>
       </div>
-      <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px;">
+      <div class="table-pager">
         <button id="adm_log_prev" class="btn btn-ghost">上一页</button>
         <button id="adm_log_next" class="btn btn-ghost">下一页</button>
       </div>
-      <div class="panel-sub" id="adm_log_info" style="margin-top:6px;">-</div>
+      <div class="panel-sub top-gap-xs" id="adm_log_info">-</div>
     </section>
   `;
   document.getElementById("adm_log_search")?.addEventListener("click", () => {
@@ -1368,7 +1968,7 @@ function renderAdminConfigView() {
           <button id="adm_export_report" class="btn btn-danger">导出全平台攻击统计报告</button>
         </div>
       </div>
-      <div class="filter-group" style="grid-template-columns:repeat(3,minmax(220px,1fr));">
+      <div class="form-grid-3">
         <div>
           <label>高危告警阈值</label>
           <input id="cfg_alert_threshold_high" type="number" min="1" />
@@ -1390,7 +1990,7 @@ function renderAdminConfigView() {
           <input id="cfg_monitor_ports" placeholder="80,443,8080" />
         </div>
       </div>
-      <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+      <div class="row-actions">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
       </div>
     </section>
@@ -1455,7 +2055,7 @@ function renderUserCenterView() {
         <div><label class="panel-sub">\u65b0\u5bc6\u7801</label><input id="uc_new_password" type="password" autocomplete="new-password" /></div>
         <div><label class="panel-sub">\u786e\u8ba4\u65b0\u5bc6\u7801</label><input id="uc_confirm_password" type="password" autocomplete="new-password" /></div>
       </div>
-      <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+      <div class="row-actions">
         <button id="uc_save_password" class="btn btn-primary">\u4fee\u6539\u5bc6\u7801</button>
       </div>
     </section>
@@ -1538,8 +2138,8 @@ async function loadAdminUsers() {
         <td>${escapeHtml(x.display_name || "-")}</td>
         <td>${escapeHtml(x.updated_at || "-")}</td>
         <td>
-          <div style="display:flex;gap:8px;">
-            <input type="password" data-adm-user-pass="${escapeHtml(x.username || "")}" placeholder="\u65b0\u5bc6\u7801" style="max-width:160px;" />
+          <div class="inline-pass-reset">
+            <input type="password" data-adm-user-pass="${escapeHtml(x.username || "")}" placeholder="\u65b0\u5bc6\u7801" class="input-sm" />
             <button class="btn btn-danger" data-adm-user-save="${escapeHtml(x.username || "")}">\u66f4\u65b0</button>
           </div>
         </td>
@@ -1572,313 +2172,298 @@ async function loadAdminUsers() {
 }
 
 function renderTrendChart(containerId, rows) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 640);
-  const height = Math.max(container.clientHeight, 280);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无趋势数据</div>`;
-    return;
-  }
-  const margin = { l: 48, r: 20, t: 20, b: 40 };
-  const cw = width - margin.l - margin.r;
-  const ch = height - margin.t - margin.b;
-  const maxY = Math.max(...rows.map((x) => Number(x.total_attack || 0)), 1);
-  const xStep = rows.length > 1 ? cw / (rows.length - 1) : cw;
-  const x = (idx) => margin.l + idx * xStep;
-  const y = (v) => margin.t + ch - (Number(v) / maxY) * ch;
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = Array.isArray(rows) ? rows : [];
+  const x = data.map((x) => String(x.date || "").slice(5));
+  const total = data.map((x) => Number(x.total_attack || 0));
+  const blocked = data.map((x) => Number(x.blocked_attack || 0));
+  const peakIndex = data.findIndex((x) => Boolean(x.is_peak));
 
-  const totalPts = rows.map((row, idx) => `${x(idx)},${y(row.total_attack || 0)}`).join(" ");
-  const blockedPts = rows.map((row, idx) => `${x(idx)},${y(row.blocked_attack || 0)}`).join(" ");
-
-  const circles = rows
-    .map((row, idx) => {
-      const isPeak = row.is_peak;
-      return `<circle cx="${x(idx)}" cy="${y(row.total_attack || 0)}" r="${isPeak ? 5 : 3}" fill="${
-        isPeak ? "#ff4965" : "#2ca7ff"
-      }" data-tip="日期: ${row.date}\n总攻击: ${row.total_attack}\n拦截: ${row.blocked_attack}" />`;
-    })
-    .join("");
-
-  const xLabels = rows
-    .map((row, idx) => `<text x="${x(idx)}" y="${height - 10}" fill="#8fbadf" font-size="11" text-anchor="middle">${row.date.slice(5)}</text>`)
-    .join("");
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      <line x1="${margin.l}" y1="${margin.t + ch}" x2="${margin.l + cw}" y2="${margin.t + ch}" stroke="#4c7fae" stroke-width="1" />
-      <line x1="${margin.l}" y1="${margin.t}" x2="${margin.l}" y2="${margin.t + ch}" stroke="#4c7fae" stroke-width="1" />
-      <polyline fill="none" stroke="#2ca7ff" stroke-width="2.2" points="${totalPts}" />
-      <polyline fill="none" stroke="#16d88b" stroke-width="2.2" points="${blockedPts}" />
-      ${circles}
-      ${xLabels}
-      <text x="${width - 130}" y="18" fill="#9ec6e6" font-size="12">蓝:总攻击  绿:拦截</text>
-    </svg>
-  `;
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 700,
+      tooltip: { trigger: "axis" },
+      legend: {
+        top: 8,
+        right: 10,
+        textStyle: { color: "#d7ebff" },
+        data: ["\u603b\u653b\u51fb", "\u5df2\u62e6\u622a"],
+      },
+      grid: { left: 46, right: 26, top: 48, bottom: 34 },
+      xAxis: {
+        type: "category",
+        data: x,
+        boundaryGap: false,
+        axisLabel: { color: "#9ec6e6" },
+        axisLine: { lineStyle: { color: "rgba(130,180,225,.45)" } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#9ec6e6" },
+        splitLine: { lineStyle: { color: "rgba(130,180,225,.18)" } },
+      },
+      series: [
+        {
+          name: "\u603b\u653b\u51fb",
+          type: "line",
+          smooth: true,
+          data: total,
+          symbolSize: 8,
+          lineStyle: { width: 3, color: "#2ca7ff" },
+          itemStyle: { color: "#2ca7ff" },
+          areaStyle: { color: "rgba(44,167,255,.16)" },
+          markPoint:
+            peakIndex >= 0
+              ? {
+                  data: [{ coord: [x[peakIndex], total[peakIndex]], value: total[peakIndex] }],
+                  itemStyle: { color: "#ff4965" },
+                }
+              : undefined,
+        },
+        {
+          name: "\u5df2\u62e6\u622a",
+          type: "line",
+          smooth: true,
+          data: blocked,
+          symbolSize: 7,
+          lineStyle: { width: 2.4, color: "#16d88b" },
+          itemStyle: { color: "#16d88b" },
+          areaStyle: { color: "rgba(22,216,139,.12)" },
+        },
+      ],
+    },
+    true
+  );
 }
 
 function renderTopTypeBarChart(containerId, rows) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 520);
-  const height = Math.max(container.clientHeight, 260);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无柱状图数据</div>`;
-    return;
-  }
-  const data = rows.slice(0, 10);
-  const margin = { l: 110, r: 26, t: 16, b: 20 };
-  const cw = width - margin.l - margin.r;
-  const ch = height - margin.t - margin.b;
-  const maxV = Math.max(...data.map((x) => Number(x.total || 0)), 1);
-  const barH = Math.max(14, ch / data.length - 6);
-  const gap = 6;
-  const parts = [];
-  data.forEach((row, idx) => {
-    const y = margin.t + idx * (barH + gap);
-    const ratio = Number(row.total || 0) / maxV;
-    const bw = Math.max(2, cw * ratio);
-    const color = idx < 3 ? `url(#hotGrad${idx})` : "url(#coolGrad)";
-    parts.push(
-      `<text x="${margin.l - 8}" y="${y + barH * 0.74}" text-anchor="end" fill="#9ec6e6" font-size="12">${escapeHtml(
-        String(row.attack_type || row.bucket || "-")
-      )}</text>`
-    );
-    parts.push(
-      `<rect x="${margin.l}" y="${y}" width="${bw}" height="${barH}" rx="6" fill="${color}" data-tip="${
-        row.attack_type || row.bucket || "-"
-      }: ${row.total}" />`
-    );
-    parts.push(`<text x="${margin.l + bw + 6}" y="${y + barH * 0.74}" fill="#d9f1ff" font-size="12">${row.total}</text>`);
-  });
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = (Array.isArray(rows) ? rows : []).slice(0, 10);
+  const names = data.map((x) => formatAttackType(String(x.attack_type || x.bucket || "-")));
+  const vals = data.map((x) => Number(x.total || x.count || 0));
 
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="coolGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#2b9bff"/>
-          <stop offset="100%" stop-color="#16d88b"/>
-        </linearGradient>
-        <linearGradient id="hotGrad0" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#ff4965"/>
-          <stop offset="100%" stop-color="#ff8547"/>
-        </linearGradient>
-        <linearGradient id="hotGrad1" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#ff5f63"/>
-          <stop offset="100%" stop-color="#ff9b4a"/>
-        </linearGradient>
-        <linearGradient id="hotGrad2" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#ff7667"/>
-          <stop offset="100%" stop-color="#ffad53"/>
-        </linearGradient>
-      </defs>
-      ${parts.join("")}
-    </svg>
-  `;
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 700,
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      grid: { left: 30, right: 18, top: 18, bottom: 56, containLabel: true },
+      xAxis: {
+        type: "category",
+        data: names,
+        axisLabel: { color: "#9ec6e6", rotate: 24 },
+        axisLine: { lineStyle: { color: "rgba(130,180,225,.45)" } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#9ec6e6" },
+        splitLine: { lineStyle: { color: "rgba(130,180,225,.16)" } },
+      },
+      series: [
+        {
+          type: "bar",
+          data: vals.map((v, idx) => ({
+            value: v,
+            itemStyle:
+              idx < 3
+                ? {
+                    color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                      { offset: 0, color: ["#ff4965", "#ff6a5c", "#ff8a47"][idx] || "#ff4965" },
+                      { offset: 1, color: ["#ff8547", "#ff9b4a", "#ffad53"][idx] || "#ff8547" },
+                    ]),
+                  }
+                : {
+                    color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                      { offset: 0, color: "#2ca7ff" },
+                      { offset: 1, color: "#16d88b" },
+                    ]),
+                  },
+          })),
+          barWidth: "56%",
+          label: { show: true, position: "top", color: "#d9f1ff" },
+        },
+      ],
+    },
+    true
+  );
 }
 
 function renderPieChart(containerId, rows, labelKey, valueKey) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 360);
-  const height = Math.max(container.clientHeight, 230);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无饼图数据</div>`;
-    return;
-  }
-  const cx = width * 0.32;
-  const cy = height * 0.52;
-  const r = Math.min(width, height) * 0.28;
-  const total = rows.reduce((acc, x) => acc + Number(x[valueKey] || 0), 0) || 1;
-  const colors = ["#2ca7ff", "#16d88b", "#ffb020", "#ff4965", "#8f7dff", "#3dd3d1", "#d984ff", "#4cd9a6", "#ffd166", "#f88"];
-
-  let start = 0;
-  const slices = [];
-  const legends = [];
-  rows.slice(0, 8).forEach((row, idx) => {
-    const val = Number(row[valueKey] || 0);
-    const ratio = val / total;
-    const end = start + ratio * Math.PI * 2;
-    const path = arcPath(cx, cy, r, start, end);
-    const color = colors[idx % colors.length];
-    slices.push(
-      `<path d="${path}" fill="${color}" stroke="#0b1e31" stroke-width="1" data-tip="${escapeHtml(
-        String(row[labelKey] || "-")
-      )}: ${val}" />`
-    );
-    legends.push(
-      `<rect x="${width * 0.58}" y="${18 + idx * 23}" width="10" height="10" fill="${color}" />
-       <text x="${width * 0.58 + 16}" y="${27 + idx * 23}" fill="#cce6ff" font-size="12">${escapeHtml(
-         String(row[labelKey] || "-")
-       )} (${val})</text>`
-    );
-    start = end;
-  });
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      ${slices.join("")}
-      ${legends.join("")}
-    </svg>
-  `;
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = (Array.isArray(rows) ? rows : []).slice(0, 10).map((x) => ({
+    name: String(x[labelKey] || "-"),
+    value: Number(x[valueKey] || 0),
+  }));
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 650,
+      tooltip: { trigger: "item" },
+      legend: {
+        type: "scroll",
+        orient: "vertical",
+        right: 8,
+        top: 12,
+        bottom: 12,
+        textStyle: { color: "#cce6ff" },
+      },
+      series: [
+        {
+          type: "pie",
+          radius: ["0%", "66%"],
+          center: ["32%", "52%"],
+          data,
+          label: { color: "#dff1ff" },
+          itemStyle: { borderColor: "#081c2e", borderWidth: 1 },
+        },
+      ],
+    },
+    true
+  );
 }
 
 function renderDonutChart(containerId, rows, labelKey, valueKey) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 360);
-  const height = Math.max(container.clientHeight, 230);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无环图数据</div>`;
-    return;
-  }
-  const cx = width * 0.32;
-  const cy = height * 0.5;
-  const rOuter = Math.min(width, height) * 0.28;
-  const rInner = rOuter * 0.58;
-  const total = rows.reduce((acc, x) => acc + Number(x[valueKey] || 0), 0) || 1;
-  const colors = ["#ff4965", "#2ca7ff", "#16d88b", "#ffb020", "#8f7dff", "#3dd3d1", "#f48fff"];
-  let start = 0;
-  const parts = [];
-  const legends = [];
-
-  rows.slice(0, 8).forEach((row, idx) => {
-    const val = Number(row[valueKey] || 0);
-    const ratio = val / total;
-    const end = start + ratio * Math.PI * 2;
-    const path = donutArcPath(cx, cy, rOuter, rInner, start, end);
-    const color = colors[idx % colors.length];
-    parts.push(
-      `<path d="${path}" fill="${color}" stroke="#081b2c" stroke-width="1" data-tip="${escapeHtml(
-        String(row[labelKey] || "-")
-      )}: ${Number(val).toFixed(2)}%" />`
-    );
-    legends.push(
-      `<rect x="${width * 0.58}" y="${18 + idx * 23}" width="10" height="10" fill="${color}" />
-       <text x="${width * 0.58 + 16}" y="${27 + idx * 23}" fill="#cce6ff" font-size="12">${escapeHtml(
-         String(row[labelKey] || "-")
-       )} (${Number(val).toFixed(1)}%)</text>`
-    );
-    start = end;
-  });
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      ${parts.join("")}
-      <text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="#e9f5ff" font-size="14">占比</text>
-      <text x="${cx}" y="${cy + 16}" text-anchor="middle" fill="#7ec7ff" font-size="12">${Number(total).toFixed(1)}%</text>
-      ${legends.join("")}
-    </svg>
-  `;
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = (Array.isArray(rows) ? rows : []).slice(0, 10).map((x) => ({
+    name: formatAttackType(String(x[labelKey] || "-")),
+    value: Number(x[valueKey] || 0),
+  }));
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 650,
+      tooltip: { trigger: "item" },
+      legend: {
+        type: "scroll",
+        orient: "vertical",
+        right: 8,
+        top: 12,
+        bottom: 12,
+        textStyle: { color: "#cce6ff" },
+      },
+      series: [
+        {
+          type: "pie",
+          radius: ["42%", "70%"],
+          center: ["34%", "52%"],
+          data,
+          avoidLabelOverlap: true,
+          label: { color: "#dff1ff" },
+          itemStyle: { borderColor: "#081c2e", borderWidth: 1 },
+        },
+      ],
+    },
+    true
+  );
 }
 
 function renderHeatmapChart(containerId, rows) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 360);
-  const height = Math.max(container.clientHeight, 230);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无热力图数据</div>`;
-    return;
-  }
-  const margin = { l: 36, r: 10, t: 10, b: 24 };
-  const cw = width - margin.l - margin.r;
-  const ch = height - margin.t - margin.b;
-  const cellW = cw / 24;
-  const cellH = ch / 7;
-  const maxV = Math.max(...rows.map((x) => Number(x.total || 0)), 1);
-  const map = new Map(rows.map((x) => [`${x.weekday_idx}-${x.hour_idx}`, Number(x.total || 0)]));
-  const rects = [];
-  for (let d = 0; d < 7; d++) {
-    for (let h = 0; h < 24; h++) {
-      const v = map.get(`${d}-${h}`) || 0;
-      const ratio = v / maxV;
-      const color = `rgba(44, 167, 255, ${0.1 + ratio * 0.85})`;
-      const x = margin.l + h * cellW;
-      const y = margin.t + d * cellH;
-      rects.push(
-        `<rect x="${x + 0.5}" y="${y + 0.5}" width="${Math.max(cellW - 1, 1)}" height="${Math.max(
-          cellH - 1,
-          1
-        )}" fill="${color}" stroke="rgba(57,99,136,0.35)" data-tip="${WEEKDAY_LABELS[d]} ${h}:00  攻击: ${v}" />`
-      );
-    }
-  }
-  const xLabels = [0, 3, 6, 9, 12, 15, 18, 21, 23]
-    .map((h) => `<text x="${margin.l + h * cellW + cellW / 2}" y="${height - 8}" fill="#9ec6e6" font-size="10" text-anchor="middle">${h}</text>`)
-    .join("");
-  const yLabels = WEEKDAY_LABELS.map(
-    (d, idx) =>
-      `<text x="${margin.l - 6}" y="${margin.t + idx * cellH + cellH * 0.68}" fill="#9ec6e6" font-size="10" text-anchor="end">${d}</text>`
-  ).join("");
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      ${rects.join("")}
-      ${xLabels}
-      ${yLabels}
-    </svg>
-  `;
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = Array.isArray(rows) ? rows : [];
+  const heat = data.map((x) => [Number(x.hour_idx || 0), Number(x.weekday_idx || 0), Number(x.total || 0)]);
+  const maxVal = Math.max(1, ...heat.map((x) => x[2]));
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 650,
+      tooltip: {
+        position: "top",
+        formatter: (p) => `${WEEKDAY_LABELS[p.data[1]] || "-"} ${p.data[0]}:00<br/>\u653b\u51fb: ${p.data[2]}`,
+      },
+      grid: { left: 48, right: 18, top: 18, bottom: 30 },
+      xAxis: {
+        type: "category",
+        data: Array.from({ length: 24 }, (_, i) => String(i)),
+        splitArea: { show: true },
+        axisLabel: { color: "#9ec6e6" },
+      },
+      yAxis: {
+        type: "category",
+        data: WEEKDAY_LABELS,
+        splitArea: { show: true },
+        axisLabel: { color: "#9ec6e6" },
+      },
+      visualMap: {
+        min: 0,
+        max: maxVal,
+        calculable: true,
+        orient: "horizontal",
+        left: "center",
+        bottom: 0,
+        inRange: { color: ["#0c2033", "#1e5c94", "#2ca7ff", "#7ed9ff"] },
+        textStyle: { color: "#dff1ff" },
+      },
+      series: [
+        {
+          name: "\u653b\u51fb\u6d3b\u8dc3\u5ea6",
+          type: "heatmap",
+          data: heat,
+          label: { show: false },
+          emphasis: { itemStyle: { shadowBlur: 10, shadowColor: "rgba(0,0,0,.4)" } },
+        },
+      ],
+    },
+    true
+  );
 }
 
 function renderSimpleLineChart(containerId, rows, labelKey, series, minY = 0, maxYOverride) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  const width = Math.max(container.clientWidth, 420);
-  const height = Math.max(container.clientHeight, 230);
-  if (!rows.length) {
-    container.innerHTML = `<div class="panel-sub" style="padding:12px;">暂无折线数据</div>`;
-    return;
-  }
-  const margin = { l: 38, r: 16, t: 14, b: 28 };
-  const cw = width - margin.l - margin.r;
-  const ch = height - margin.t - margin.b;
-  const flatVals = [];
-  series.forEach((s) => rows.forEach((r) => flatVals.push(Number(r[s.key] || 0))));
-  let maxY = Math.max(...flatVals, minY + 1e-6);
-  if (typeof maxYOverride === "number") {
-    maxY = maxYOverride;
-  }
-  const xStep = rows.length > 1 ? cw / (rows.length - 1) : cw;
-  const x = (idx) => margin.l + idx * xStep;
-  const y = (v) => margin.t + ch - ((Number(v) - minY) / Math.max(maxY - minY, 1e-6)) * ch;
+  const chart = getEchartsInstance(containerId);
+  if (!chart) return;
+  const data = Array.isArray(rows) ? rows : [];
+  const x = data.map((r) => String(r[labelKey] || "").slice(5));
+  const yMax =
+    typeof maxYOverride === "number"
+      ? maxYOverride
+      : Math.max(
+          minY + 1,
+          ...series.flatMap((s) => data.map((r) => Number(r[s.key] || 0)))
+        );
 
-  const seriesSvg = series
-    .map((s) => {
-      const pts = rows.map((r, idx) => `${x(idx)},${y(r[s.key] || 0)}`).join(" ");
-      const circles = rows
-        .map(
-          (r, idx) =>
-            `<circle cx="${x(idx)}" cy="${y(r[s.key] || 0)}" r="2.8" fill="${s.color}" data-tip="${escapeHtml(
-              `${r[labelKey]} ${s.name}: ${Number(r[s.key] || 0).toFixed(4)}`
-            )}" />`
-        )
-        .join("");
-      return `<polyline fill="none" stroke="${s.color}" stroke-width="2" points="${pts}" />${circles}`;
-    })
-    .join("");
-
-  const labelStep = Math.max(1, Math.floor(rows.length / 6));
-  const xLabels = rows
-    .map((r, idx) =>
-      idx % labelStep === 0 || idx === rows.length - 1
-        ? `<text x="${x(idx)}" y="${height - 8}" fill="#9ec6e6" font-size="10" text-anchor="middle">${String(r[labelKey]).slice(5)}</text>`
-        : ""
-    )
-    .join("");
-  const legends = series
-    .map((s, idx) => `<text x="${width - 140}" y="${16 + idx * 14}" fill="${s.color}" font-size="11">${s.name}</text>`)
-    .join("");
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      <line x1="${margin.l}" y1="${margin.t + ch}" x2="${margin.l + cw}" y2="${margin.t + ch}" stroke="#4c7fae" />
-      <line x1="${margin.l}" y1="${margin.t}" x2="${margin.l}" y2="${margin.t + ch}" stroke="#4c7fae" />
-      ${seriesSvg}
-      ${xLabels}
-      ${legends}
-    </svg>
-  `;
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 650,
+      tooltip: { trigger: "axis" },
+      legend: {
+        top: 8,
+        right: 10,
+        textStyle: { color: "#d7ebff" },
+        data: series.map((s) => s.name),
+      },
+      grid: { left: 44, right: 18, top: 42, bottom: 30 },
+      xAxis: {
+        type: "category",
+        data: x,
+        axisLabel: { color: "#9ec6e6" },
+        axisLine: { lineStyle: { color: "rgba(130,180,225,.45)" } },
+      },
+      yAxis: {
+        type: "value",
+        min: minY,
+        max: yMax,
+        axisLabel: { color: "#9ec6e6" },
+        splitLine: { lineStyle: { color: "rgba(130,180,225,.18)" } },
+      },
+      series: series.map((s) => ({
+        name: s.name,
+        type: "line",
+        smooth: true,
+        showSymbol: false,
+        data: data.map((r) => Number(r[s.key] || 0)),
+        lineStyle: { width: 2.2, color: s.color },
+        itemStyle: { color: s.color },
+        areaStyle: { color: `${s.color}33` },
+      })),
+    },
+    true
+  );
 }
 
 function arcPath(cx, cy, r, start, end) {
@@ -2056,6 +2641,7 @@ async function api(path, options = {}) {
     headers.Authorization = `Bearer ${state.token}`;
   }
   const fetchOptions = { method, headers };
+  fetchOptions.credentials = "same-origin";
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     fetchOptions.body = JSON.stringify(body);

@@ -1,4 +1,5 @@
-import argparse
+﻿import argparse
+import ctypes
 import json
 import os
 import re
@@ -8,6 +9,33 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+
+def is_windows_admin() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_self_as_admin(cwd: Path) -> bool:
+    if os.name != "nt":
+        return False
+    params = subprocess.list2cmdline([str(Path(__file__).resolve())] + sys.argv[1:])
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            sys.executable,
+            params,
+            str(cwd),
+            1,
+        )
+    except Exception:
+        return False
+    return int(rc) > 32
 
 
 def now_iso() -> str:
@@ -25,14 +53,14 @@ def log(msg: str, log_path: Path) -> None:
 def ensure_scripts(script_dir: Path, script_names: List[str]) -> None:
     missing = [name for name in script_names if not (script_dir / name).exists()]
     if missing:
-        raise FileNotFoundError(f"缺少脚本: {missing}，请确认 scripts 目录完整")
+        raise FileNotFoundError(f"缂哄皯鑴氭湰: {missing}锛岃纭 scripts 鐩綍瀹屾暣")
 
 
 def ensure_paths(paths: List[Path], hint: str = "") -> None:
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
-        extra = f"，{hint}" if hint else ""
-        raise FileNotFoundError(f"缺少文件: {missing}{extra}")
+        extra = f", {hint}" if hint else ""
+        raise FileNotFoundError(f"缂哄皯鏂囦欢: {missing}{extra}")
 
 
 def terminate_process(proc: Optional[subprocess.Popen], name: str, log_path: Path) -> None:
@@ -56,13 +84,13 @@ def write_runtime_state(path: Path, state: Dict) -> None:
 
 def read_json_config(path: Path) -> Dict:
     if not path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {path}")
+        raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise ValueError(f"配置文件不是有效 JSON: {path}") from exc
+        raise ValueError(f"閰嶇疆鏂囦欢涓嶆槸鏈夋晥 JSON: {path}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"配置文件格式错误(必须是 JSON object): {path}")
+        raise ValueError(f"閰嶇疆鏂囦欢鏍煎紡閿欒(蹇呴』鏄?JSON object): {path}")
     return data
 
 
@@ -248,6 +276,8 @@ def build_daemon_cmd(args, script_dir: Path, input_dir: Path, output_dir: Path) 
         str(args.poll_seconds),
         "--stable-seconds",
         str(args.stable_seconds),
+        "--file-order",
+        str(args.detect_file_order),
         "--retry-cooldown",
         str(args.retry_cooldown),
         "--label-threshold",
@@ -392,83 +422,102 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--python-exe",
         default=sys.executable,
-        help="用于启动子流程的 Python 可执行文件路径",
+        help="鐢ㄤ簬鍚姩瀛愭祦绋嬬殑 Python 鍙墽琛屾枃浠惰矾寰?,
     )
     parser.add_argument(
         "--node-exe",
         default="node",
-        help="用于启动前端服务的 Node.js 可执行文件路径",
+        help="鐢ㄤ簬鍚姩鍓嶇鏈嶅姟鐨?Node.js 鍙墽琛屾枃浠惰矾寰?,
     )
+    parser.add_argument(
+        "--auto-elevate",
+        dest="auto_elevate",
+        action="store_true",
+        help="Windows 涓嬭嫢褰撳墠涓嶆槸绠＄悊鍛樻潈闄愶紝鑷姩寮瑰嚭 UAC 骞舵彁鏉冮噸鍚?app.py",
+    )
+    parser.add_argument(
+        "--no-auto-elevate",
+        dest="auto_elevate",
+        action="store_false",
+        help="鍏抽棴 Windows 鑷姩鎻愭潈",
+    )
+    parser.set_defaults(auto_elevate=True)
 
-    mode_group = parser.add_argument_group("运行模式")
+    mode_group = parser.add_argument_group("杩愯妯″紡")
     mode_group.add_argument(
         "--only-capture",
         action="store_true",
-        help="仅启动抓包写入，不启动自动检测守护",
+        help="浠呭惎鍔ㄦ姄鍖呭啓鍏ワ紝涓嶅惎鍔ㄨ嚜鍔ㄦ娴嬪畧鎶?,
     )
     mode_group.add_argument(
         "--only-detect",
         action="store_true",
-        help="仅启动自动检测守护，不启动抓包",
+        help="浠呭惎鍔ㄨ嚜鍔ㄦ娴嬪畧鎶わ紝涓嶅惎鍔ㄦ姄鍖?,
     )
 
-    io_group = parser.add_argument_group("目录与脚本")
-    io_group.add_argument("--input-dir", default="input", help="抓包输出目录，同时也是检测监听目录")
-    io_group.add_argument("--output-dir", default="output", help="流程输出目录")
-    io_group.add_argument("--scripts-dir", default="scripts", help="脚本目录（默认 scripts）")
-    io_group.add_argument("--db-config", default="", help="数据库配置 JSON 文件路径（可选，CLI 优先级更高）")
+    io_group = parser.add_argument_group("鐩綍涓庤剼鏈?)
+    io_group.add_argument("--input-dir", default="input", help="鎶撳寘杈撳嚭鐩綍锛屽悓鏃朵篃鏄娴嬬洃鍚洰褰?)
+    io_group.add_argument("--output-dir", default="output", help="娴佺▼杈撳嚭鐩綍")
+    io_group.add_argument("--scripts-dir", default="scripts", help="鑴氭湰鐩綍锛堥粯璁?scripts锛?)
+    io_group.add_argument("--db-config", default="", help="鏁版嵁搴撻厤缃?JSON 鏂囦欢璺緞锛堝彲閫夛紝CLI 浼樺厛绾ф洿楂橈級")
 
-    capture_group = parser.add_argument_group("抓包设置")
-    capture_group.add_argument("--port", type=int, default=80, help="监听 TCP 端口（可改成任意端口，如 3000/10086）")
-    capture_group.add_argument("--ports", default="", help="监听端口列表，逗号分隔；为空则仅监听 --port")
+    capture_group = parser.add_argument_group("鎶撳寘璁剧疆")
+    capture_group.add_argument("--port", type=int, default=80, help="鐩戝惉 TCP 绔彛锛堝彲鏀规垚浠绘剰绔彛锛屽 3000/10086锛?)
+    capture_group.add_argument("--ports", default="", help="鐩戝惉绔彛鍒楄〃锛岄€楀彿鍒嗛殧锛涗负绌哄垯浠呯洃鍚?--port")
     capture_group.add_argument(
         "--decode-http-port",
         type=int,
         default=None,
-        help="强制按 HTTP 解码的端口；默认与 --port 相同",
+        help="寮哄埗鎸?HTTP 瑙ｇ爜鐨勭鍙ｏ紱榛樿涓?--port 鐩稿悓",
     )
-    capture_group.add_argument("--interface", default="", help="网卡关键字，如 WLAN / Wi-Fi")
+    capture_group.add_argument("--interface", default="", help="缃戝崱鍏抽敭瀛楋紝濡?WLAN / Wi-Fi")
     capture_group.add_argument(
         "--capture-batch-size",
         type=int,
         default=4,
-        help="每累计多少条完整 HTTP 请求/响应写一个 1.1.n.txt",
+        help="姣忕疮璁″灏戞潯瀹屾暣 HTTP 璇锋眰/鍝嶅簲鍐欎竴涓?1.1.n.txt",
     )
-    capture_group.add_argument("--capture-config-poll-seconds", type=int, default=5, help="抓包配置热更新轮询间隔（秒）")
+    capture_group.add_argument("--capture-config-poll-seconds", type=int, default=5, help="鎶撳寘閰嶇疆鐑洿鏂拌疆璇㈤棿闅旓紙绉掞級")
     capture_group.add_argument(
         "--capture-use-db-config",
         dest="capture_use_db_config",
         action="store_true",
-        help="优先读取数据库 demo_system_config 中的 monitor_ports/capture_batch_size",
+        help="浼樺厛璇诲彇鏁版嵁搴?demo_system_config 涓殑 monitor_ports/capture_batch_size",
     )
     capture_group.add_argument(
         "--no-capture-use-db-config",
         dest="capture_use_db_config",
         action="store_false",
-        help="仅使用 CLI 抓包参数，不读取数据库抓包配置",
+        help="浠呬娇鐢?CLI 鎶撳寘鍙傛暟锛屼笉璇诲彇鏁版嵁搴撴姄鍖呴厤缃?,
     )
     parser.set_defaults(capture_use_db_config=True)
 
-    detect_group = parser.add_argument_group("自动检测设置")
-    detect_group.add_argument("--poll-seconds", type=int, default=5, help="守护轮询间隔（秒）")
-    detect_group.add_argument("--stable-seconds", type=int, default=3, help="文件稳定判定时间（秒）")
-    detect_group.add_argument("--retry-cooldown", type=int, default=30, help="失败后重试冷却时间（秒）")
-    detect_group.add_argument("--label-threshold", type=float, default=0.35, help="模型标签阈值")
-    detect_group.add_argument("--top-k", type=int, default=3, help="每个文件保留的候选数量")
-    detect_group.add_argument("--export-min-score", type=float, default=0.3, help="导出到 result 的最低 raw_score")
+    detect_group = parser.add_argument_group("鑷姩妫€娴嬭缃?)
+    detect_group.add_argument("--poll-seconds", type=int, default=5, help="瀹堟姢杞闂撮殧锛堢锛?)
+    detect_group.add_argument("--stable-seconds", type=int, default=3, help="鏂囦欢绋冲畾鍒ゅ畾鏃堕棿锛堢锛?)
+    detect_group.add_argument(
+        "--detect-file-order",
+        choices=["newest", "oldest"],
+        default="newest",
+        help="妫€娴嬪鐞嗛『搴忥細newest=鏂版枃浠朵紭鍏堬紝oldest=鏃ф枃浠朵紭鍏?,
+    )
+    detect_group.add_argument("--retry-cooldown", type=int, default=30, help="澶辫触鍚庨噸璇曞喎鍗存椂闂达紙绉掞級")
+    detect_group.add_argument("--label-threshold", type=float, default=0.46, help="妯″瀷鏍囩闃堝€?)
+    detect_group.add_argument("--top-k", type=int, default=3, help="姣忎釜鏂囦欢淇濈暀鐨勫€欓€夋暟閲?)
+    detect_group.add_argument("--export-min-score", type=float, default=0.3, help="瀵煎嚭鍒?result 鐨勬渶浣?raw_score")
 
-    behavior_group = parser.add_argument_group("导出行为")
+    behavior_group = parser.add_argument_group("瀵煎嚭琛屼负")
     behavior_group.add_argument(
         "--skip-existing-at-start",
         dest="skip_existing_at_start",
         action="store_true",
-        help="启动时跳过当前已存在的 input 文件，仅处理后续新增",
+        help="鍚姩鏃惰烦杩囧綋鍓嶅凡瀛樺湪鐨?input 鏂囦欢锛屼粎澶勭悊鍚庣画鏂板",
     )
     behavior_group.add_argument(
         "--no-skip-existing-at-start",
         dest="skip_existing_at_start",
         action="store_false",
-        help="启动后也会处理当前已存在的 input 文件",
+        help="鍚姩鍚庝篃浼氬鐞嗗綋鍓嶅凡瀛樺湪鐨?input 鏂囦欢",
     )
     parser.set_defaults(skip_existing_at_start=True)
 
@@ -476,148 +525,148 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--update-existing-export",
         dest="update_existing_export",
         action="store_true",
-        help="导出到 result 时，若 file_id+seq_id 已存在则覆盖更新",
+        help="瀵煎嚭鍒?result 鏃讹紝鑻?file_id+seq_id 宸插瓨鍦ㄥ垯瑕嗙洊鏇存柊",
     )
     behavior_group.add_argument(
         "--no-update-existing-export",
         dest="update_existing_export",
         action="store_false",
-        help="导出到 result 时，已存在则跳过",
+        help="瀵煎嚭鍒?result 鏃讹紝宸插瓨鍦ㄥ垯璺宠繃",
     )
     parser.set_defaults(update_existing_export=True)
 
-    llm_group = parser.add_argument_group("LLM 分析守护（默认启用）")
+    llm_group = parser.add_argument_group("LLM 鍒嗘瀽瀹堟姢锛堥粯璁ゅ惎鐢級")
     llm_group.add_argument(
         "--enable-llm",
         dest="enable_llm",
         action="store_true",
-        help="启动 llm_analyzer_daemon，自动分析 result/b.n",
+        help="鍚姩 llm_analyzer_daemon锛岃嚜鍔ㄥ垎鏋?result/b.n",
     )
     llm_group.add_argument(
         "--no-llm",
         dest="enable_llm",
         action="store_false",
-        help="不启动 llm_analyzer_daemon",
+        help="涓嶅惎鍔?llm_analyzer_daemon",
     )
     parser.set_defaults(enable_llm=True)
-    llm_group.add_argument("--llm-result-dir", default="result", help="LLM 监听的 result 目录")
-    llm_group.add_argument("--llm-model", default="qwen3:8b", help="Ollama 模型名")
-    llm_group.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama 服务地址")
-    llm_group.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="系统提示词路径")
-    llm_group.add_argument("--llm-schema", default="llm/schemas/analysis.schema.json", help="JSON schema 路径")
-    llm_group.add_argument("--llm-poll-seconds", type=int, default=5, help="LLM 守护轮询间隔（秒）")
-    llm_group.add_argument("--llm-timeout-sec", type=int, default=300, help="单条 LLM 请求超时（秒）")
+    llm_group.add_argument("--llm-result-dir", default="result", help="LLM 鐩戝惉鐨?result 鐩綍")
+    llm_group.add_argument("--llm-model", default="qwen3:8b", help="Ollama 妯″瀷鍚?)
+    llm_group.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama 鏈嶅姟鍦板潃")
+    llm_group.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="绯荤粺鎻愮ず璇嶈矾寰?)
+    llm_group.add_argument("--llm-schema", default="llm/schemas/analysis.schema.json", help="JSON schema 璺緞")
+    llm_group.add_argument("--llm-poll-seconds", type=int, default=5, help="LLM 瀹堟姢杞闂撮殧锛堢锛?)
+    llm_group.add_argument("--llm-timeout-sec", type=int, default=300, help="鍗曟潯 LLM 璇锋眰瓒呮椂锛堢锛?)
     llm_group.add_argument("--llm-num-ctx", type=int, default=1024, help="Ollama num_ctx")
-    llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu，0=CPU 更稳")
-    llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM 采样温度")
-    llm_group.add_argument("--llm-max-cases", type=int, default=0, help="每轮最多处理多少 case，0=不限制")
-    llm_group.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="启用 RAG 检索增强")
-    llm_group.add_argument("--no-rag", dest="rag_enable", action="store_false", help="关闭 RAG 检索增强")
+    llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu锛?=CPU 鏇寸ǔ")
+    llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM 閲囨牱娓╁害")
+    llm_group.add_argument("--llm-max-cases", type=int, default=0, help="姣忚疆鏈€澶氬鐞嗗灏?case锛?=涓嶉檺鍒?)
+    llm_group.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="鍚敤 RAG 妫€绱㈠寮?)
+    llm_group.add_argument("--no-rag", dest="rag_enable", action="store_false", help="鍏抽棴 RAG 妫€绱㈠寮?)
     parser.set_defaults(rag_enable=True)
-    llm_group.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db 文件路径")
-    llm_group.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 文件路径")
-    llm_group.add_argument("--rag-top-k", type=int, default=3, help="RAG 每次检索条数")
-    llm_group.add_argument("--rag-max-chars", type=int, default=3200, help="注入 LLM 的 RAG 上下文最大字符数")
-    llm_group.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="若 RAG db 不存在则自动构建")
-    llm_group.add_argument("--no-rag-auto-build", dest="rag_auto_build", action="store_false", help="不自动构建 RAG db")
+    llm_group.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db 鏂囦欢璺緞")
+    llm_group.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 鏂囦欢璺緞")
+    llm_group.add_argument("--rag-top-k", type=int, default=3, help="RAG 姣忔妫€绱㈡潯鏁?)
+    llm_group.add_argument("--rag-max-chars", type=int, default=3200, help="娉ㄥ叆 LLM 鐨?RAG 涓婁笅鏂囨渶澶у瓧绗︽暟")
+    llm_group.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="鑻?RAG db 涓嶅瓨鍦ㄥ垯鑷姩鏋勫缓")
+    llm_group.add_argument("--no-rag-auto-build", dest="rag_auto_build", action="store_false", help="涓嶈嚜鍔ㄦ瀯寤?RAG db")
     parser.set_defaults(rag_auto_build=True)
 
-    db_group = parser.add_argument_group("结果入库守护（默认启用）")
+    db_group = parser.add_argument_group("缁撴灉鍏ュ簱瀹堟姢锛堥粯璁ゅ惎鐢級")
     db_group.add_argument(
         "--enable-db",
         dest="enable_db",
         action="store_true",
-        help="启动 result_db_daemon，监听 result 并自动入库数据库",
+        help="鍚姩 result_db_daemon锛岀洃鍚?result 骞惰嚜鍔ㄥ叆搴撴暟鎹簱",
     )
     db_group.add_argument(
         "--no-db",
         dest="enable_db",
         action="store_false",
-        help="不启动 result_db_daemon",
+        help="涓嶅惎鍔?result_db_daemon",
     )
     parser.set_defaults(enable_db=True)
-    db_group.add_argument("--db-result-dir", default="result", help="DB 守护监听的 result 目录")
-    db_group.add_argument("--db-backend", choices=["sqlite", "mysql"], default="mysql", help="DB 后端类型")
-    db_group.add_argument("--db-path", default="result/result_cases.db", help="sqlite 模式下的 db 文件路径")
-    db_group.add_argument("--mysql-host", default="127.0.0.1", help="MySQL 主机")
-    db_group.add_argument("--mysql-port", type=int, default=3306, help="MySQL 端口")
-    db_group.add_argument("--mysql-user", default="root", help="MySQL 用户名")
-    db_group.add_argument("--mysql-password", default="123456", help="MySQL 密码")
-    db_group.add_argument("--mysql-database", default="traffic_pipeline", help="MySQL 数据库名")
-    db_group.add_argument("--db-poll-seconds", type=int, default=5, help="DB 守护轮询间隔（秒）")
-    db_group.add_argument("--db-state-file", default="output/result_db_daemon_state.json", help="DB 守护状态文件")
-    db_group.add_argument("--db-log-file", default="output/result_db_daemon.log", help="DB 守护日志文件")
+    db_group.add_argument("--db-result-dir", default="result", help="DB 瀹堟姢鐩戝惉鐨?result 鐩綍")
+    db_group.add_argument("--db-backend", choices=["sqlite", "mysql"], default="mysql", help="DB 鍚庣绫诲瀷")
+    db_group.add_argument("--db-path", default="result/result_cases.db", help="sqlite 妯″紡涓嬬殑 db 鏂囦欢璺緞")
+    db_group.add_argument("--mysql-host", default="127.0.0.1", help="MySQL 涓绘満")
+    db_group.add_argument("--mysql-port", type=int, default=3306, help="MySQL 绔彛")
+    db_group.add_argument("--mysql-user", default="root", help="MySQL 鐢ㄦ埛鍚?)
+    db_group.add_argument("--mysql-password", default="123456", help="MySQL 瀵嗙爜")
+    db_group.add_argument("--mysql-database", default="traffic_pipeline", help="MySQL 鏁版嵁搴撳悕")
+    db_group.add_argument("--db-poll-seconds", type=int, default=5, help="DB 瀹堟姢杞闂撮殧锛堢锛?)
+    db_group.add_argument("--db-state-file", default="output/result_db_daemon_state.json", help="DB 瀹堟姢鐘舵€佹枃浠?)
+    db_group.add_argument("--db-log-file", default="output/result_db_daemon.log", help="DB 瀹堟姢鏃ュ織鏂囦欢")
 
-    api_group = parser.add_argument_group("前端API服务（默认启用）")
+    api_group = parser.add_argument_group("鍓嶇API鏈嶅姟锛堥粯璁ゅ惎鐢級")
     api_group.add_argument(
         "--enable-api",
         dest="enable_api",
         action="store_true",
-        help="启动 dashboard_api_server.py（Flask，默认3049）",
+        help="鍚姩 dashboard_api_server.py锛團lask锛岄粯璁?049锛?,
     )
     api_group.add_argument(
         "--no-api",
         dest="enable_api",
         action="store_false",
-        help="不启动 dashboard_api_server.py",
+        help="涓嶅惎鍔?dashboard_api_server.py",
     )
     parser.set_defaults(enable_api=True)
-    api_group.add_argument("--api-host", default="127.0.0.1", help="Flask API 绑定地址")
-    api_group.add_argument("--api-port", type=int, default=3049, help="Flask API 端口")
+    api_group.add_argument("--api-host", default="127.0.0.1", help="Flask API 缁戝畾鍦板潃")
+    api_group.add_argument("--api-port", type=int, default=3049, help="Flask API 绔彛")
     api_group.add_argument(
         "--api-seed-demo",
         dest="api_seed_demo",
         action="store_true",
-        help="启动 API 时自动写入演示数据（仅用于空库初始化）",
+        help="鍚姩 API 鏃惰嚜鍔ㄥ啓鍏ユ紨绀烘暟鎹紙浠呯敤浜庣┖搴撳垵濮嬪寲锛?,
     )
     api_group.add_argument(
         "--no-api-seed-demo",
         dest="api_seed_demo",
         action="store_false",
-        help="启动 API 时不写入演示数据",
+        help="鍚姩 API 鏃朵笉鍐欏叆婕旂ず鏁版嵁",
     )
     parser.set_defaults(api_seed_demo=False)
 
-    dashboard_group = parser.add_argument_group("前端大屏服务（默认启用）")
+    dashboard_group = parser.add_argument_group("鍓嶇澶у睆鏈嶅姟锛堥粯璁ゅ惎鐢級")
     dashboard_group.add_argument(
         "--enable-dashboard",
         dest="enable_dashboard",
         action="store_true",
-        help="启动 Node.js 大屏服务（默认1145）",
+        help="鍚姩 Node.js 澶у睆鏈嶅姟锛堥粯璁?145锛?,
     )
     dashboard_group.add_argument(
         "--no-dashboard",
         dest="enable_dashboard",
         action="store_false",
-        help="不启动 Node.js 大屏服务",
+        help="涓嶅惎鍔?Node.js 澶у睆鏈嶅姟",
     )
     parser.set_defaults(enable_dashboard=True)
-    dashboard_group.add_argument("--dashboard-host", default="0.0.0.0", help="大屏服务绑定地址")
-    dashboard_group.add_argument("--dashboard-port", type=int, default=1145, help="大屏服务端口")
+    dashboard_group.add_argument("--dashboard-host", default="0.0.0.0", help="澶у睆鏈嶅姟缁戝畾鍦板潃")
+    dashboard_group.add_argument("--dashboard-port", type=int, default=1145, help="澶у睆鏈嶅姟绔彛")
     dashboard_group.add_argument(
         "--dashboard-server-script",
         default="frontend_dashboard/server.js",
-        help="大屏 Node 启动脚本路径",
+        help="澶у睆 Node 鍚姩鑴氭湰璺緞",
     )
     dashboard_group.add_argument(
         "--dashboard-api-base",
         default="",
-        help="大屏前端代理上游API地址，留空时自动使用 http://127.0.0.1:<api-port>",
+        help="澶у睆鍓嶇浠ｇ悊涓婃父API鍦板潃锛岀暀绌烘椂鑷姩浣跨敤 http://127.0.0.1:<api-port>",
     )
 
-    model_group = parser.add_argument_group("模型文件（可选）")
-    model_group.add_argument("--preprocessor", default="", help="可选：指定 preprocessor.joblib 路径")
-    model_group.add_argument("--model", default="", help="可选：指定 best_mlp.pth 路径")
+    model_group = parser.add_argument_group("妯″瀷鏂囦欢锛堝彲閫夛級")
+    model_group.add_argument("--preprocessor", default="", help="鍙€夛細鎸囧畾 preprocessor.joblib 璺緞")
+    model_group.add_argument("--model", default="", help="鍙€夛細鎸囧畾 best_mlp.pth 璺緞")
 
 
 def main() -> None:
     project_root = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(
-        description="统一入口：启动抓包 + 自动检测 + LLM 分析 + DB 入库 + API + 大屏整条工作流",
+        description="缁熶竴鍏ュ彛锛氬惎鍔ㄦ姄鍖?+ 鑷姩妫€娴?+ LLM 鍒嗘瀽 + DB 鍏ュ簱 + API + 澶у睆鏁存潯宸ヤ綔娴?,
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
-            "示例:\n"
+            "绀轰緥:\n"
             "  python app.py --port 80 --capture-batch-size 4\n"
             "  python app.py --port 3000 --capture-batch-size 1\n"
             "  python app.py --interface WLAN --port 10086 --capture-batch-size 20\n"
@@ -631,8 +680,14 @@ def main() -> None:
     args = parser.parse_args()
     apply_db_config(args, parser, project_root)
 
+    if os.name == "nt" and args.auto_elevate and not is_windows_admin():
+        print("[app] 妫€娴嬪埌褰撳墠涓嶆槸绠＄悊鍛樻潈闄愶紝姝ｅ湪鐢宠绠＄悊鍛樻潈闄愰噸鍚?..", flush=True)
+        if relaunch_self_as_admin(project_root):
+            return
+        parser.error("绠＄悊鍛樻彁鏉冨け璐ユ垨琚彇娑堬紝璇峰彸閿互绠＄悊鍛樿韩浠借繍琛岀粓绔悗閲嶈瘯")
+
     if args.only_capture and args.only_detect:
-        parser.error("--only-capture 与 --only-detect 不能同时使用")
+        parser.error("--only-capture 涓?--only-detect 涓嶈兘鍚屾椂浣跨敤")
 
     args.project_root = project_root
 
@@ -667,7 +722,7 @@ def main() -> None:
     try:
         cli_capture_ports = parse_ports_text(args.ports, [args.port])
     except Exception as exc:  # noqa: BLE001
-        parser.error(f"--ports 参数无效: {exc}")
+        parser.error(f"--ports 鍙傛暟鏃犳晥: {exc}")
     cli_capture_batch_size = int(args.capture_batch_size)
     capture_runtime_cfg = {
         "ports": cli_capture_ports,
@@ -706,7 +761,7 @@ def main() -> None:
         required_scripts.append("dashboard_api_server.py")
     ensure_scripts(scripts_dir, required_scripts)
     if run_dashboard:
-        ensure_paths([dashboard_server], hint="请确认前端目录 frontend_dashboard 已存在")
+        ensure_paths([dashboard_server], hint="璇风‘璁ゅ墠绔洰褰?frontend_dashboard 宸插瓨鍦?)
 
     dashboard_api_base = args.dashboard_api_base.strip()
     if not dashboard_api_base:
@@ -1127,3 +1182,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

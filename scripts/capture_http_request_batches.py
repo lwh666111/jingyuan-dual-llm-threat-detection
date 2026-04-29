@@ -1,5 +1,6 @@
 ﻿import argparse
 import csv
+import ctypes
 import json
 import os
 import re
@@ -54,13 +55,14 @@ def find_executable(name: str) -> str:
     )
 
 
-def run_text_command(cmd: List[str]) -> str:
+def run_text_command(cmd: List[str], timeout: Optional[int] = None) -> str:
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -69,8 +71,31 @@ def run_text_command(cmd: List[str]) -> str:
     return result.stdout
 
 
-def list_interfaces(tshark_exe: str):
-    output = run_text_command([tshark_exe, "-D"])
+def is_windows_admin() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def read_npcap_admin_only_flag() -> Optional[bool]:
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        key_path = r"SYSTEM\CurrentControlSet\Services\npcap\Parameters"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+            value, _ = winreg.QueryValueEx(key, "AdminOnly")
+        return bool(int(value))
+    except Exception:
+        return None
+
+
+def list_interfaces(tshark_exe: str, timeout: Optional[int] = None):
+    output = run_text_command([tshark_exe, "-D"], timeout=timeout)
     interfaces = []
     for line in output.splitlines():
         line = line.strip()
@@ -422,7 +447,17 @@ def main():
     parser.add_argument("--ports", default="", help="多端口监听，逗号分隔，如 80,443,8080；为空则用 --port")
     parser.add_argument("--batch-size", type=int, default=20, help="每个 batch 的完整请求/响应数量")
     parser.add_argument("--input-dir", default="input", help="输出 txt 目录")
-    parser.add_argument("--interface", default="", help="手动指定网卡关键字")
+    parser.add_argument(
+        "--interface",
+        default="",
+        help="手动指定网卡关键字，或直接传接口索引（如 1）跳过网卡枚举",
+    )
+    parser.add_argument(
+        "--interface-list-timeout",
+        type=int,
+        default=180,
+        help="tshark -D 网卡枚举超时时间（秒），默认 180",
+    )
     parser.add_argument("--decode-http-port", type=int, default=None, help="强制 HTTP 解码端口，默认等于 --port")
     parser.add_argument("--keep-running", action="store_true", default=True, help="持续运行直到 Ctrl+C")
     parser.add_argument("--once", action="store_true", help="仅生成一个 batch 后退出")
@@ -431,14 +466,35 @@ def main():
     monitor_ports = parse_ports(args.port, args.ports)
     decode_ports = [args.decode_http_port] if args.decode_http_port is not None else list(monitor_ports)
 
+
+    admin_only = read_npcap_admin_only_flag()
+    if admin_only and not is_windows_admin():
+        print(
+            "[ERROR] Npcap AdminOnly=1 and current session is not elevated; packet capture is unavailable.",
+            file=sys.stderr,
+        )
+        print(
+            "[ERROR] Run app.py/script as Administrator, or reinstall Npcap with AdminOnly disabled.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     tshark_exe = find_executable("tshark")
     request_in_field, response_in_field = detect_http_link_fields(tshark_exe)
 
     input_dir = Path(args.input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
 
-    interfaces = list_interfaces(tshark_exe)
-    iface = choose_interface(interfaces, preferred_name=args.interface)
+    iface_arg = (args.interface or "").strip()
+    if iface_arg.isdigit():
+        iface = iface_arg
+        interfaces = []
+    else:
+        interfaces = list_interfaces(
+            tshark_exe,
+            timeout=max(1, int(args.interface_list_timeout)),
+        )
+        iface = choose_interface(interfaces, preferred_name=iface_arg)
 
     print("=" * 80)
     print("自动抓包启动（完整 HTTP 请求/响应配对模式）")

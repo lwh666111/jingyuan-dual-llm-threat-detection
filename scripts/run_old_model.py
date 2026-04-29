@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import csv
 import json
 import logging
@@ -64,31 +64,31 @@ def write_csv(records, path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="运行旧模型 compatibility mode 推理")
+    parser = argparse.ArgumentParser(description="杩愯鏃фā鍨?compatibility mode 鎺ㄧ悊")
     parser.add_argument("--input", required=True, help="compat_old_input.csv")
     parser.add_argument("--preprocessor", required=True, help="preprocessor.joblib")
     parser.add_argument("--model", required=True, help="best_mlp.pth")
-    parser.add_argument("--output-jsonl", required=True, help="输出 model_result.jsonl")
-    parser.add_argument("--output-csv", required=True, help="输出 model_result.csv")
-    parser.add_argument("--label-threshold", type=float, default=0.35, help="compat mode 标签阈值")
+    parser.add_argument("--output-jsonl", required=True, help="杈撳嚭 model_result.jsonl")
+    parser.add_argument("--output-csv", required=True, help="杈撳嚭 model_result.csv")
+    parser.add_argument("--label-threshold", type=float, default=0.46, help="compat mode 鏍囩闃堝€?)
     args = parser.parse_args()
 
     df = pd.read_csv(args.input)
-    logging.info("输入记录数: %d", len(df))
+    logging.info("杈撳叆璁板綍鏁? %d", len(df))
 
     preprocessor = joblib.load(args.preprocessor)
     required_cols = load_required_cols(preprocessor)
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-        raise ValueError(f"compat 输入缺少旧模型需要的列: {missing}")
+        raise ValueError(f"compat 杈撳叆缂哄皯鏃фā鍨嬮渶瑕佺殑鍒? {missing}")
 
     meta_df = df[["file_id", "seq_id"]].copy()
     feature_df = df[required_cols].copy()
 
     X = preprocessor.transform(feature_df)
     X = X.toarray() if hasattr(X, "toarray") else X
-    logging.info("变换后矩阵 shape: %s", X.shape)
+    logging.info("鍙樻崲鍚庣煩闃?shape: %s", X.shape)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -122,9 +122,9 @@ def main():
     write_jsonl(results, output_jsonl)
     write_csv(results, output_csv)
 
-    logging.info("score 最小值: %.6f", float(np.min(probs)))
-    logging.info("score 最大值: %.6f", float(np.max(probs)))
-    logging.info("score 平均值: %.6f", float(np.mean(probs)))
+    logging.info("score 鏈€灏忓€? %.6f", float(np.min(probs)))
+    logging.info("score 鏈€澶у€? %.6f", float(np.max(probs)))
+    logging.info("score 骞冲潎鍊? %.6f", float(np.mean(probs)))
     logging.info("model_result.jsonl: %s", output_jsonl)
     logging.info("model_result.csv: %s", output_csv)
 
@@ -140,3 +140,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

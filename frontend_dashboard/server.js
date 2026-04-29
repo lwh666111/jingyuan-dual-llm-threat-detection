@@ -49,6 +49,9 @@ async function proxyRequest(req, res, upstreamPath, searchParams) {
     if (req.headers.authorization) {
       headers.Authorization = req.headers.authorization;
     }
+    if (req.headers.cookie) {
+      headers.Cookie = req.headers.cookie;
+    }
     if (req.headers["content-type"]) {
       headers["Content-Type"] = req.headers["content-type"];
     }
@@ -66,6 +69,17 @@ async function proxyRequest(req, res, upstreamPath, searchParams) {
     const contentDisposition = upstream.headers.get("content-disposition");
     if (contentDisposition) {
       outputHeaders["Content-Disposition"] = contentDisposition;
+    }
+    if (typeof upstream.headers.getSetCookie === "function") {
+      const setCookies = upstream.headers.getSetCookie();
+      if (setCookies && setCookies.length > 0) {
+        outputHeaders["Set-Cookie"] = setCookies;
+      }
+    } else {
+      const setCookie = upstream.headers.get("set-cookie");
+      if (setCookie) {
+        outputHeaders["Set-Cookie"] = setCookie;
+      }
     }
 
     const data = Buffer.from(await upstream.arrayBuffer());
