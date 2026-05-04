@@ -85,6 +85,7 @@ powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
 能力：
 
 - 自动安装 Node.js / Wireshark(TShark) / Ollama（通过 winget）
+- 自动安装 MySQL Server（本机 `MYSQL_HOST=127.0.0.1/localhost` 时尝试）
 - 自动安装 Python 依赖
 - 自动拉取 Ollama 模型
 - 自动构建 RAG sqlite 库
@@ -105,6 +106,12 @@ deploy\start_all_nodocker.bat
 deploy\start_all_nodocker.bat
 ```
 
+也可以直接双击项目根目录的：
+
+```bat
+install_oneclick.bat
+```
+
 可选参数示例：
 
 ```powershell
@@ -114,7 +121,30 @@ powershell -ExecutionPolicy Bypass -File deploy/start_all_nodocker.ps1 -NoModelP
 说明：
 
 - 该模式依赖 `winget`；若目标机没有 `winget`，请先手工安装 Node.js / Wireshark / Ollama 后再运行。
+- 若本机 MySQL 已安装但 root 密码与 `.env.nodocker` 不一致，安装脚本会在“初始化数据库”阶段失败，请改成正确密码后重试。
 - 抓包建议使用管理员权限终端运行（脚本会自动尝试提权）。
+
+## Windows Installer (.exe)
+
+如果你要“像正规软件一样”的安装包（无需用户先 `git clone`），可以直接打包成 `Setup.exe`：
+
+1. 安装 Inno Setup（仅打包机器需要）：
+
+```powershell
+winget install --id JRSoftware.InnoSetup --exact --accept-package-agreements --accept-source-agreements --silent
+```
+
+2. 构建安装包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer/build_installer.ps1
+```
+
+3. 生成物：
+
+- `dist/JingyuanTrafficPipeline_Setup.exe`
+
+分发时只需要把这个 `Setup.exe` 发给目标机器。目标机器双击后会复制项目文件并可一键执行环境安装（Python依赖、MySQL、Ollama、模型、Wireshark、服务启动等）。
 
 ## One-Click Full Deploy (Recommended)
 
@@ -485,6 +515,34 @@ Use only in authorized environments for defense, testing, and research.
 - API declaration: `docs/API_DECLARATION.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
+
+## Manual Installers (Windows)
+
+If your server cannot install all dependencies automatically, use:
+
+- `manual_installers/npcap-1.82.exe`
+- `manual_installers/Wireshark_4.6.5_Machine_X64_nullsoft_zh-CN.exe`
+- `manual_installers/OllamaSetup.exe`
+
+After installing Ollama, pull model:
+
+```bash
+ollama pull qwen2.5:3b
+```
+
+`deploy/start_all_nodocker.ps1` will prefer installers in `manual_installers/` when available.
+
+## Troubleshooting
+
+- Symptom: `input` has files but `result` is empty.
+  - Check `output/app_runtime/daemon_stdout.log` and `output/daemon_runs/*.log`.
+  - If you see `preprocessor.joblib` / `best_mlp.pth` not found, ensure these files exist:
+    - `models/preprocessor.joblib`
+    - `models/best_mlp.pth`
+
+- Symptom: local self-test to `127.0.0.1:3000` is not captured.
+  - Use loopback interface in admin config (`capture_interface=5` on most Windows hosts).
+  - For real external traffic to server NIC, switch back to Ethernet interface (for example `4`).
 
 ## License
 

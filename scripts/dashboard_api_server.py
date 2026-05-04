@@ -887,6 +887,170 @@ def get_conn(mysql_conf: Dict[str, Any], autocommit: bool = False):
     )
 
 
+def load_system_config_map(conn: Any) -> Dict[str, str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT config_key, config_value FROM demo_system_config")
+        rows = cur.fetchall()
+    return {str(x.get("config_key", "")).strip(): str(x.get("config_value", "")).strip() for x in rows}
+
+
+def normalize_ollama_url(raw_url: str) -> str:
+    text = str(raw_url or "").strip()
+    if not text:
+        return "http://127.0.0.1:11434"
+    return text.rstrip("/")
+
+
+def list_ollama_models(ollama_url: str, timeout: int = 5) -> Dict[str, Any]:
+    base = normalize_ollama_url(ollama_url)
+    endpoint = f"{base}/api/tags"
+    req = urllib.request.Request(endpoint, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body or "{}")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "models": [], "error": str(exc), "ollama_url": base}
+
+    raw_models = data.get("models", [])
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    if isinstance(raw_models, list):
+        for row in raw_models:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name", "")).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            items.append(
+                {
+                    "name": name,
+                    "size": int(row.get("size") or 0),
+                    "modified_at": str(row.get("modified_at") or ""),
+                }
+            )
+    items.sort(key=lambda x: x["name"])
+    return {"ok": True, "models": items, "error": "", "ollama_url": base}
+
+
+def resolve_legacy_model_artifacts() -> Tuple[Path, Path]:
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    local_models = project_root / "models"
+    local_pre = local_models / "preprocessor.joblib"
+    local_mdl = local_models / "best_mlp.pth"
+    if local_pre.exists() and local_mdl.exists():
+        return local_pre, local_mdl
+    fallback_models = project_root.parent / "traffic_mlp" / "models"
+    return fallback_models / "preprocessor.joblib", fallback_models / "best_mlp.pth"
+
+
+def list_tshark_interfaces(timeout: int = 12) -> Dict[str, Any]:
+    tshark_path = shutil.which("tshark")
+    if not tshark_path:
+        return {"ok": False, "path": "", "items": [], "error": "tshark_not_found"}
+    try:
+        result = subprocess.run(
+            [tshark_path, "-D"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "path": tshark_path, "items": [], "error": str(exc)}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return {"ok": False, "path": tshark_path, "items": [], "error": detail or f"returncode={result.returncode}"}
+
+    items: List[Dict[str, str]] = []
+    for raw_line in (result.stdout or "").splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d+)\.\s+(.+)$", line)
+        if not m:
+            continue
+        items.append({"index": m.group(1), "name": m.group(2), "raw": line})
+    return {"ok": True, "path": tshark_path, "items": items, "error": ""}
+
+
+def resolve_capture_interface(
+    configured_interface: str,
+    interface_items: List[Dict[str, str]],
+) -> Tuple[str, str]:
+    cfg = str(configured_interface or "").strip()
+    if not interface_items:
+        return "", ""
+    if not cfg or cfg.lower() in {"auto", "default", "自动"}:
+        return str(interface_items[0].get("index", "")).strip(), str(interface_items[0].get("name", "")).strip()
+
+    for row in interface_items:
+        idx = str(row.get("index", "")).strip()
+        if cfg == idx:
+            return idx, str(row.get("name", "")).strip()
+
+    cfg_lower = cfg.lower()
+    for row in interface_items:
+        raw = str(row.get("raw", "")).lower()
+        if cfg_lower and cfg_lower in raw:
+            return str(row.get("index", "")).strip(), str(row.get("name", "")).strip()
+
+    return "", ""
+
+
+def probe_capture_on_interface(interface_index: str, monitor_ports: str, timeout: int = 10) -> Dict[str, Any]:
+    tshark_path = shutil.which("tshark")
+    if not tshark_path:
+        return {"ok": False, "error": "tshark_not_found", "detail": ""}
+    iface = str(interface_index or "").strip()
+    if not iface:
+        return {"ok": False, "error": "empty_interface", "detail": ""}
+
+    cmd = [tshark_path, "-i", iface, "-a", "duration:1", "-Q", "-c", "1"]
+    raw_parts = [x for x in re.split(r"[\s,]+", str(monitor_ports or "").strip()) if x]
+    ports: List[str] = [x for x in raw_parts if x.isdigit() and 1 <= int(x) <= 65535][:6]
+    if ports:
+        expr = " or ".join(f"tcp port {p}" for p in ports)
+        cmd.extend(["-f", expr])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "probe_exception", "detail": str(exc), "cmd": cmd}
+
+    mix = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    if result.returncode == 0:
+        return {"ok": True, "error": "", "detail": "短时抓包探测成功", "cmd": cmd}
+    if any(
+        token in mix
+        for token in [
+            "permission",
+            "you don't have permission",
+            "access is denied",
+            "could not be initiated",
+            "cannot open adapter",
+        ]
+    ):
+        return {
+            "ok": False,
+            "error": "permission_denied",
+            "detail": "抓包权限不足，请使用管理员权限运行 app.py 或检查 Npcap AdminOnly",
+            "cmd": cmd,
+        }
+    detail = (result.stderr or result.stdout or "").strip()
+    return {"ok": False, "error": f"probe_failed_rc_{result.returncode}", "detail": detail, "cmd": cmd}
+
+
 def ensure_schema(conn: Any) -> None:
     ddl_list = [
         """
@@ -1059,6 +1223,8 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "sound_alert_enabled": "1",
             "capture_batch_size": "4",
             "monitor_ports": "80,443,8080",
+            "capture_interface": "auto",
+            "llm_model": "qwen3:8b",
         }
         for k, v in defaults.items():
             cur.execute(
@@ -1478,12 +1644,14 @@ def create_app(
     rag_force_seed: bool = False,
     jwt_secret: str = "",
     jwt_ttl_seconds: int = TOKEN_TTL_SECONDS,
+    ollama_url: str = "http://127.0.0.1:11434",
 ) -> Flask:
     app = Flask(__name__)
     app.url_map.strict_slashes = False
     app.config["MYSQL_CONF"] = mysql_conf
     app.config["RAG_DB_PATH"] = str(Path(rag_db_path).resolve())
     app.config["RAG_SEED_PATH"] = str(Path(rag_seed_path).resolve())
+    app.config["OLLAMA_URL"] = normalize_ollama_url(ollama_url)
     app.config["AUTH_COOKIE_NAME"] = os.environ.get("TP_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
     app.config["AUTH_COOKIE_SECURE"] = str(os.environ.get("TP_AUTH_COOKIE_SECURE", "0")).strip().lower() in {
         "1",
@@ -2767,6 +2935,233 @@ def create_app(
                 rows = cur.fetchall()
         return jsonify({"items": normalize_rows(rows)})
 
+    @app.route("/api/v2/admin/ollama/models", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def admin_ollama_models():
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            cfg = load_system_config_map(conn)
+        current_model = str(cfg.get("llm_model", "qwen3:8b")).strip() or "qwen3:8b"
+        model_info = list_ollama_models(app.config.get("OLLAMA_URL", "http://127.0.0.1:11434"))
+        return jsonify(
+            {
+                "ok": bool(model_info.get("ok")),
+                "items": model_info.get("models", []),
+                "current_model": current_model,
+                "ollama_url": model_info.get("ollama_url"),
+                "error": model_info.get("error", ""),
+            }
+        )
+
+    @app.route("/api/v2/admin/capture-interfaces", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def admin_capture_interfaces():
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            cfg = load_system_config_map(conn)
+        configured = str(cfg.get("capture_interface", "auto")).strip() or "auto"
+        info = list_tshark_interfaces()
+        items = info.get("items", [])
+        resolved_index, resolved_name = resolve_capture_interface(configured, items)
+        return jsonify(
+            {
+                "ok": bool(info.get("ok")),
+                "items": items,
+                "configured_interface": configured,
+                "resolved_interface_index": resolved_index,
+                "resolved_interface_name": resolved_name,
+                "tshark_path": info.get("path", ""),
+                "error": info.get("error", ""),
+            }
+        )
+
+    @app.route("/api/v2/admin/runtime-check", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def admin_runtime_check():
+        checks: List[Dict[str, Any]] = []
+        errors = 0
+        warnings = 0
+        config_map: Dict[str, str] = {}
+
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+                config_map = load_system_config_map(conn)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 AS ok")
+                    cur.fetchone()
+                    cur.execute("SHOW TABLES")
+                    table_rows = cur.fetchall()
+            table_count = len(table_rows)
+            checks.append({"name": "MySQL连接", "status": "ok", "message": "连接成功", "detail": f"已检测到 {table_count} 张表"})
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            checks.append({"name": "MySQL连接", "status": "error", "message": "连接失败", "detail": str(exc)})
+
+        tshark_info = list_tshark_interfaces()
+        tshark_path = str(tshark_info.get("path") or "")
+        interface_items = tshark_info.get("items") if isinstance(tshark_info.get("items"), list) else []
+        if not tshark_info.get("ok"):
+            errors += 1
+            checks.append(
+                {
+                    "name": "抓包依赖",
+                    "status": "error",
+                    "message": "tshark 不可用",
+                    "detail": str(tshark_info.get("error") or "请安装 Wireshark + Npcap，并确保 tshark 在 PATH 中"),
+                }
+            )
+        else:
+            checks.append({"name": "抓包依赖", "status": "ok", "message": "tshark可用", "detail": tshark_path})
+            checks.append(
+                {
+                    "name": "抓包网卡",
+                    "status": "ok" if interface_items else "warn",
+                    "message": f"检测到 {len(interface_items)} 个网卡",
+                    "detail": "；".join([f"{x.get('index')}. {x.get('name')}" for x in interface_items[:8]]) or "未检测到网卡",
+                }
+            )
+
+        ollama_exe = shutil.which("ollama")
+        if not ollama_exe:
+            errors += 1
+            checks.append(
+                {
+                    "name": "Ollama客户端",
+                    "status": "error",
+                    "message": "未找到 ollama 命令",
+                    "detail": "请先安装 Ollama 客户端",
+                }
+            )
+        else:
+            checks.append({"name": "Ollama客户端", "status": "ok", "message": "ollama可用", "detail": ollama_exe})
+
+        selected_model = str(config_map.get("llm_model", "qwen3:8b")).strip() or "qwen3:8b"
+        model_info = list_ollama_models(app.config.get("OLLAMA_URL", "http://127.0.0.1:11434"))
+        if not model_info.get("ok"):
+            errors += 1
+            checks.append(
+                {
+                    "name": "Ollama服务",
+                    "status": "error",
+                    "message": "服务不可达",
+                    "detail": str(model_info.get("error") or "unknown error"),
+                }
+            )
+        else:
+            names = {str(x.get("name", "")).strip() for x in model_info.get("models", [])}
+            if selected_model in names:
+                checks.append(
+                    {
+                        "name": "LLM模型",
+                        "status": "ok",
+                        "message": "模型已安装",
+                        "detail": f"当前模型：{selected_model}",
+                    }
+                )
+            else:
+                warnings += 1
+                checks.append(
+                    {
+                        "name": "LLM模型",
+                        "status": "warn",
+                        "message": "当前模型未安装",
+                        "detail": f"配置模型：{selected_model}，请执行：ollama pull {selected_model}",
+                    }
+                )
+            checks.append(
+                {
+                    "name": "Ollama服务",
+                    "status": "ok",
+                    "message": "服务正常",
+                    "detail": f"地址：{model_info.get('ollama_url')}，已发现 {len(model_info.get('models', []))} 个模型",
+                }
+            )
+
+        pre_path, mdl_path = resolve_legacy_model_artifacts()
+        if pre_path.exists() and mdl_path.exists():
+            checks.append(
+                {
+                    "name": "检测模型文件",
+                    "status": "ok",
+                    "message": "兼容模型文件可用",
+                    "detail": f"pre={pre_path} ; model={mdl_path}",
+                }
+            )
+        else:
+            errors += 1
+            missing = []
+            if not pre_path.exists():
+                missing.append(str(pre_path))
+            if not mdl_path.exists():
+                missing.append(str(mdl_path))
+            checks.append(
+                {
+                    "name": "检测模型文件",
+                    "status": "error",
+                    "message": "缺少兼容模型文件",
+                    "detail": " ; ".join(missing),
+                }
+            )
+
+        monitor_ports = str(config_map.get("monitor_ports", "80,443,8080")).strip()
+        batch_size = str(config_map.get("capture_batch_size", "4")).strip()
+        configured_interface = str(config_map.get("capture_interface", "auto")).strip() or "auto"
+        resolved_idx, resolved_name = resolve_capture_interface(configured_interface, interface_items)
+        if tshark_info.get("ok"):
+            if configured_interface not in {"", "auto", "default", "自动"} and not resolved_idx:
+                warnings += 1
+                checks.append(
+                    {
+                        "name": "抓包配置",
+                        "status": "warn",
+                        "message": "当前网卡配置未匹配到可用网卡",
+                        "detail": f"capture_interface={configured_interface}",
+                    }
+                )
+            elif resolved_idx:
+                probe = probe_capture_on_interface(resolved_idx, monitor_ports)
+                if probe.get("ok"):
+                    checks.append(
+                        {
+                            "name": "抓包检测",
+                            "status": "ok",
+                            "message": "短时抓包探测成功",
+                            "detail": f"网卡={resolved_idx}. {resolved_name}，端口={monitor_ports}",
+                        }
+                    )
+                else:
+                    errors += 1
+                    checks.append(
+                        {
+                            "name": "抓包检测",
+                            "status": "error",
+                            "message": "短时抓包探测失败",
+                            "detail": str(probe.get("detail") or probe.get("error") or "unknown"),
+                        }
+                    )
+        checks.append(
+            {
+                "name": "系统配置",
+                "status": "ok",
+                "message": "读取成功",
+                "detail": f"监测端口={monitor_ports}，分组数量={batch_size}，网卡={configured_interface}，模型={selected_model}",
+            }
+        )
+
+        overall = "ok"
+        if errors > 0:
+            overall = "error"
+        elif warnings > 0:
+            overall = "warn"
+        return jsonify(
+            {
+                "overall": overall,
+                "errors": errors,
+                "warnings": warnings,
+                "checks": checks,
+                "selected_model": selected_model,
+                "ollama_url": model_info.get("ollama_url", app.config.get("OLLAMA_URL")),
+            }
+        )
+
     @app.route("/api/v2/admin/config", methods=["PUT"])
     @require_roles(ROLE_ADMIN)
     def admin_config_put():
@@ -2822,6 +3217,19 @@ def create_app(
             elif cfg_key == "sound_alert_enabled":
                 if cfg_val not in {"0", "1"}:
                     return jsonify({"error": "invalid_sound_alert_enabled"}), 400
+            elif cfg_key == "llm_model":
+                cfg_val = cfg_val.strip()
+                if not cfg_val or len(cfg_val) > 128:
+                    return jsonify({"error": "invalid_llm_model"}), 400
+                if not re.match(r"^[A-Za-z0-9._:-]+$", cfg_val):
+                    return jsonify({"error": "invalid_llm_model"}), 400
+            elif cfg_key == "capture_interface":
+                if not cfg_val:
+                    cfg_val = "auto"
+                if cfg_val.lower() in {"default", "自动"}:
+                    cfg_val = "auto"
+                if len(cfg_val) > 128:
+                    return jsonify({"error": "invalid_capture_interface"}), 400
             normalized[cfg_key] = cfg_val
         if not normalized:
             return jsonify({"error": "invalid_payload"}), 400
@@ -2992,6 +3400,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rag-force-seed", action="store_true", help="Force rebuild RAG db from seed on startup")
     parser.add_argument("--jwt-secret", default="", help="JWT secret, fallback to env TP_JWT_SECRET")
     parser.add_argument("--jwt-ttl-seconds", type=int, default=TOKEN_TTL_SECONDS, help="JWT token TTL seconds")
+    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama base URL")
     parser.add_argument("--seed-demo", action="store_true", help="Seed demo data if tables are empty")
     parser.add_argument("--force-seed", action="store_true", help="Force regenerate demo data")
     return parser.parse_args()
@@ -3015,6 +3424,7 @@ def main() -> None:
         rag_force_seed=args.rag_force_seed,
         jwt_secret=args.jwt_secret,
         jwt_ttl_seconds=args.jwt_ttl_seconds,
+        ollama_url=args.ollama_url,
     )
     app.run(host=args.host, port=args.port, debug=False)
 

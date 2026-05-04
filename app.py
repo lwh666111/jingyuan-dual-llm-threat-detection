@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 def is_windows_admin() -> bool:
@@ -86,7 +86,8 @@ def read_json_config(path: Path) -> Dict:
     if not path.exists():
         raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # Use utf-8-sig to tolerate UTF-8 BOM produced by some Windows editors/PowerShell.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         raise ValueError(f"閰嶇疆鏂囦欢涓嶆槸鏈夋晥 JSON: {path}") from exc
     if not isinstance(data, dict):
@@ -136,6 +137,26 @@ def apply_db_config(args, parser: argparse.ArgumentParser, project_root: Path) -
         args.mysql_database = mysql_cfg["database"]
 
 
+def try_auto_set_db_config(args, project_root: Path) -> None:
+    """
+    兼容一键安装后的默认体验：
+    - 用户直接 `python app.py` 时，自动尝试读取 `config/db_config.json`
+    - 允许通过环境变量覆盖：`TRAFFIC_PIPELINE_DB_CONFIG`
+    """
+    explicit = (getattr(args, "db_config", "") or "").strip()
+    if explicit:
+        return
+
+    env_cfg = (os.environ.get("TRAFFIC_PIPELINE_DB_CONFIG", "") or "").strip()
+    if env_cfg:
+        args.db_config = env_cfg
+        return
+
+    default_cfg = project_root / "config" / "db_config.json"
+    if default_cfg.exists():
+        args.db_config = str(default_cfg)
+
+
 def parse_ports_text(text: str, fallback: List[int]) -> List[int]:
     raw = (text or "").strip()
     if not raw:
@@ -160,10 +181,38 @@ def parse_ports_text(text: str, fallback: List[int]) -> List[int]:
     return ports
 
 
+def parse_capture_interface_text(text: str, fallback: str = "") -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return (fallback or "").strip()
+    if raw.lower() in {"auto", "default", "自动"}:
+        return ""
+    if len(raw) > 128:
+        raise ValueError("capture_interface too long")
+    return raw
+
+
+def resolve_old_model_artifacts(project_root: Path) -> Tuple[Path, Path]:
+    """
+    Resolve legacy MLP artifacts in priority order:
+    1) <project_root>/models
+    2) <project_root>/../traffic_mlp/models
+    """
+    local_models = project_root / "models"
+    local_pre = local_models / "preprocessor.joblib"
+    local_mdl = local_models / "best_mlp.pth"
+    if local_pre.exists() and local_mdl.exists():
+        return local_pre, local_mdl
+
+    fallback_models = project_root.parent / "traffic_mlp" / "models"
+    return fallback_models / "preprocessor.joblib", fallback_models / "best_mlp.pth"
+
+
 def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_size: int) -> Dict:
     cfg = {
         "ports": [int(x) for x in fallback_ports],
         "batch_size": int(fallback_batch_size),
+        "interface": str(getattr(args, "interface", "") or "").strip(),
         "source": "cli",
         "error": "",
     }
@@ -196,7 +245,7 @@ def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_
                     """
                     SELECT config_key, config_value
                     FROM demo_system_config
-                    WHERE config_key IN ('monitor_ports', 'capture_batch_size')
+                    WHERE config_key IN ('monitor_ports', 'capture_batch_size', 'capture_interface')
                     """
                 )
                 rows = cur.fetchall()
@@ -226,7 +275,63 @@ def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_
             cfg["error"] = f"invalid_capture_batch_size: {exc}"
             return cfg
 
+    try:
+        cfg["interface"] = parse_capture_interface_text(kv.get("capture_interface", ""), cfg.get("interface", ""))
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"invalid_capture_interface: {exc}"
+        return cfg
+
     cfg["source"] = "db"
+    return cfg
+
+
+def load_llm_runtime_config(args, fallback_model: str) -> Dict:
+    cfg = {
+        "model": str(fallback_model or "").strip() or "qwen2.5:3b",
+        "source": "cli",
+        "error": "",
+    }
+    if str(getattr(args, "db_backend", "")).lower() != "mysql":
+        return cfg
+
+    try:
+        import pymysql
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"pymysql_import_failed: {exc}"
+        return cfg
+
+    try:
+        conn = pymysql.connect(
+            host=args.mysql_host,
+            port=int(args.mysql_port),
+            user=args.mysql_user,
+            password=args.mysql_password,
+            database=args.mysql_database,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT config_value
+                    FROM demo_system_config
+                    WHERE config_key='llm_model'
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone() or {}
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        cfg["error"] = f"mysql_read_failed: {exc}"
+        return cfg
+
+    model = str(row.get("config_value", "")).strip()
+    if model:
+        cfg["model"] = model
+        cfg["source"] = "db"
     return cfg
 
 
@@ -236,6 +341,7 @@ def build_capture_cmd(
     input_dir: Path,
     monitor_ports: Optional[List[int]] = None,
     batch_size: Optional[int] = None,
+    capture_interface: Optional[str] = None,
 ) -> List[str]:
     ports = list(monitor_ports or [args.port])
     if not ports:
@@ -253,8 +359,9 @@ def build_capture_cmd(
         "--input-dir",
         str(input_dir),
     ]
-    if args.interface:
-        cmd.extend(["--interface", args.interface])
+    iface = str(capture_interface if capture_interface is not None else args.interface or "").strip()
+    if iface:
+        cmd.extend(["--interface", iface])
     if args.decode_http_port is not None:
         cmd.extend(["--decode-http-port", str(args.decode_http_port)])
     return cmd
@@ -300,7 +407,8 @@ def build_daemon_cmd(args, script_dir: Path, input_dir: Path, output_dir: Path) 
     return cmd
 
 
-def build_llm_cmd(args, script_dir: Path) -> List[str]:
+def build_llm_cmd(args, script_dir: Path, llm_model: Optional[str] = None) -> List[str]:
+    model_name = str(llm_model or args.llm_model).strip() or str(args.llm_model).strip()
     cmd = [
         args.python_exe,
         str(script_dir / "llm_analyzer_daemon.py"),
@@ -309,7 +417,7 @@ def build_llm_cmd(args, script_dir: Path) -> List[str]:
         "--input-dir",
         args.input_dir,
         "--model",
-        args.llm_model,
+        model_name,
         "--ollama-url",
         args.ollama_url,
         "--prompt",
@@ -404,6 +512,8 @@ def build_api_cmd(args, script_dir: Path) -> List[str]:
         args.rag_db_path,
         "--rag-seed-file",
         args.rag_seed_file,
+        "--ollama-url",
+        args.ollama_url,
     ]
     if args.api_seed_demo:
         cmd.append("--seed-demo")
@@ -683,6 +793,7 @@ def main() -> None:
     )
     add_arguments(parser)
     args = parser.parse_args()
+    try_auto_set_db_config(args, project_root)
     apply_db_config(args, parser, project_root)
 
     if os.name == "nt" and args.auto_elevate and not is_windows_admin():
@@ -707,15 +818,17 @@ def main() -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
+    default_pre, default_model = resolve_old_model_artifacts(project_root)
+
     if args.preprocessor:
         args.preprocessor = Path(args.preprocessor).resolve()
     else:
-        args.preprocessor = None
+        args.preprocessor = default_pre.resolve()
 
     if args.model:
         args.model = Path(args.model).resolve()
     else:
-        args.model = None
+        args.model = default_model.resolve()
 
     run_capture = not args.only_detect
     run_daemon = not args.only_capture
@@ -750,6 +863,26 @@ def main() -> None:
                 "error": "",
             }
             capture_config_error_logged = "fallback_logged"
+
+    llm_runtime_cfg = {
+        "model": str(args.llm_model).strip() or "qwen2.5:3b",
+        "source": "cli",
+        "error": "",
+    }
+    llm_config_error_logged = ""
+    if run_llm:
+        llm_runtime_cfg = load_llm_runtime_config(args, args.llm_model)
+        if llm_runtime_cfg.get("error"):
+            log(
+                f"llm config load failed, fallback to CLI: {llm_runtime_cfg.get('error')}",
+                output_dir / "app_runtime" / "app.log",
+            )
+            llm_runtime_cfg = {
+                "model": str(args.llm_model).strip() or "qwen2.5:3b",
+                "source": "cli",
+                "error": "",
+            }
+            llm_config_error_logged = "fallback_logged"
 
     dashboard_server = (project_root / args.dashboard_server_script).resolve()
 
@@ -794,12 +927,13 @@ def main() -> None:
             input_dir,
             monitor_ports=capture_runtime_cfg["ports"],
             batch_size=capture_runtime_cfg["batch_size"],
+            capture_interface=capture_runtime_cfg.get("interface", ""),
         )
         if run_capture
         else []
     )
     daemon_cmd = build_daemon_cmd(args, scripts_dir, input_dir, output_dir) if run_daemon else []
-    llm_cmd = build_llm_cmd(args, scripts_dir) if run_llm else []
+    llm_cmd = build_llm_cmd(args, scripts_dir, llm_model=llm_runtime_cfg.get("model")) if run_llm else []
     db_cmd = build_db_cmd(args, scripts_dir) if run_db else []
     api_cmd = build_api_cmd(args, scripts_dir) if run_api else []
     dashboard_cmd = build_dashboard_cmd(args, dashboard_server) if run_dashboard else []
@@ -817,13 +951,37 @@ def main() -> None:
             "capture config: "
             + f"source={capture_runtime_cfg.get('source')} "
             + f"ports={capture_runtime_cfg.get('ports')} "
-            + f"batch_size={capture_runtime_cfg.get('batch_size')}",
+            + f"batch_size={capture_runtime_cfg.get('batch_size')} "
+            + f"interface={capture_runtime_cfg.get('interface') or 'auto'}",
             app_log,
         )
     if run_daemon:
         log("daemon  cmd: " + " ".join(daemon_cmd), app_log)
+        if args.preprocessor.exists() and args.model.exists():
+            log(
+                f"daemon model artifacts: preprocessor={args.preprocessor} model={args.model}",
+                app_log,
+            )
+        else:
+            missing = []
+            if not args.preprocessor.exists():
+                missing.append(str(args.preprocessor))
+            if not args.model.exists():
+                missing.append(str(args.model))
+            log(
+                "daemon model artifacts missing: "
+                + ", ".join(missing)
+                + " ; detection may fail until files are provided",
+                app_log,
+            )
     if run_llm:
         log("llm     cmd: " + " ".join(llm_cmd), app_log)
+        log(
+            "llm config: "
+            + f"source={llm_runtime_cfg.get('source')} "
+            + f"model={llm_runtime_cfg.get('model')}",
+            app_log,
+        )
     if run_db:
         log("db      cmd: " + " ".join(db_cmd), app_log)
     if run_api:
@@ -946,6 +1104,7 @@ def main() -> None:
                 "config_source": capture_runtime_cfg.get("source"),
                 "monitor_ports": capture_runtime_cfg.get("ports"),
                 "batch_size": capture_runtime_cfg.get("batch_size"),
+                "capture_interface": capture_runtime_cfg.get("interface") or "",
                 "stdout": str(capture_stdout),
                 "stderr": str(capture_stderr),
             },
@@ -958,6 +1117,8 @@ def main() -> None:
             "llm": {
                 "pid": llm_proc.pid if llm_proc else None,
                 "cmd": llm_cmd,
+                "config_source": llm_runtime_cfg.get("source"),
+                "model": llm_runtime_cfg.get("model"),
                 "stdout": str(llm_stdout),
                 "stderr": str(llm_stderr),
             },
@@ -987,9 +1148,12 @@ def main() -> None:
 
         capture_cfg_key = (
             f"ports={','.join(str(x) for x in capture_runtime_cfg.get('ports', []))}|"
-            f"batch={capture_runtime_cfg.get('batch_size')}"
+            f"batch={capture_runtime_cfg.get('batch_size')}|"
+            f"iface={capture_runtime_cfg.get('interface') or ''}"
         )
+        llm_cfg_key = f"model={llm_runtime_cfg.get('model')}"
         next_capture_cfg_check_ts = 0.0
+        next_llm_cfg_check_ts = 0.0
         capture_cfg_poll_seconds = max(1, int(args.capture_config_poll_seconds))
 
         log("workflow is running; press Ctrl+C to stop all", app_log)
@@ -1021,7 +1185,8 @@ def main() -> None:
                     capture_config_error_logged = ""
                     new_cfg_key = (
                         f"ports={','.join(str(x) for x in updated_cfg.get('ports', []))}|"
-                        f"batch={updated_cfg.get('batch_size')}"
+                        f"batch={updated_cfg.get('batch_size')}|"
+                        f"iface={updated_cfg.get('interface') or ''}"
                     )
                     if new_cfg_key != capture_cfg_key:
                         new_capture_cmd = build_capture_cmd(
@@ -1030,11 +1195,13 @@ def main() -> None:
                             input_dir,
                             monitor_ports=updated_cfg["ports"],
                             batch_size=updated_cfg["batch_size"],
+                            capture_interface=updated_cfg.get("interface", ""),
                         )
                         log(
                             "capture config changed, restarting capture: "
                             + f"source={updated_cfg.get('source')} ports={updated_cfg.get('ports')} "
-                            + f"batch_size={updated_cfg.get('batch_size')}",
+                            + f"batch_size={updated_cfg.get('batch_size')} "
+                            + f"interface={updated_cfg.get('interface') or 'auto'}",
                             app_log,
                         )
                         terminate_process(capture_proc, "capture", app_log)
@@ -1055,8 +1222,47 @@ def main() -> None:
                         runtime_state["capture"]["config_source"] = capture_runtime_cfg.get("source")
                         runtime_state["capture"]["monitor_ports"] = capture_runtime_cfg.get("ports")
                         runtime_state["capture"]["batch_size"] = capture_runtime_cfg.get("batch_size")
+                        runtime_state["capture"]["capture_interface"] = capture_runtime_cfg.get("interface") or ""
                         write_runtime_state(state_file, runtime_state)
                         log(f"capture restarted pid={capture_proc.pid}", app_log)
+
+            if run_llm and llm_proc and llm_rc is None and time.time() >= next_llm_cfg_check_ts:
+                next_llm_cfg_check_ts = time.time() + capture_cfg_poll_seconds
+                updated_llm_cfg = load_llm_runtime_config(args, args.llm_model)
+                llm_cfg_error = str(updated_llm_cfg.get("error") or "")
+                if llm_cfg_error:
+                    if llm_cfg_error != llm_config_error_logged:
+                        log(f"llm config reload failed, keep current: {llm_cfg_error}", app_log)
+                    llm_config_error_logged = llm_cfg_error
+                else:
+                    llm_config_error_logged = ""
+                    new_llm_cfg_key = f"model={updated_llm_cfg.get('model')}"
+                    if new_llm_cfg_key != llm_cfg_key:
+                        new_llm_cmd = build_llm_cmd(args, scripts_dir, llm_model=updated_llm_cfg.get("model"))
+                        log(
+                            "llm config changed, restarting llm: "
+                            + f"source={updated_llm_cfg.get('source')} model={updated_llm_cfg.get('model')}",
+                            app_log,
+                        )
+                        terminate_process(llm_proc, "llm", app_log)
+                        llm_proc = subprocess.Popen(
+                            new_llm_cmd,
+                            cwd=str(project_root),
+                            stdout=llm_out_f,
+                            stderr=llm_err_f,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        llm_cmd = new_llm_cmd
+                        llm_runtime_cfg = updated_llm_cfg
+                        llm_cfg_key = new_llm_cfg_key
+                        runtime_state["llm"]["pid"] = llm_proc.pid
+                        runtime_state["llm"]["cmd"] = llm_cmd
+                        runtime_state["llm"]["config_source"] = llm_runtime_cfg.get("source")
+                        runtime_state["llm"]["model"] = llm_runtime_cfg.get("model")
+                        write_runtime_state(state_file, runtime_state)
+                        log(f"llm restarted pid={llm_proc.pid}", app_log)
 
             if run_capture and capture_proc and cap_rc is not None:
                 log(f"capture exited rc={cap_rc}", app_log)
