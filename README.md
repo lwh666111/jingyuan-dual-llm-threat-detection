@@ -513,8 +513,19 @@ Use only in authorized environments for defense, testing, and research.
 - Usage guide: `docs/USAGE.md`
 - Windows prerequisite setup: `docs/WINDOWS_PREREQ_SETUP.md`
 - API declaration: `docs/API_DECLARATION.md`
+- Monthly changelog: `docs/CHANGELOG_2026-04_2026-05.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
+
+## Test Targets
+
+- Recommended multi-vuln target (port 4000):
+  - `test/start_multivuln_lab_4000.ps1`
+  - `test/start_multivuln_lab_4000.bat`
+- Legacy login target (port 3000):
+  - `test/start_login_lab_3000.ps1`
+- Stop targets:
+  - `test/stop_target_labs.ps1`
 
 ## Manual Installers (Windows)
 
