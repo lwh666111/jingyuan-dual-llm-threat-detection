@@ -54,315 +54,157 @@
 └─ README.md
 ```
 
-## Quick Start
+## 安装与部署（仅安装包方式）
 
-默认使用一键部署，不再需要手工“下库”或分别启动多服务。
+本项目安装方式统一为：**双击安装包安装项目文件 + 手动安装依赖 + 手动拉取模型 + 启动项目**。  
+请严格按以下顺序执行，不要跳步骤。
 
-首次在新 Windows 机器部署前，请先完成前置安装：
+### 1. 安装前准备（目标机器）
 
-- `docs/WINDOWS_PREREQ_SETUP.md`
+必须满足：
 
-1. 首次执行（自动生成 `deploy/.env` 模板）：
+- Windows 10/11 或 Windows Server
+- 已安装 Python 3.12（建议路径：`C:\python\python312\python.exe`）
+- 已安装并运行 MySQL（你自己的地址、端口、账号、密码）
+- 使用管理员权限操作（抓包相关步骤建议管理员 PowerShell）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
-```
+### 2. 双击安装包
 
-2. 按需修改 `deploy/.env`（模型、端口、数据库密码等）后再次执行：
+安装包文件：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
-```
+- `dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
 
-3. 访问服务：
+操作：
 
-- 前端大屏：`http://127.0.0.1:1145`
-- API：`http://127.0.0.1:3049`
-- Ollama：`http://127.0.0.1:11434`
+1. 双击 `JingyuanTrafficPipeline_Setup_ManualDeps.exe`
+2. 按向导完成安装（默认安装目录通常为 `C:\JingyuanTrafficPipeline`）
+3. 安装结束后，先不要直接测试抓包，先完成第 3 步依赖安装
 
-4. 停止服务：
+### 3. 手动安装依赖（必须）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
-```
+安装包安装完成后，进入目录：
 
-## No-Docker One-Click (Windows Server Friendly)
+- `C:\JingyuanTrafficPipeline\manual_installers\`
 
-适用于“不要 Docker，只配置数据库地址”的部署方式。
+按顺序安装：
 
-能力：
+1. `npcap-1.82.exe`
+2. `Wireshark_4.6.5_Machine_X64_nullsoft_zh-CN.exe`
+3. `OllamaSetup.exe`
 
-- 自动安装 Node.js / Wireshark(TShark) / Ollama（通过 winget）
-- 自动安装 MySQL Server（本机 `MYSQL_HOST=127.0.0.1/localhost` 时尝试）
-- 自动安装 Python 依赖
-- 自动拉取 Ollama 模型
-- 自动构建 RAG sqlite 库
-- 自动写入 MySQL 运行配置并启动 `app.py` 全链路
+说明：
 
-步骤：
+- `Npcap` 是抓包驱动，没装好会导致抓包看起来“运行正常但没有数据”。
+- `Wireshark` 请确认包含 `tshark`/`dumpcap` 组件。
+- `Ollama` 是大模型服务，后续 LLM 研判依赖它。
 
-1. 先安装 Python（并加入 PATH）。
-2. 首次执行（自动生成配置模板）：
+### 4. 部署大模型（Ollama）
 
-```bat
-deploy\start_all_nodocker.bat
-```
-
-3. 修改 `deploy/.env.nodocker`（至少改 MySQL 地址/账号/密码）后，再次执行：
-
-```bat
-deploy\start_all_nodocker.bat
-```
-
-也可以直接双击项目根目录的：
-
-```bat
-install_oneclick.bat
-```
-
-可选参数示例：
+打开新终端执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy/start_all_nodocker.ps1 -NoModelPull
+ollama list
+```
+
+如果命令不可用，重开终端再试。可用后执行：
+
+```powershell
+ollama pull qwen2.5:3b
+ollama list
+```
+
+建议：
+
+- 资源紧张机器：`qwen2.5:3b`
+- 资源较充足机器：可换更大模型（例如 `qwen3:8b`），并在系统配置中对应修改
+
+### 5. 配置数据库连接
+
+编辑文件：
+
+- `C:\JingyuanTrafficPipeline\config\db_config.json`
+
+至少确认以下字段正确：
+
+- `mysql.host`
+- `mysql.port`
+- `mysql.user`
+- `mysql.password`
+- `mysql.database`
+
+### 6. 启动项目（正式投用）
+
+在项目目录执行（管理员 PowerShell）：
+
+```powershell
+cd C:\JingyuanTrafficPipeline
+python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
 ```
 
 说明：
 
-- 该模式依赖 `winget`；若目标机没有 `winget`，请先手工安装 Node.js / Wireshark / Ollama 后再运行。
-- 若本机 MySQL 已安装但 root 密码与 `.env.nodocker` 不一致，安装脚本会在“初始化数据库”阶段失败，请改成正确密码后重试。
-- 抓包建议使用管理员权限终端运行（脚本会自动尝试提权）。
+- `--port` 是抓包监听端口（示例为 `4000`）
+- `--interface` 是抓包网卡编号（示例 `4` 通常是以太网）
+- 如果你测试流量是“本机访问本机（127.0.0.1）”，请改成回环网卡编号（常见是 `5`）
 
-## Windows Installer (.exe)
-
-如果你要“像正规软件一样”的安装包（无需用户先 `git clone`），可以直接打包成 `Setup.exe`：
-
-1. 安装 Inno Setup（仅打包机器需要）：
+### 7. 启动靶场（测试用，可选）
 
 ```powershell
-winget install --id JRSoftware.InnoSetup --exact --accept-package-agreements --accept-source-agreements --silent
+powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_multivuln_lab_4000.ps1 -PythonExe C:\python\python312\python.exe -BindHost 0.0.0.0 -Port 4000
 ```
 
-2. 构建安装包：
+### 8. 验证是否可用
+
+访问：
+
+- 前端大屏：`http://127.0.0.1:1145`
+- 后端 API：`http://127.0.0.1:3049`
+- 测试靶场：`http://127.0.0.1:4000`
+
+进入前端后建议：
+
+1. 管理员登录
+2. 打开“系统配置”
+3. 执行“一键检查运行环境”
+4. 确认：
+- MySQL 连接成功
+- 抓包依赖/tshark 正常
+- 抓包网卡可枚举
+- Ollama 服务正常
+- 模型已安装
+- 抓包探测成功
+
+### 9. 如何投入正式使用
+
+建议流程：
+
+1. 按业务实际填写监测端口（如 `80,443,3000`）
+2. 选择正确抓包网卡（外部流量一般选以太网）
+3. 在低峰时段先进行 10~30 分钟灰度观察
+4. 检查 `input/`、`result/`、大屏事件列表是否持续更新
+5. 再切换到持续运行
+
+### 10. 停止与重启
+
+- 当前前台运行窗口：`Ctrl + C` 停止
+- 停止靶场：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer/build_installer.ps1
+powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\stop_target_labs.ps1
 ```
 
-3. 生成物：
-
-- `dist/JingyuanTrafficPipeline_Setup.exe`
-
-分发时只需要把这个 `Setup.exe` 发给目标机器。目标机器双击后会复制项目文件并可一键执行环境安装（Python依赖、MySQL、Ollama、模型、Wireshark、服务启动等）。
-
-## One-Click Full Deploy (Recommended)
-
-This project now supports one-click deployment for:
-
-- MySQL database (business/event data)
-- SQLite FTS5 RAG database (`llm/rag/rag_knowledge.db`)
-- Ollama service and model pull
-- Python runtime dependencies
-- Unified app services (`capture + daemon + db + api + dashboard`)
-
-Steps:
-
-1. First run (generate env template):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
-```
-
-2. Edit `deploy/.env` if needed (ports, model, DB password), then run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/start_all.ps1
-```
-
-Stop services:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1
-```
-
-Stop and remove infra data volumes:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy/stop_all.ps1 -RemoveInfraData
-```
-
-## Manual Mode (Optional / Advanced)
-
-以下仅用于调试或兼容场景，日常推荐使用一键部署：
-
-Install dependencies:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-Start the full workflow (capture + detect + LLM + DB + API + Dashboard):
-
-```powershell
-python app.py --port 80 --capture-batch-size 4
-```
-
-Local demo (without packet capture):
-
-```powershell
-python app.py --only-detect --no-llm --db-backend mysql --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user root --mysql-password 123456 --mysql-database traffic_pipeline --api-port 3049 --dashboard-port 1145
-```
-
-Use DB config file:
-
-```powershell
-python app.py --only-detect --no-llm --db-config config/db_config.json --api-port 3049 --dashboard-port 1145
-```
-
-Show all options:
-
-```powershell
-python app.py --help
-```
-
-## Database Config File
-
-- local config: `config/db_config.json`
-- docker config: `config/db_config.docker.json`
-- CLI has higher priority than config file values
-
-Format:
-
-```json
-{
-  "db_backend": "mysql",
-  "db_path": "result/result_cases.db",
-  "mysql": {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "root",
-    "password": "123456",
-    "database": "traffic_pipeline"
-  }
-}
-```
-
-## Legacy Docker App-Only Deploy (No LLM)
-
-This deployment includes:
-
-- MySQL 8.0
-- API service (`3049`)
-- Dashboard frontend (`1145`)
-- DB auto-ingest daemon
-- Detection daemon
-
-LLM is intentionally disabled in one-click Docker startup.
-
-Start:
-
-```powershell
-docker compose up -d --build
-```
-
-Stop:
-
-```powershell
-docker compose down
-```
-
-Open dashboard:
-
-- `http://127.0.0.1:1145`
-
-## Common Commands
-
-Listen on port 3000:
-
-```powershell
-python app.py --port 3000 --capture-batch-size 1
-```
-
-Capture only:
-
-```powershell
-python app.py --only-capture --port 80
-```
-
-Detect only:
-
-```powershell
-python app.py --only-detect --no-skip-existing-at-start
-```
-
-Detect only (without LLM):
-
-```powershell
-python app.py --only-detect --no-llm
-```
-
-Detect only (without LLM and DB):
-
-```powershell
-python app.py --only-detect --no-llm --no-db
-```
-
-Run LLM analysis daemon (file-output mode, no DB):
-
-```powershell
-python scripts\llm_analyzer_daemon.py --once --model qwen3:8b --num-gpu 0
-python scripts\llm_analyzer_daemon.py --model qwen3:8b --num-gpu 0
-```
-
-Build RAG knowledge DB (SQLite FTS5):
-
-```powershell
-python scripts\build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/rag/rag_knowledge.db
-```
-
-Run LLM daemon with RAG enabled:
-
-```powershell
-python scripts\llm_analyzer_daemon.py --model qwen3:8b --rag-enable --rag-db-path llm/rag/rag_knowledge.db --rag-top-k 3
-```
-
-Disable LLM in unified app entry:
-
-```powershell
-python app.py --no-llm
-```
-
-RAG controls in unified app entry (effective when LLM enabled):
-
-```powershell
-python app.py --rag-enable --rag-db-path llm/rag/rag_knowledge.db --rag-top-k 3
-```
-
-Run DB sync daemon:
-
-```powershell
-python scripts\result_db_daemon.py --once
-python scripts\result_db_daemon.py
-# sqlite fallback:
-python scripts\result_db_daemon.py --backend sqlite --db-path result/result_cases.db
-```
-
-Run frontend API service (Flask, port 3049):
-
-```powershell
-python scripts\dashboard_api_server.py --port 3049
-```
-
-Run Node.js dashboard (port 1145):
-
-```powershell
-node frontend_dashboard\server.js
-```
-
-Disable DB daemon in unified app entry:
-
-```powershell
-python app.py --no-db
-```
+### 11. 常见问题（安装包场景）
+
+- 双击安装包后能打开页面但无攻击数据：
+  - 先检查 `Npcap` 和 `Wireshark` 是否真的安装完成
+  - 检查网卡是否选错（本机回环流量与外部流量网卡不同）
+- `ollama` 命令不存在：
+  - 重新打开终端，或重启系统后再试
+- LLM 无结果：
+  - 执行 `ollama list` 确认模型存在
+  - 在系统配置里确认模型名与已安装模型一致
+- MySQL 连不上：
+  - 检查 `config/db_config.json` 与实际数据库参数是否一致
 
 ## Workflow
 
