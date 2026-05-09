@@ -11,6 +11,14 @@
 - MySQL 持久化（`requests` / `responses` / `analyses` 三表）
 - Flask API（3049）+ Node 前端大屏（1145）
 
+## 最新发布（2026-05-09）
+
+- 版本记录：`docs/VERSION_RECORD.md`
+- 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
+- 最新使用教程：`docs/USAGE.md`
+- 最新安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
+- 安装包 SHA256：`16BB36F2E093EF941A78ACB6CA59D84F2AA9468644F9D68C852578373B10D34D`
+
 ## GitHub 仓库简介
 `靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库与大屏展示，已支持一键部署（MySQL + Ollama + 全链路服务）。`
 
@@ -558,3 +566,4 @@ ollama pull qwen2.5:3b
 ## License
 
 MIT
+

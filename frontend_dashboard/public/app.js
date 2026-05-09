@@ -84,6 +84,9 @@ const state = {
     logsUsername: "",
     config: {},
     users: [],
+    modelCandidates: [],
+    captureInterfaces: [],
+    runtimeCheck: null,
   },
   rag: {
     page: 1,
@@ -1964,6 +1967,9 @@ function renderAdminConfigView() {
       <div class="panel-head">
         <h3 class="panel-title">管理员 - 全局配置</h3>
         <div class="ops-group">
+          <button id="adm_runtime_check" class="btn btn-warning">一键检查运行环境</button>
+          <button id="adm_refresh_models" class="btn btn-primary">刷新模型列表</button>
+          <button id="adm_refresh_ifaces" class="btn btn-primary">刷新网卡列表</button>
           <button id="adm_cfg_refresh" class="btn btn-success">刷新配置</button>
           <button id="adm_export_report" class="btn btn-danger">导出全平台攻击统计报告</button>
         </div>
@@ -1989,16 +1995,37 @@ function renderAdminConfigView() {
           <label>监测端口(逗号分隔)</label>
           <input id="cfg_monitor_ports" placeholder="80,443,8080" />
         </div>
+        <div>
+          <label>LLM模型(已安装列表)</label>
+          <select id="cfg_llm_model"></select>
+        </div>
+        <div>
+          <label>抓包网卡</label>
+          <select id="cfg_capture_interface"></select>
+        </div>
+        <div>
+          <label>自定义模型(可选，优先)</label>
+          <input id="cfg_llm_model_custom" placeholder="例如 qwen2.5:7b" />
+        </div>
       </div>
       <div class="row-actions">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
       </div>
+      <div id="adm_runtime_result" class="panel-sub" style="margin-top:10px;white-space:pre-wrap;"></div>
     </section>
   `;
+  document.getElementById("adm_runtime_check")?.addEventListener("click", () => runAdminRuntimeCheck());
+  document.getElementById("adm_refresh_models")?.addEventListener("click", () => refreshAdminModelOptions());
+  document.getElementById("adm_refresh_ifaces")?.addEventListener("click", () => refreshAdminCaptureInterfaces());
   document.getElementById("adm_cfg_refresh")?.addEventListener("click", () => loadAdminConfig());
   document.getElementById("adm_cfg_save")?.addEventListener("click", () => saveAdminConfig());
   document.getElementById("adm_export_report")?.addEventListener("click", () => exportAdminReport());
-  loadAdminConfig().catch((err) => showToast(`加载配置失败：${err.message}`));
+  loadAdminConfig()
+    .then(async () => {
+      await refreshAdminModelOptions(undefined, true);
+      await refreshAdminCaptureInterfaces(undefined, true);
+    })
+    .catch((err) => showToast(`加载配置失败：${err.message}`));
 }
 
 async function loadAdminConfig() {
@@ -2014,19 +2041,93 @@ async function loadAdminConfig() {
   setInputValue("cfg_sound_alert_enabled", map.sound_alert_enabled || "1");
   setInputValue("cfg_capture_batch_size", map.capture_batch_size || "4");
   setInputValue("cfg_monitor_ports", map.monitor_ports || "80,443,8080");
+  setInputValue("cfg_llm_model_custom", "");
+  setInputValue("cfg_capture_interface", map.capture_interface || "auto");
 }
 
 async function saveAdminConfig() {
+  const selectedModel = String(document.getElementById("cfg_llm_model")?.value || "").trim();
+  const customModel = String(document.getElementById("cfg_llm_model_custom")?.value || "").trim();
+  const finalModel = customModel || selectedModel || state.admin.config?.llm_model || "qwen3:8b";
   const payload = {
     alert_threshold_high: String(document.getElementById("cfg_alert_threshold_high")?.value || "10"),
     auto_refresh_seconds: String(document.getElementById("cfg_auto_refresh_seconds")?.value || "5"),
     sound_alert_enabled: String(document.getElementById("cfg_sound_alert_enabled")?.value || "1"),
     capture_batch_size: String(document.getElementById("cfg_capture_batch_size")?.value || "4"),
     monitor_ports: String(document.getElementById("cfg_monitor_ports")?.value || "80,443,8080"),
+    capture_interface: String(document.getElementById("cfg_capture_interface")?.value || "auto"),
+    llm_model: finalModel,
   };
   await api("/api/v2/admin/config", { method: "PUT", body: payload });
   showToast("配置保存成功");
   await loadAdminConfig();
+  await refreshAdminModelOptions(finalModel, true);
+  await refreshAdminCaptureInterfaces(payload.capture_interface, true);
+}
+
+async function refreshAdminModelOptions(preferModel, silent = false) {
+  const selectEl = document.getElementById("cfg_llm_model");
+  if (!selectEl) return;
+  const data = await api("/api/v2/admin/ollama/models");
+  const items = Array.isArray(data.items) ? data.items : [];
+  state.admin.modelCandidates = items.map((x) => String(x.name || "").trim()).filter(Boolean);
+  const currentModel = String(preferModel || state.admin.config?.llm_model || data.current_model || "qwen3:8b").trim();
+  const merged = Array.from(new Set([...state.admin.modelCandidates, currentModel])).filter(Boolean);
+  selectEl.innerHTML = merged.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  selectEl.value = currentModel;
+  const custom = document.getElementById("cfg_llm_model_custom");
+  if (custom) custom.value = "";
+  if (!data.ok && !silent) {
+    showToast(`模型列表读取失败：${data.error || "Ollama服务不可用"}`);
+  } else if (!silent) {
+    showToast(`模型列表已刷新，共 ${items.length} 个`);
+  }
+}
+
+async function refreshAdminCaptureInterfaces(preferIface, silent = false) {
+  const selectEl = document.getElementById("cfg_capture_interface");
+  if (!selectEl) return;
+  const data = await api("/api/v2/admin/capture-interfaces");
+  const items = Array.isArray(data.items) ? data.items : [];
+  state.admin.captureInterfaces = items;
+
+  const currentIface = String(preferIface || state.admin.config?.capture_interface || data.configured_interface || "auto").trim() || "auto";
+  const options = [{ value: "auto", label: "自动选择（推荐）" }];
+  items.forEach((x) => {
+    const idx = String(x.index || "").trim();
+    const name = String(x.name || "").trim();
+    if (!idx) return;
+    options.push({ value: idx, label: `${idx}. ${name || "未知网卡"}` });
+  });
+  if (!options.some((x) => x.value === currentIface)) {
+    options.push({ value: currentIface, label: `${currentIface}（当前配置）` });
+  }
+  selectEl.innerHTML = options
+    .map((x) => `<option value="${escapeHtml(x.value)}">${escapeHtml(x.label)}</option>`)
+    .join("");
+  selectEl.value = currentIface;
+
+  if (!data.ok && !silent) {
+    showToast(`网卡列表读取失败：${data.error || "tshark不可用"}`);
+  } else if (!silent) {
+    showToast(`网卡列表已刷新，共 ${items.length} 个`);
+  }
+}
+
+async function runAdminRuntimeCheck() {
+  const box = document.getElementById("adm_runtime_result");
+  if (box) box.textContent = "正在检查运行环境，请稍候...";
+  const data = await api("/api/v2/admin/runtime-check");
+  state.admin.runtimeCheck = data;
+  const lines = [];
+  lines.push(`整体状态：${data.overall || "-"}（错误 ${data.errors || 0}，警告 ${data.warnings || 0}）`);
+  lines.push(`当前模型：${data.selected_model || "-"}`);
+  lines.push(`Ollama地址：${data.ollama_url || "-"}`);
+  const checks = Array.isArray(data.checks) ? data.checks : [];
+  checks.forEach((x) => {
+    lines.push(`- [${x.status}] ${x.name}: ${x.message}${x.detail ? ` | ${x.detail}` : ""}`);
+  });
+  if (box) box.textContent = lines.join("\n");
 }
 
 async function exportAdminReport() {
@@ -2670,7 +2771,10 @@ async function api(path, options = {}) {
 function parseApiError(text, status) {
   try {
     const obj = JSON.parse(text);
-    return obj.message || obj.error || `HTTP ${status}`;
+    if (obj.message) return String(obj.message);
+    if (obj.detail) return String(obj.detail);
+    if (obj.error && obj.status) return `${obj.error} (${obj.status})`;
+    return obj.error || `HTTP ${status}`;
   } catch {
     return `HTTP ${status}`;
   }

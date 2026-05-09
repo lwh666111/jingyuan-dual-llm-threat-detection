@@ -46,3 +46,9 @@ llm/rag/rag_knowledge.db
 
 # Local deploy env
 deploy/.env
+
+# Build artifacts
+dist/*.exe
+
+# Local manual installers (large binaries)
+manual_installers/*.exe

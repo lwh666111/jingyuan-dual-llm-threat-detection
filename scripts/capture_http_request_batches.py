@@ -116,15 +116,32 @@ def choose_interface(interfaces, preferred_name: str = "") -> str:
             if preferred_name.lower() in iface["raw"].lower():
                 return iface["index"]
 
-    preferred_keywords = ["wi-fi", "wlan", "wireless", "wifi"]
-    for kw in preferred_keywords:
+    # 优先真实业务网卡，避免误选 Microsoft Wi-Fi Direct/本地连接* 等虚拟适配器。
+    preferred_groups = [
+        ["以太网", "ethernet"],
+        ["wi-fi", "wlan", "wireless", "wifi"],
+    ]
+    for group in preferred_groups:
         for iface in interfaces:
-            if kw in iface["raw"].lower():
+            raw = iface["raw"].lower()
+            if any(kw in raw for kw in group):
                 return iface["index"]
 
+    deprioritized_tokens = [
+        "loopback",
+        "npcap loopback",
+        "local area connection*",
+        "本地连接*",
+        "wi-fi direct",
+        "virtual",
+        "vmware",
+        "hyper-v",
+        "vethernet",
+        "bluetooth",
+    ]
     for iface in interfaces:
         raw = iface["raw"].lower()
-        if "loopback" not in raw and "npcap loopback" not in raw:
+        if not any(tok in raw for tok in deprioritized_tokens):
             return iface["index"]
 
     if interfaces:

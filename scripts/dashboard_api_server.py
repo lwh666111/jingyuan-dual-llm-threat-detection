@@ -1492,6 +1492,23 @@ def decode_jwt_token(token: str, secret: str) -> Tuple[Optional[Dict[str, Any]],
     return payload, ""
 
 
+def read_jwt_exp_unverified(token: str) -> Optional[int]:
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload_raw = _b64url_decode(parts[1]).decode("utf-8")
+        payload = json.loads(payload_raw)
+        if not isinstance(payload, dict):
+            return None
+        exp_ts = payload.get("exp")
+        if exp_ts is None:
+            return None
+        return int(exp_ts)
+    except Exception:
+        return None
+
+
 def prune_revoked_jtis() -> None:
     now_ts = int(now_dt().timestamp())
     expired = [k for k, exp in JWT_REVOKED_JTIS.items() if exp <= now_ts]
@@ -2013,6 +2030,18 @@ def create_app(
             return jsonify({"error": "url_and_token_required"}), 400
         if not re.match(r"^https?://", url_text, flags=re.IGNORECASE):
             return jsonify({"error": "invalid_url", "message": "url must start with http:// or https://"}), 400
+        exp_ts = read_jwt_exp_unverified(token)
+        if exp_ts is not None and exp_ts <= int(now_dt().timestamp()):
+            return (
+                jsonify(
+                    {
+                        "error": "token_expired",
+                        "message": "token已过期，请更换新的token",
+                        "expired_at": dt_to_str(datetime.fromtimestamp(exp_ts), ms=False),
+                    }
+                ),
+                400,
+            )
 
         upstream = "http://ctf.ski:9898/?" + urllib.parse.urlencode({"url": url_text, "token": token})
         req = urllib.request.Request(upstream, method="GET")
@@ -2021,7 +2050,24 @@ def create_app(
                 payload = resp.read().decode("utf-8", errors="replace")
                 data = json.loads(payload)
         except urllib.error.HTTPError as exc:
-            return jsonify({"error": "upstream_http_error", "status": int(exc.code)}), 502
+            detail = ""
+            message = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace").strip()
+                if detail:
+                    body_obj = json.loads(detail)
+                    if isinstance(body_obj, dict):
+                        message = str(body_obj.get("msg") or body_obj.get("message") or body_obj.get("error") or "").strip()
+            except Exception:
+                detail = ""
+            if not message and int(exc.code) == 401:
+                message = "上游鉴权失败，token可能无效或已过期"
+            resp_obj: Dict[str, Any] = {"error": "upstream_http_error", "status": int(exc.code)}
+            if message:
+                resp_obj["message"] = message
+            if detail:
+                resp_obj["detail"] = detail[:400]
+            return jsonify(resp_obj), 502
         except urllib.error.URLError as exc:
             return jsonify({"error": "upstream_unreachable", "detail": str(exc.reason)}), 502
         except Exception as exc:

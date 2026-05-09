@@ -1,5 +1,35 @@
 ﻿# 使用文档（部署与运行）
 
+## 0. 最新版本快速使用（2026-05-09）
+
+### 0.1 直接安装（推荐）
+
+1. 运行安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
+2. 首次部署后，进入项目目录执行：
+
+```powershell
+cd C:\JingyuanTrafficPipeline
+python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
+```
+
+3. 启动多漏洞靶场（测试用）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_multivuln_lab_4000.ps1 -PythonExe C:\python\python312\python.exe -BindHost 0.0.0.0 -Port 4000
+```
+
+4. 访问：
+
+- 前端：`http://127.0.0.1:1145`
+- API：`http://127.0.0.1:3049`
+- 靶场：`http://127.0.0.1:4000`
+
+### 0.2 管理员系统配置建议
+
+- 在“系统配置”页面执行“一键检查运行环境”。
+- 监测端口与靶场端口保持一致（例如靶场在 `4000`，监测端口也应为 `4000`）。
+- 外部机器压测服务器时，抓包网卡使用业务网卡（如以太网）；服务器本机回环测试时改为回环网卡。
+
 ## 1. 项目说明
 
 本项目提供完整的攻击检测与态势感知链路，包含：
