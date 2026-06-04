@@ -1,6 +1,6 @@
 ﻿# 使用文档（部署与运行）
 
-## 0. 最新版本快速使用（2026-05-09）
+## 0. 最新版本快速使用（2026-06-04）
 
 ### 0.1 直接安装（推荐）
 
@@ -30,6 +30,14 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 - 监测端口与靶场端口保持一致（例如靶场在 `4000`，监测端口也应为 `4000`）。
 - 外部机器压测服务器时，抓包网卡使用业务网卡（如以太网）；服务器本机回环测试时改为回环网卡。
 
+
+### 0.3 2026-06-04 版本重点
+
+- 检测模型已更新，普通登录等正常业务流量误报更低。
+- SQL 注入、XSS、命令注入、路径遍历、危险文件上传等经典攻击识别更稳定。
+- 管理员“系统配置”支持上传主页背景图。
+- 新高危异常流量会触发机械音提醒：“注意异常流量”。
+- 安装器版本号为 `2026.06.04`，真实安装包位于 `dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`。
 ## 1. 项目说明
 
 本项目提供完整的攻击检测与态势感知链路，包含：
@@ -40,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 - Node 大屏服务（默认 `1145`）
 - RAG 知识库管理（前端可新增/删除/重建）
 
-说明：现已提供“全链路一键部署脚本”，可自动拉起 MySQL + Ollama + 项目服务，并初始化 RAG SQLite。
+说明：正式交付推荐使用安装包方式部署；Docker/脚本方式保留给开发和调试场景。
 
 ## 2. 目录结构（关键）
 
@@ -242,3 +250,4 @@ python scripts/platform_api_demo.py
 - 3049 无响应：检查 Flask 子进程日志
 - 数据为空：检查 `result/` 是否有新 case，及 DB 守护是否正常运行
 - MySQL 连接失败：检查 `config/db_config*.json` 中 host/port/user/password/database
+

@@ -122,6 +122,16 @@
   - 鉴权：`normal/admin`
 - `POST /api/v2/common/alerts/{event_id}/ack`
   - 鉴权：`normal/admin`
+- `GET /api/v2/common/home-background`
+  - 鉴权：无
+  - 说明：返回当前前端主页背景图地址，前端启动时自动读取
+  - 响应示例：
+
+```json
+{
+  "url": "/assets/bg-main.jpg"
+}
+```
 
 ### 4.2.1 扩展插件（v2）
 
@@ -225,6 +235,21 @@
 - `GET /api/v2/admin/user-op-logs?page=1&page_size=30&username=`
 - `GET /api/v2/admin/config`
 - `PUT /api/v2/admin/config`
+- `POST /api/v2/admin/home-background`
+  - 鉴权：`admin`
+  - 请求类型：`multipart/form-data`
+  - 表单字段：`file`
+  - 文件限制：`jpg/jpeg/png/webp`，最大 `10MB`
+  - 说明：上传管理员自定义主页背景图，上传成功后自动写入系统配置并立即对前端生效
+  - 响应示例：
+
+```json
+{
+  "ok": true,
+  "url": "/uploads/homepage_background_20260604_193629_179d6897.jpg"
+}
+```
+
 - `GET /api/v2/admin/users`
 - `PUT /api/v2/admin/users/{username}/password`
   - body（示例）：
@@ -235,7 +260,10 @@
   "auto_refresh_seconds": "5",
   "sound_alert_enabled": "1",
   "capture_batch_size": "4",
-  "monitor_ports": "80,443,8080"
+  "monitor_ports": "80,443,8080",
+  "capture_interface": "4",
+  "llm_model": "qwen2.5:3b",
+  "homepage_background_url": "/assets/bg-main.jpg"
 }
 ```
 

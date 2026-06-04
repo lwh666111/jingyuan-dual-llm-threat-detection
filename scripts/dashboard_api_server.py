@@ -47,6 +47,12 @@ JWT_ALGORITHM = "HS256"
 JWT_HEADER = {"alg": JWT_ALGORITHM, "typ": "JWT"}
 JWT_REVOKED_JTIS: Dict[str, int] = {}
 AUTH_COOKIE_NAME = "tp_auth_token"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DASHBOARD_PUBLIC_DIR = PROJECT_ROOT / "frontend_dashboard" / "public"
+DASHBOARD_UPLOAD_DIR = DASHBOARD_PUBLIC_DIR / "uploads"
+DEFAULT_HOMEPAGE_BACKGROUND = "/assets/bg-main.jpg"
+ALLOWED_BACKGROUND_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+MAX_BACKGROUND_BYTES = 10 * 1024 * 1024
 
 DEMO_ACCOUNTS = [
     {"username": "user", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
@@ -894,6 +900,36 @@ def load_system_config_map(conn: Any) -> Dict[str, str]:
     return {str(x.get("config_key", "")).strip(): str(x.get("config_value", "")).strip() for x in rows}
 
 
+def normalize_homepage_background_url(value: str) -> str:
+    url = str(value or "").strip()
+    if not url or not url.startswith("/") or url.startswith("//") or "\\" in url or '"' in url:
+        return DEFAULT_HOMEPAGE_BACKGROUND
+    return url[:240]
+
+
+def detect_background_extension(filename: str, content_type: str, data: bytes) -> str:
+    suffix = Path(filename or "").suffix.lower().lstrip(".")
+    if suffix == "jpeg":
+        suffix = "jpg"
+    content_type = str(content_type or "").lower()
+    if suffix not in ALLOWED_BACKGROUND_EXTENSIONS:
+        if "png" in content_type:
+            suffix = "png"
+        elif "webp" in content_type:
+            suffix = "webp"
+        elif "jpeg" in content_type or "jpg" in content_type:
+            suffix = "jpg"
+    if suffix not in ALLOWED_BACKGROUND_EXTENSIONS:
+        return ""
+    if suffix == "png" and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if suffix == "jpg" and data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if suffix == "webp" and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
 def normalize_ollama_url(raw_url: str) -> str:
     text = str(raw_url or "").strip()
     if not text:
@@ -1225,6 +1261,7 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "monitor_ports": "80,443,8080",
             "capture_interface": "auto",
             "llm_model": "qwen3:8b",
+            "homepage_background_url": DEFAULT_HOMEPAGE_BACKGROUND,
         }
         for k, v in defaults.items():
             cur.execute(
@@ -2981,6 +3018,52 @@ def create_app(
                 rows = cur.fetchall()
         return jsonify({"items": normalize_rows(rows)})
 
+    @app.route("/api/v2/common/home-background", methods=["GET"])
+    def common_home_background():
+        url = DEFAULT_HOMEPAGE_BACKGROUND
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+                cfg = load_system_config_map(conn)
+                url = normalize_homepage_background_url(cfg.get("homepage_background_url", DEFAULT_HOMEPAGE_BACKGROUND))
+        except Exception:
+            url = DEFAULT_HOMEPAGE_BACKGROUND
+        return jsonify({"url": url})
+
+    @app.route("/api/v2/admin/home-background", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def admin_home_background_upload():
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"error": "missing_file", "message": "请选择要上传的背景图片"}), 400
+        data = upload.read()
+        if not data:
+            return jsonify({"error": "empty_file", "message": "图片文件为空"}), 400
+        if len(data) > MAX_BACKGROUND_BYTES:
+            return jsonify({"error": "file_too_large", "message": "图片不能超过 10MB"}), 413
+        ext = detect_background_extension(upload.filename or "", upload.content_type or "", data[:64])
+        if not ext:
+            return jsonify({"error": "invalid_image", "message": "仅支持 JPG、PNG、WebP 图片"}), 400
+
+        DASHBOARD_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"homepage_background_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}.{ext}"
+        target = DASHBOARD_UPLOAD_DIR / filename
+        target.write_bytes(data)
+        url = f"/uploads/{filename}"
+
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO demo_system_config(config_key, config_value)
+                    VALUES ('homepage_background_url', %s)
+                    ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)
+                    """,
+                    (url,),
+                )
+                log_action(conn, g.session["username"], g.session["role"], "update_background", "homepage", url)
+            conn.commit()
+        return jsonify({"ok": True, "url": url})
+
     @app.route("/api/v2/admin/ollama/models", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def admin_ollama_models():
@@ -3276,6 +3359,10 @@ def create_app(
                     cfg_val = "auto"
                 if len(cfg_val) > 128:
                     return jsonify({"error": "invalid_capture_interface"}), 400
+            elif cfg_key == "homepage_background_url":
+                cfg_val = normalize_homepage_background_url(cfg_val)
+                if not (cfg_val == DEFAULT_HOMEPAGE_BACKGROUND or cfg_val.startswith("/uploads/homepage_background_")):
+                    return jsonify({"error": "invalid_homepage_background_url"}), 400
             normalized[cfg_key] = cfg_val
         if not normalized:
             return jsonify({"error": "invalid_payload"}), 400

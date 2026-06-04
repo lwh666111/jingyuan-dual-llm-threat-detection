@@ -11,16 +11,16 @@
 - MySQL 持久化（`requests` / `responses` / `analyses` 三表）
 - Flask API（3049）+ Node 前端大屏（1145）
 
-## 最新发布（2026-05-09）
+## 最新发布（2026-06-04）
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
 - 最新使用教程：`docs/USAGE.md`
 - 最新安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
-- 安装包 SHA256：`16BB36F2E093EF941A78ACB6CA59D84F2AA9468644F9D68C852578373B10D34D`
+- 安装包校验：安装后可在发布机器执行 `Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256` 查看
 
 ## GitHub 仓库简介
-`靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库与大屏展示，已支持一键部署（MySQL + Ollama + 全链路服务）。`
+`靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库、大屏展示、系统自检、模型切换、靶场测试与安装包部署。`
 
 ## 主要能力
 
@@ -33,6 +33,9 @@
 - RAG 文档管理接口：新增、删除、重建
 - 扩展插件：钓鱼网站检测工具（后端代理调用）
 - 攻击详情支持一键封禁来源 IP
+- 管理员系统配置支持模型/网卡/端口/分组数量/主页背景图配置
+- 高危异常流量触发机械音提醒：“注意异常流量”
+- 内置新训练的 Web 攻击检测模型，降低普通登录误报，增强 SQL/XSS/命令注入/路径遍历/危险上传识别
 
 ## Project Layout
 
@@ -56,7 +59,7 @@
 
 ## 安装与部署（仅安装包方式）
 
-本项目安装方式统一为：**双击安装包安装项目文件 + 手动安装依赖 + 手动拉取模型 + 启动项目**。  
+本项目对普通部署用户只推荐一种安装方式：**双击安装包安装项目文件 + 手动安装少量系统依赖 + 手动拉取 Ollama 模型 + 启动项目**。  
 请严格按以下顺序执行，不要跳步骤。
 
 ### 1. 安装前准备（目标机器）
@@ -67,6 +70,7 @@
 - 已安装 Python 3.12（建议路径：`C:\python\python312\python.exe`）
 - 已安装并运行 MySQL（你自己的地址、端口、账号、密码）
 - 使用管理员权限操作（抓包相关步骤建议管理员 PowerShell）
+- 服务器防火墙/云安全组已放行业务端口、前端端口和 API 端口，例如 `4000`、`1145`、`3049`
 
 ### 2. 双击安装包
 
@@ -97,6 +101,7 @@
 - `Npcap` 是抓包驱动，没装好会导致抓包看起来“运行正常但没有数据”。
 - `Wireshark` 请确认包含 `tshark`/`dumpcap` 组件。
 - `Ollama` 是大模型服务，后续 LLM 研判依赖它。
+- 这些依赖属于系统级驱动/桌面程序，安装器会随项目提供安装包，但仍需要用户按向导手动确认安装。
 
 ### 4. 部署大模型（Ollama）
 
@@ -117,6 +122,7 @@ ollama list
 
 - 资源紧张机器：`qwen2.5:3b`
 - 资源较充足机器：可换更大模型（例如 `qwen3:8b`），并在系统配置中对应修改
+- 模型名必须和 `ollama list` 中显示的一致，例如 `qwen2.5:3b` 或 `qwen3:8b`
 
 ### 5. 配置数据库连接
 
@@ -132,6 +138,13 @@ ollama list
 - `mysql.password`
 - `mysql.database`
 
+首次启动时系统会自动初始化需要的业务表和默认账号；不会清空你已有的 MySQL 数据。
+
+默认前端账号：
+
+- 普通用户：`user / admin`
+- 管理员：`admin / admin`
+
 ### 6. 启动项目（正式投用）
 
 在项目目录执行（管理员 PowerShell）：
@@ -146,6 +159,7 @@ python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
 - `--port` 是抓包监听端口（示例为 `4000`）
 - `--interface` 是抓包网卡编号（示例 `4` 通常是以太网）
 - 如果你测试流量是“本机访问本机（127.0.0.1）”，请改成回环网卡编号（常见是 `5`）
+- 如果已经在前端“系统配置”保存了端口、分组数量、网卡、模型，后续可直接执行 `python app.py`，系统会优先读取配置。
 
 ### 7. 启动靶场（测试用，可选）
 
@@ -174,6 +188,8 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 - 模型已安装
 - 抓包探测成功
 
+如果其中任何一项失败，先按页面提示修复，不要直接做攻击流量测试。
+
 ### 9. 如何投入正式使用
 
 建议流程：
@@ -183,6 +199,7 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 3. 在低峰时段先进行 10~30 分钟灰度观察
 4. 检查 `input/`、`result/`、大屏事件列表是否持续更新
 5. 再切换到持续运行
+6. 如需个性化展示，可在管理员“系统配置”上传主页背景图
 
 ### 10. 停止与重启
 

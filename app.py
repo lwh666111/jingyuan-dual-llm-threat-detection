@@ -84,14 +84,14 @@ def write_runtime_state(path: Path, state: Dict) -> None:
 
 def read_json_config(path: Path) -> Dict:
     if not path.exists():
-        raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
+        raise FileNotFoundError(f"配置文件不存在: {path}")
     try:
         # Use utf-8-sig to tolerate UTF-8 BOM produced by some Windows editors/PowerShell.
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        raise ValueError(f"閰嶇疆鏂囦欢涓嶆槸鏈夋晥 JSON: {path}") from exc
+        raise ValueError(f"配置文件不是有效 JSON: {path}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"閰嶇疆鏂囦欢鏍煎紡閿欒(蹇呴』鏄?JSON object): {path}")
+        raise ValueError(f"配置文件格式错误(必须是 JSON object): {path}")
     return data
 
 

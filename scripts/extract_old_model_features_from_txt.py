@@ -40,6 +40,58 @@ SQL_KEYWORDS = [
     "'",
 ]
 
+WEB_ATTACK_PATTERNS = {
+    "sql": [
+        r"\bunion\s+(?:all\s+)?select\b",
+        r"(?:'|\")?\s*\bor\b\s+(?:'|\")?\d+(?:'|\")?\s*=\s*(?:'|\")?\d+",
+        r"\binformation_schema\b",
+        r"\bsleep\s*\(",
+        r"\bbenchmark\s*\(",
+        r"(?:--|#|/\*)",
+    ],
+    "xss": [
+        r"<\s*/?\s*script\b",
+        r"\bon(?:error|load|click|mouseover|focus|submit)\s*=",
+        r"\bjavascript\s*:",
+        r"\balert\s*\(",
+        r"\bdocument\s*\.\s*cookie\b",
+    ],
+    "command": [
+        r"(?:;|\|\||&&)\s*(?:cat|whoami|id|uname|curl|wget|powershell|cmd\.exe|nc|bash|sh)\b",
+        r"\b(?:powershell|cmd\.exe|/bin/sh|/bin/bash)\b",
+    ],
+    "traversal": [
+        r"(?:\.\./|\.\.\\){2,}",
+        r"(?:/etc/passwd|/etc/shadow|\\windows\\system32\\config)",
+    ],
+    "ssrf": [
+        r"(?:url|target|redirect|callback|next)\s*=\s*(?:https?://)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)",
+        r"(?:url|target|redirect|callback|next)\s*=\s*file://",
+    ],
+    "upload": [
+        r"filename\s*=\s*[\"']?[^\"'\r\n]+\.(?:php|jsp|jspx|asp|aspx|exe|bat|cmd|ps1|sh)\b",
+    ],
+    "xxe": [
+        r"<!doctype\s+\w+\s+\[",
+        r"<!entity\b",
+        r"system\s+[\"']file://",
+    ],
+    "ssti": [
+        r"\{\{\s*[^}]*(?:config|class|mro|subclasses|request|cycler|joiner)[^}]*\}\}",
+        r"\$\{\s*[^}]*(?:runtime|processbuilder|jndi|script)[^}]*\}",
+    ],
+    "deserialize": [
+        r"\brO0AB",
+        r"\bO:\d+:",
+        r"ysoserial",
+    ],
+    "graphql": [
+        r"__schema",
+        r"__typename",
+        r"mutation\s*\{",
+    ],
+}
+
 
 def read_text_file(path: Path) -> str:
     for encoding in ("utf-8", "utf-8-sig", "gbk", "latin1"):
@@ -525,6 +577,18 @@ def count_sql_signals(text: str) -> int:
     return count
 
 
+def count_pattern_signals(text: str, patterns: List[str]) -> int:
+    return sum(1 for pattern in patterns if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL))
+
+
+def count_web_attack_signals(text: str) -> Dict[str, int]:
+    normalized = text.lower()
+    signals = {name: count_pattern_signals(normalized, patterns) for name, patterns in WEB_ATTACK_PATTERNS.items()}
+    # Keep compatibility with older SQL feature shaping while adding richer web payload semantics.
+    signals["sql"] = max(signals.get("sql", 0), count_sql_signals(normalized))
+    return signals
+
+
 def contains_any(text: str, words: List[str]) -> int:
     t = text.lower()
     return 1 if any(w in t for w in words) else 0
@@ -558,7 +622,18 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
 
     merged_text = lower_text(uri, host, request_body, response_excerpt, user_agent, content_type)
 
-    sql_signal = count_sql_signals(merged_text)
+    attack_signals = count_web_attack_signals(merged_text)
+    sql_signal = attack_signals.get("sql", 0)
+    xss_signal = attack_signals.get("xss", 0)
+    command_signal = attack_signals.get("command", 0)
+    traversal_signal = attack_signals.get("traversal", 0)
+    ssrf_signal = attack_signals.get("ssrf", 0)
+    upload_signal = attack_signals.get("upload", 0)
+    xxe_signal = attack_signals.get("xxe", 0)
+    ssti_signal = attack_signals.get("ssti", 0)
+    deserialize_signal = attack_signals.get("deserialize", 0)
+    graphql_signal = attack_signals.get("graphql", 0)
+    web_attack_signal = sum(attack_signals.values())
     login_kw = contains_any(merged_text, ["login", "auth", "signin", "session"])
     captcha_kw = contains_any(merged_text, ["captcha", "verify"])
     password_kw = contains_any(merged_text, ["password", "passwd", "pwd"])
@@ -566,7 +641,22 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
     token_kw = contains_any(merged_text, ["token", "jwt", "bearer", "authorization"])
     json_kw = 1 if "json" in content_type.lower() else 0
     business_error = 1 if ("errauth" in merged_text or "errcaptcha" in merged_text or "number value: 406" in merged_text) else 0
-    suspicious_bonus = sql_signal * 3 + password_kw * 2 + login_kw + business_error * 3 + token_kw
+    suspicious_bonus = (
+        sql_signal * 3
+        + xss_signal * 4
+        + command_signal * 5
+        + traversal_signal * 4
+        + ssrf_signal * 4
+        + upload_signal * 4
+        + xxe_signal * 5
+        + ssti_signal * 5
+        + deserialize_signal * 5
+        + graphql_signal * 2
+        + password_kw * 2
+        + login_kw
+        + business_error * 3
+        + token_kw
+    )
 
     uri_len = len(uri)
     path_depth = len([x for x in uri.split("?", 1)[0].split("/") if x])
@@ -574,7 +664,7 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
     ua_len = len(user_agent)
     text_len = len(build_request_text(req, resp))
 
-    dur = min(5.0, 0.03 + time_gap + body_len / 5000.0 + sql_signal * 0.02)
+    dur = min(5.0, 0.03 + time_gap + body_len / 5000.0 + web_attack_signal * 0.02)
     spkts = 2.0 + path_depth + (1 if req.get("method") == "POST" else 0) + suspicious_bonus
     dpkts = 2.0 + (1 if resp else 0) + business_error
     sbytes = 100.0 + uri_len + body_len + ua_len + suspicious_bonus * 30
@@ -586,8 +676,8 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
     dinpkt = dur / max(dpkts, 1.0)
     smean = sbytes / max(spkts, 1.0)
     dmean = dbytes / max(dpkts, 1.0)
-    sjit = sql_signal * 0.5 + suspicious_bonus * 0.2
-    djit = business_error * 0.8 + sql_signal * 0.3
+    sjit = web_attack_signal * 0.5 + suspicious_bonus * 0.2
+    djit = business_error * 0.8 + (command_signal + traversal_signal + ssrf_signal + xxe_signal) * 0.4 + sql_signal * 0.3
 
     known = {
         "dur": dur,
@@ -618,7 +708,7 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
         "trans_depth": 1.0 + json_kw + password_kw + login_kw + suspicious_bonus,
         "response_body_len": min(text_len + business_error * 100, 20000),
         "ct_srv_src": 1.0 + login_kw + captcha_kw + admin_kw,
-        "ct_state_ttl": 1.0 + business_error + sql_signal,
+        "ct_state_ttl": 1.0 + business_error + web_attack_signal,
         "ct_dst_ltm": 1.0 + login_kw + business_error,
         "ct_src_dport_ltm": 1.0 + suspicious_bonus,
         "ct_dst_sport_ltm": 1.0 + suspicious_bonus,
@@ -626,8 +716,8 @@ def build_numeric_value(col, req: Dict, resp: Optional[Dict]):
         "is_ftp_login": 0.0,
         "ct_ftp_cmd": 0.0,
         "ct_flw_http_mthd": 2.0 if req.get("method") == "POST" else 1.0,
-        "ct_src_ltm": 1.0 + password_kw + token_kw + sql_signal,
-        "ct_srv_dst": 1.0 + admin_kw + business_error,
+        "ct_src_ltm": 1.0 + password_kw + token_kw + web_attack_signal,
+        "ct_srv_dst": 1.0 + admin_kw + business_error + min(web_attack_signal, 5),
         "is_sm_ips_ports": 0.0,
     }
 

@@ -10,6 +10,25 @@
 
 默认会启动 `scripts/target_multivuln_lab.py`，覆盖 SQLi、XSS、SSRF、命令注入、路径遍历、文件上传、XXE、反序列化、开放重定向、弱鉴权等常见测试面。
 
+启动后可打开首页：
+
+- 本机访问：`http://127.0.0.1:4000/`
+- 服务器桌面快捷方式：`C:\Users\Administrator\Desktop\TrafficTestLabs\open_4000_lab_home.bat`
+
+多页面入口：
+
+- `/sql`：SQL 注入测试
+- `/xss`：XSS 测试
+- `/upload`：文件上传测试
+- `/command`：命令注入测试
+- `/traversal`：路径遍历测试
+- `/ssrf`：SSRF 测试
+- `/xxe`：XXE 测试
+- `/ssti`：模板注入测试
+- `/deserialize`：反序列化测试
+- `/graphql`：GraphQL 测试
+- `/bruteforce`：暴力破解测试
+
 ## 登录靶场（兼容历史）
 
 - 启动（3000端口）：`test/start_login_lab_3000.ps1`

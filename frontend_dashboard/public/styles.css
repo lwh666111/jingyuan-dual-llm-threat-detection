@@ -51,7 +51,7 @@ body {
   z-index: 0;
   background:
     linear-gradient(160deg, rgba(4, 10, 20, 0.78), rgba(5, 14, 27, 0.68) 42%, rgba(6, 17, 33, 0.62)),
-    url("/assets/bg-main.jpg") center/cover no-repeat fixed;
+    var(--homepage-bg-url, url("/assets/bg-main.jpg")) center/cover no-repeat fixed;
   filter: saturate(1.06) contrast(1.06) brightness(0.98);
 }
 
@@ -624,6 +624,42 @@ svg {
   grid-template-columns: repeat(3, minmax(220px, 1fr));
 }
 
+.background-config-card {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(240px, 420px) 1fr;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.background-preview {
+  min-height: 190px;
+  border-radius: 18px;
+  border: 1px solid rgba(145, 199, 255, 0.42);
+  background:
+    linear-gradient(160deg, rgba(4, 10, 20, 0.28), rgba(6, 17, 33, 0.42)),
+    var(--homepage-bg-url, url("/assets/bg-main.jpg")) center/cover no-repeat;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 16px 36px rgba(0, 0, 0, 0.22);
+}
+
+.background-uploader {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+}
+
+.file-input {
+  width: 100%;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(145, 199, 255, 0.48);
+  color: var(--text-main);
+  background: rgba(8, 22, 36, 0.7);
+}
+
 .inline-pass-reset {
   display: flex;
   gap: 10px;
@@ -1184,6 +1220,10 @@ pre {
   .form-grid-3 {
     grid-template-columns: 1fr 1fr;
   }
+
+  .background-config-card {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 980px) {
@@ -1208,6 +1248,10 @@ pre {
   }
 
   .form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .background-config-card {
     grid-template-columns: 1fr;
   }
 

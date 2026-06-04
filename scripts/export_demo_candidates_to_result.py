@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from web_attack_rules import apply_rule_signal, detect_request_attack
+from web_attack_rules import apply_rule_signal, detect_request_attack, is_plain_auth_attempt
 
 DEFAULT_LLM_TASK = (
     "\u8bf7\u5224\u65ad\u8be5\u8bf7\u6c42\u662f\u5426\u4e3a\u653b\u51fb\u884c\u4e3a\uff0c"
@@ -16,7 +16,7 @@ DEFAULT_LLM_TASK = (
 def read_jsonl(path: Path):
     if not path.exists():
         return
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -105,11 +105,17 @@ def infer_attack_type(cand: dict) -> str:
     return "\u53ef\u7591\u6d41\u91cf"
 
 def main():
-    parser = argparse.ArgumentParser(description="将 demo_candidates 导出到 result 目录")
-    parser.add_argument("--input", required=True, help="demo_candidates.jsonl 路径")
-    parser.add_argument("--result-dir", default="result", help="result 根目录")
-    parser.add_argument("--min-score", type=float, default=0.3, help="最低导出分数阈值（基于 raw_score/score）")
-    parser.add_argument("--update-existing", action="store_true", help="若 file_id+seq_id 已存在则覆盖更新现有 case")
+    parser = argparse.ArgumentParser(description="Export demo_candidates into result cases.")
+    parser.add_argument("--input", required=True, help="Path to demo_candidates.jsonl.")
+    parser.add_argument("--result-dir", default="result", help="Result root directory.")
+    parser.add_argument("--min-score", type=float, default=0.3, help="Minimum export score based on raw_score/score.")
+    parser.add_argument(
+        "--plain-auth-min-score",
+        type=float,
+        default=0.88,
+        help="Extra export threshold for one-off ordinary login attempts without attack signals.",
+    )
+    parser.add_argument("--update-existing", action="store_true", help="Overwrite an existing case with the same file_id and seq_id.")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -124,6 +130,7 @@ def main():
     exported = []
     skipped = 0
     filtered_low_score = 0
+    filtered_plain_auth = 0
     updated_existing = 0
     updated_case_ids = []
     new_case_ids = []
@@ -135,6 +142,10 @@ def main():
             cand = apply_rule_signal(cand, signal)
 
         score_value = get_candidate_score(cand)
+        if not signal and is_plain_auth_attempt(cand) and score_value < args.plain_auth_min_score:
+            filtered_plain_auth += 1
+            continue
+
         if score_value < args.min_score:
             filtered_low_score += 1
             continue
@@ -244,16 +255,18 @@ def main():
         write_jsonl(manifest_path, manifest_records)
 
     print("=" * 80)
-    print("输入 candidate 数量:", len(candidates))
-    print("低于阈值过滤数量:", filtered_low_score)
-    print("已存在跳过数量:", skipped)
-    print("新导出数量:", len(exported))
-    print("更新已有数量:", updated_existing)
-    print("导出分数阈值:", args.min_score)
-    print("result 目录路径:", result_dir.resolve())
-    print("新生成的 case_id 列表:", new_case_ids if new_case_ids else "无")
-    print("更新的 case_id 列表:", updated_case_ids if updated_case_ids else "无")
-    print("manifest 路径:", manifest_path.resolve())
+    print("input candidates:", len(candidates))
+    print("low-score filtered:", filtered_low_score)
+    print("plain auth false-positive guard filtered:", filtered_plain_auth)
+    print("existing/skipped:", skipped)
+    print("new exported:", len(exported))
+    print("updated existing:", updated_existing)
+    print("export min score:", args.min_score)
+    print("plain auth extra threshold:", args.plain_auth_min_score)
+    print("result dir:", result_dir.resolve())
+    print("new case_id list:", new_case_ids if new_case_ids else "none")
+    print("updated case_id list:", updated_case_ids if updated_case_ids else "none")
+    print("manifest path:", manifest_path.resolve())
     print("=" * 80)
 
 

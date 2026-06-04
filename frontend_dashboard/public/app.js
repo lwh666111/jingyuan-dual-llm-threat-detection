@@ -37,6 +37,14 @@ const state = {
     clock: null,
     system: null,
     view: null,
+    alarm: null,
+  },
+  alarmAudio: {
+    initialized: false,
+    seenKeys: new Set(),
+    lastAlarmAt: 0,
+    audioContext: null,
+    primed: false,
   },
   screenData: null,
   pro: {
@@ -119,6 +127,7 @@ const state = {
 
 document.addEventListener("DOMContentLoaded", () => {
   bindGlobalTooltip();
+  document.addEventListener("pointerdown", primeAlarmAudio, { once: true });
   bootstrap();
 });
 
@@ -167,6 +176,7 @@ function getEchartsInstance(containerId) {
 async function bootstrap() {
   // Move to cookie-based session persistence. Drop legacy local token cache.
   localStorage.removeItem("attack_demo_token");
+  await loadHomepageBackground();
   try {
     state.profile = await api("/api/v2/auth/profile");
     renderMainLayout();
@@ -176,6 +186,40 @@ async function bootstrap() {
     state.token = "";
   }
   renderLoginPage();
+}
+
+function normalizeBackgroundUrl(url) {
+  const text = String(url || "").trim();
+  if (!text || text.includes('"') || text.includes("\\") || text.startsWith("//")) {
+    return "/assets/bg-main.jpg";
+  }
+  if (!text.startsWith("/")) {
+    return "/assets/bg-main.jpg";
+  }
+  return text;
+}
+
+function applyHomepageBackground(url) {
+  const safeUrl = normalizeBackgroundUrl(url);
+  document.documentElement.style.setProperty("--homepage-bg-url", `url("${safeUrl}")`);
+  const preview = document.getElementById("cfg_home_bg_preview");
+  if (preview) {
+    preview.style.setProperty("--homepage-bg-url", `url("${safeUrl}")`);
+  }
+  const text = document.getElementById("cfg_home_bg_current");
+  if (text) {
+    text.textContent = `当前背景：${safeUrl}`;
+  }
+}
+
+async function loadHomepageBackground() {
+  try {
+    const data = await api("/api/v2/common/home-background");
+    applyHomepageBackground(data.url || "/assets/bg-main.jpg");
+  } catch (err) {
+    console.warn("load homepage background failed", err);
+    applyHomepageBackground("/assets/bg-main.jpg");
+  }
 }
 
 function renderLoginPage() {
@@ -361,6 +405,12 @@ function renderMainLayout() {
     localStorage.setItem("attack_sound_on", state.soundEnabled ? "1" : "0");
     const btn = document.getElementById("btnSound");
     if (btn) btn.textContent = state.soundEnabled ? "声音：开" : "声音：关";
+    if (state.soundEnabled) {
+      state.alarmAudio.initialized = false;
+      state.alarmAudio.seenKeys = new Set();
+      primeAlarmAudio();
+      pollAudioAlerts().catch((err) => console.warn("alarm poll error", err));
+    }
     showToast(state.soundEnabled ? "声音告警已开启" : "声音告警已关闭");
   });
   document.getElementById("btnLogout")?.addEventListener("click", logout);
@@ -480,6 +530,106 @@ function startGlobalTimers() {
 
   state.intervals.clock = setInterval(updateClock, 1000);
   state.intervals.system = setInterval(() => refreshSystemStatus().catch((err) => console.warn(err)), 5000);
+  pollAudioAlerts().catch((err) => console.warn("alarm poll error", err));
+  state.intervals.alarm = setInterval(() => pollAudioAlerts().catch((err) => console.warn("alarm poll error", err)), 5000);
+}
+
+async function pollAudioAlerts() {
+  if (!state.token || !state.soundEnabled) return;
+  const data = await api("/api/v2/common/alerts/ticker?limit=3");
+  handleAudioAlertItems(Array.isArray(data.items) ? data.items : []);
+}
+
+function getAudioAlertKey(item) {
+  return String(
+    item?.event_id ||
+      item?.case_id ||
+      `${item?.occurred_at || ""}|${item?.source_ip || ""}|${item?.attack_type || ""}|${item?.target_node || ""}`
+  );
+}
+
+function handleAudioAlertItems(items) {
+  const keys = items.map(getAudioAlertKey).filter(Boolean);
+  if (!state.alarmAudio.initialized) {
+    keys.forEach((key) => state.alarmAudio.seenKeys.add(key));
+    state.alarmAudio.initialized = true;
+    return;
+  }
+
+  const hasNewAlert = keys.some((key) => !state.alarmAudio.seenKeys.has(key));
+  keys.forEach((key) => state.alarmAudio.seenKeys.add(key));
+  if (hasNewAlert) {
+    playAbnormalTrafficAlarm();
+  }
+}
+
+function primeAlarmAudio() {
+  try {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextCtor && !state.alarmAudio.audioContext) {
+      state.alarmAudio.audioContext = new AudioContextCtor();
+    }
+    state.alarmAudio.audioContext?.resume?.();
+    state.alarmAudio.primed = true;
+  } catch (err) {
+    console.warn("audio prime failed", err);
+  }
+}
+
+function playAbnormalTrafficAlarm() {
+  if (!state.soundEnabled) return;
+  const now = Date.now();
+  if (now - state.alarmAudio.lastAlarmAt < 8000) return;
+  state.alarmAudio.lastAlarmAt = now;
+
+  primeAlarmAudio();
+  playMechanicalTone();
+  speakMechanicalWarning();
+  showToast("检测到异常流量，已触发声音告警");
+}
+
+function playMechanicalTone() {
+  try {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const ctx = state.alarmAudio.audioContext || (AudioContextCtor ? new AudioContextCtor() : null);
+    if (!ctx) return;
+    state.alarmAudio.audioContext = ctx;
+
+    const start = ctx.currentTime;
+    [0, 0.18, 0.36].forEach((offset, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.setValueAtTime(idx === 1 ? 680 : 520, start + offset);
+      gain.gain.setValueAtTime(0.0001, start + offset);
+      gain.gain.exponentialRampToValueAtTime(0.18, start + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.14);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start + offset);
+      osc.stop(start + offset + 0.15);
+    });
+  } catch (err) {
+    console.warn("mechanical tone failed", err);
+  }
+}
+
+function speakMechanicalWarning() {
+  try {
+    if (!("speechSynthesis" in window)) return;
+    const utterance = new SpeechSynthesisUtterance("注意异常流量");
+    utterance.lang = "zh-CN";
+    utterance.rate = 0.82;
+    utterance.pitch = 0.55;
+    utterance.volume = 1;
+    const voices = window.speechSynthesis.getVoices?.() || [];
+    const zhVoice = voices.find((voice) => /zh|chinese|mandarin/i.test(`${voice.lang} ${voice.name}`));
+    if (zhVoice) utterance.voice = zhVoice;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    console.warn("speech warning failed", err);
+  }
 }
 
 function updateClock() {
@@ -2008,6 +2158,21 @@ function renderAdminConfigView() {
           <input id="cfg_llm_model_custom" placeholder="例如 qwen2.5:7b" />
         </div>
       </div>
+      <div class="background-config-card">
+        <div id="cfg_home_bg_preview" class="background-preview"></div>
+        <div class="background-uploader">
+          <div>
+            <h4 class="detail-title">主页背景图</h4>
+            <p id="cfg_home_bg_current" class="panel-sub">当前背景：/assets/bg-main.jpg</p>
+            <p class="panel-sub">支持 JPG、PNG、WebP，建议使用 1920×1080 或更高分辨率，上传后登录页和数据大屏背景会立即更新。</p>
+          </div>
+          <input id="cfg_home_background_file" class="file-input" type="file" accept="image/jpeg,image/png,image/webp" />
+          <div class="ops-group">
+            <button id="adm_bg_upload" class="btn btn-primary">上传并应用背景图</button>
+            <button id="adm_bg_reset" class="btn btn-ghost">恢复默认背景</button>
+          </div>
+        </div>
+      </div>
       <div class="row-actions">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
       </div>
@@ -2020,6 +2185,8 @@ function renderAdminConfigView() {
   document.getElementById("adm_cfg_refresh")?.addEventListener("click", () => loadAdminConfig());
   document.getElementById("adm_cfg_save")?.addEventListener("click", () => saveAdminConfig());
   document.getElementById("adm_export_report")?.addEventListener("click", () => exportAdminReport());
+  document.getElementById("adm_bg_upload")?.addEventListener("click", () => uploadAdminHomepageBackground());
+  document.getElementById("adm_bg_reset")?.addEventListener("click", () => resetAdminHomepageBackground());
   loadAdminConfig()
     .then(async () => {
       await refreshAdminModelOptions(undefined, true);
@@ -2043,6 +2210,7 @@ async function loadAdminConfig() {
   setInputValue("cfg_monitor_ports", map.monitor_ports || "80,443,8080");
   setInputValue("cfg_llm_model_custom", "");
   setInputValue("cfg_capture_interface", map.capture_interface || "auto");
+  applyHomepageBackground(map.homepage_background_url || "/assets/bg-main.jpg");
 }
 
 async function saveAdminConfig() {
@@ -2063,6 +2231,33 @@ async function saveAdminConfig() {
   await loadAdminConfig();
   await refreshAdminModelOptions(finalModel, true);
   await refreshAdminCaptureInterfaces(payload.capture_interface, true);
+}
+
+async function uploadAdminHomepageBackground() {
+  const input = document.getElementById("cfg_home_background_file");
+  const file = input?.files?.[0];
+  if (!file) {
+    showToast("请先选择一张背景图片");
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    showToast("图片过大，请选择 10MB 以内的文件");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  const data = await apiForm("/api/v2/admin/home-background", form);
+  applyHomepageBackground(data.url || "/assets/bg-main.jpg");
+  if (input) input.value = "";
+  showToast("主页背景图已更新");
+  await loadAdminConfig();
+}
+
+async function resetAdminHomepageBackground() {
+  await api("/api/v2/admin/config", { method: "PUT", body: { homepage_background_url: "/assets/bg-main.jpg" } });
+  applyHomepageBackground("/assets/bg-main.jpg");
+  showToast("已恢复默认背景");
+  await loadAdminConfig();
 }
 
 async function refreshAdminModelOptions(preferModel, silent = false) {
@@ -2756,6 +2951,31 @@ async function api(path, options = {}) {
     return resp.blob();
   }
 
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(parseApiError(text, resp.status));
+  }
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+async function apiForm(path, formData) {
+  const headers = {
+    Accept: "application/json",
+  };
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`;
+  }
+  const resp = await fetch(path, {
+    method: "POST",
+    headers,
+    body: formData,
+    credentials: "same-origin",
+  });
   const text = await resp.text();
   if (!resp.ok) {
     throw new Error(parseApiError(text, resp.status));
