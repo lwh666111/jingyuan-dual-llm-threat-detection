@@ -3,6 +3,8 @@ import json
 import logging
 from pathlib import Path
 
+from web_attack_rules import apply_rule_signal, detect_request_attack
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
@@ -35,6 +37,33 @@ def index_by_key(path: Path):
     return mapping
 
 
+def build_candidate(item: dict, parsed_map: dict, input_map: dict) -> dict:
+    key = make_key(item)
+    parsed_rec = parsed_map.get(key, {})
+    input_rec = input_map.get(key, {})
+
+    return {
+        "file_id": key[0],
+        "seq_id": key[1],
+        "rank": item.get("rank"),
+        "raw_score": item.get("raw_score", item.get("score")),
+        "norm_score": item.get("norm_score"),
+        "label": item.get("label"),
+        "model_name": item.get("model_name"),
+        "source_ip": parsed_rec.get("src_ip", input_rec.get("src_ip")),
+        "destination_ip": parsed_rec.get("dst_ip", input_rec.get("dst_ip")),
+        "source_port": parsed_rec.get("src_port", input_rec.get("src_port")),
+        "destination_port": parsed_rec.get("dst_port", input_rec.get("dst_port")),
+        "method": parsed_rec.get("method", input_rec.get("method")),
+        "uri": parsed_rec.get("uri", input_rec.get("uri")),
+        "host": parsed_rec.get("host", input_rec.get("host")),
+        "status_code": parsed_rec.get("status_code", input_rec.get("status_code")),
+        "request_text": input_rec.get("request_text"),
+        "raw_request_block": parsed_rec.get("raw_request_block"),
+        "raw_response_block": parsed_rec.get("raw_response_block"),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="根据 reranked 结果构建 demo 候选")
     parser.add_argument("--parsed", required=True, help="parsed.jsonl")
@@ -49,37 +78,34 @@ def main():
     reranked = list(read_jsonl(Path(args.reranked_result)))
     reranked.sort(key=lambda x: int(x.get("rank", 10**9)))
 
-    selected = reranked[: max(args.top_k, 0)]
     candidates = []
+    selected_keys = set()
+    top_k = max(args.top_k, 0)
 
-    for item in selected:
+    for idx, item in enumerate(reranked):
         try:
-            key = make_key(item)
+            candidate = build_candidate(item, parsed_map, input_map)
+            key = (candidate["file_id"], candidate["seq_id"])
         except Exception:
             continue
-        parsed_rec = parsed_map.get(key, {})
-        input_rec = input_map.get(key, {})
 
-        candidate = {
-            "file_id": key[0],
-            "seq_id": key[1],
-            "rank": item.get("rank"),
-            "raw_score": item.get("raw_score", item.get("score")),
-            "norm_score": item.get("norm_score"),
-            "label": item.get("label"),
-            "model_name": item.get("model_name"),
-            "source_ip": parsed_rec.get("src_ip", input_rec.get("src_ip")),
-            "destination_ip": parsed_rec.get("dst_ip", input_rec.get("dst_ip")),
-            "source_port": parsed_rec.get("src_port", input_rec.get("src_port")),
-            "destination_port": parsed_rec.get("dst_port", input_rec.get("dst_port")),
-            "method": parsed_rec.get("method", input_rec.get("method")),
-            "uri": parsed_rec.get("uri", input_rec.get("uri")),
-            "host": parsed_rec.get("host", input_rec.get("host")),
-            "status_code": parsed_rec.get("status_code", input_rec.get("status_code")),
-            "request_text": input_rec.get("request_text"),
-            "raw_request_block": parsed_rec.get("raw_request_block"),
-            "raw_response_block": parsed_rec.get("raw_response_block"),
-        }
+        signal = detect_request_attack(candidate)
+        if idx >= top_k and not signal:
+            continue
+
+        if signal:
+            candidate = apply_rule_signal(candidate, signal)
+            logging.info(
+                "rule hit: file_id=%s seq=%s type=%s score=%s",
+                candidate.get("file_id"),
+                candidate.get("seq_id"),
+                candidate.get("attack_type"),
+                candidate.get("raw_score"),
+            )
+
+        if key in selected_keys:
+            continue
+        selected_keys.add(key)
         candidates.append(candidate)
 
     output_path = Path(args.output)

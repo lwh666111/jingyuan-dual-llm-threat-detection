@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from web_attack_rules import apply_rule_signal, detect_request_attack
+
 DEFAULT_LLM_TASK = (
     "\u8bf7\u5224\u65ad\u8be5\u8bf7\u6c42\u662f\u5426\u4e3a\u653b\u51fb\u884c\u4e3a\uff0c"
     "\u5982\u662f\u8bf7\u7ed9\u51fa\u653b\u51fb\u7c7b\u578b\u3001\u5224\u5b9a\u4f9d\u636e\u3001"
@@ -75,14 +77,15 @@ def get_candidate_score(cand: dict) -> float:
     return 0.0
 
 
-
 def infer_attack_type(cand: dict) -> str:
+    if cand.get("attack_type"):
+        return str(cand.get("attack_type"))
+
     text = "\n".join(
         [
             str(cand.get("uri") or ""),
             str(cand.get("request_text") or ""),
             str(cand.get("raw_request_block") or ""),
-            str(cand.get("raw_response_block") or ""),
         ]
     ).lower()
     rules = [
@@ -127,6 +130,10 @@ def main():
     next_case_num = max_case_num + 1
 
     for cand in candidates:
+        signal = detect_request_attack(cand)
+        if signal:
+            cand = apply_rule_signal(cand, signal)
+
         score_value = get_candidate_score(cand)
         if score_value < args.min_score:
             filtered_low_score += 1
@@ -172,9 +179,13 @@ def main():
             "seq_id": seq_id,
             "rank": cand.get("rank"),
             "raw_score": cand.get("raw_score"),
+            "original_model_score": cand.get("original_model_score"),
             "norm_score": cand.get("norm_score"),
             "label": cand.get("label"),
             "model_name": cand.get("model_name"),
+            "detection_source": cand.get("detection_source") or "model",
+            "rule_score": cand.get("rule_score"),
+            "rule_reason": cand.get("rule_reason"),
             "source_ip": cand.get("source_ip"),
             "destination_ip": cand.get("destination_ip"),
             "source_port": cand.get("source_port"),
@@ -203,8 +214,11 @@ def main():
             "destination_ip": cand.get("destination_ip"),
             "uri": cand.get("uri"),
             "raw_score": cand.get("raw_score"),
+            "original_model_score": cand.get("original_model_score"),
             "norm_score": cand.get("norm_score"),
             "label": cand.get("label"),
+            "attack_type": cand.get("attack_type") or infer_attack_type(cand),
+            "detection_source": cand.get("detection_source") or "model",
             "status": "pending",
             "case_dir": str(case_dir.resolve()).replace("\\", "/"),
         }
