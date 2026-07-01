@@ -2657,6 +2657,188 @@ def create_app(
             items.append(row)
         return jsonify({"items": items, "page": page, "page_size": page_size, "total": total})
 
+    @app.route("/api/v2/pro/candidates", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def pro_candidates():
+        page = max(1, int(request.args.get("page", "1")))
+        page_size = max(1, min(int(request.args.get("page_size", "10")), 100))
+        q = request.args.get("q", "").strip()
+        offset = (page - 1) * page_size
+        where = ["c.decision='candidate'"]
+        params: List[Any] = []
+        if q:
+            where.append("(c.event_id LIKE %s OR c.case_id LIKE %s OR c.source_ip LIKE %s OR c.target_interface LIKE %s)")
+            like = f"%{q}%"
+            params.extend([like, like, like, like])
+        where_sql = " AND ".join(where)
+
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            with conn.cursor() as cur:
+                if not db_table_exists(cur, "detection_candidates"):
+                    return jsonify({"items": [], "page": page, "page_size": page_size, "total": 0})
+                cur.execute(f"SELECT COUNT(*) AS c FROM detection_candidates c WHERE {where_sql}", tuple(params))
+                total = int((cur.fetchone() or {}).get("c", 0))
+                cur.execute(
+                    f"""
+                    SELECT
+                      c.event_id, c.case_id, c.file_id, c.seq_id, c.decision, c.final_score,
+                      c.risk_level, c.attack_type, c.source_ip, c.target_interface, c.created_at,
+                      r.method, r.host, r.status_code
+                    FROM detection_candidates c
+                    LEFT JOIN raw_http_logs r ON r.case_id = c.case_id
+                    WHERE {where_sql}
+                    ORDER BY c.final_score DESC, c.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    tuple(params + [page_size, offset]),
+                )
+                rows = cur.fetchall()
+        items = []
+        for row in normalize_rows(rows):
+            row["attack_type"] = normalize_attack_type_label(row.get("attack_type"))
+            items.append(row)
+        return jsonify({"items": items, "page": page, "page_size": page_size, "total": total})
+
+    @app.route("/api/v2/pro/candidates/<event_id>", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def pro_candidate_detail(event_id: str):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            with conn.cursor() as cur:
+                detail = load_v2_detection_detail(cur, event_id)
+            if not detail:
+                return jsonify({"error": "candidate_not_found"}), 404
+            raw = detail.get("raw_http") or {}
+            source_region = resolve_region_for_event(conn, str(detail.get("source_ip") or ""), "")
+        item = {
+            "event_id": detail.get("event_id") or event_id,
+            "occurred_at": raw.get("event_time") or raw.get("created_at") or "-",
+            "risk_level": detail.get("risk_level") or "medium",
+            "attack_type": normalize_attack_type_label(detail.get("attack_type")),
+            "source_ip": detail.get("source_ip") or raw.get("source_ip") or "-",
+            "source_region": source_region,
+            "target_node": "candidate-review",
+            "target_interface": detail.get("target_interface") or raw.get("uri") or "-",
+            "attack_result": "pending",
+            "process_status": "unprocessed",
+            "attack_payload": raw.get("request_text") or "",
+            "request_log": raw.get("request_text") or "",
+            "protection_action": "候选事件暂未进入大屏告警，等待人工复核。",
+            "handling_suggestion": "查看 Payload/POC/行为证据，确认后可提升为攻击事件，误报则忽略候选。",
+            "note": "",
+            "response_ms": 0,
+            "ip_blocked": 0,
+            "v2_detection": detail,
+        }
+        return jsonify(item)
+
+    @app.route("/api/v2/pro/candidates/<event_id>/ignore", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def pro_candidate_ignore(event_id: str):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                if not db_table_exists(cur, "detection_candidates"):
+                    return jsonify({"error": "candidate_not_found"}), 404
+                cur.execute("SELECT event_id, case_id FROM detection_candidates WHERE event_id=%s LIMIT 1", (event_id,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "candidate_not_found"}), 404
+                cur.execute(
+                    "UPDATE detection_candidates SET decision='raw_only', risk_level='info' WHERE event_id=%s",
+                    (event_id,),
+                )
+                cur.execute("DELETE FROM attack_events WHERE event_id=%s", (event_id,))
+                log_action(conn, g.session["username"], g.session["role"], "candidate_ignore", event_id, str(row.get("case_id") or ""))
+            conn.commit()
+        return jsonify({"ok": True, "event_id": event_id})
+
+    @app.route("/api/v2/pro/candidates/<event_id>/promote", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def pro_candidate_promote(event_id: str):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                detail = load_v2_detection_detail(cur, event_id)
+                if not detail:
+                    return jsonify({"error": "candidate_not_found"}), 404
+                raw = detail.get("raw_http") or {}
+                event_key = str(detail.get("event_id") or event_id)[:40]
+                risk_level = str(detail.get("risk_level") or "medium")[:16]
+                attack_type = normalize_attack_type_label(detail.get("attack_type"))[:64]
+                source_ip = str(detail.get("source_ip") or raw.get("source_ip") or "unknown")[:64]
+                source_region = resolve_region_for_event(conn, source_ip, "")
+                target_interface = str(detail.get("target_interface") or raw.get("uri") or "-")[:255]
+                occurred_at = raw.get("event_time") or raw.get("created_at") or dt_to_str(now_dt())
+                cur.execute(
+                    """
+                    INSERT INTO attack_events(event_id, case_id, occurred_at, source_ip, target_interface, attack_type,
+                                              risk_level, confidence, status, evidence_json)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      attack_type=VALUES(attack_type),
+                      risk_level=VALUES(risk_level),
+                      confidence=VALUES(confidence),
+                      evidence_json=VALUES(evidence_json)
+                    """,
+                    (
+                        event_key,
+                        detail.get("case_id"),
+                        occurred_at,
+                        source_ip,
+                        target_interface,
+                        attack_type,
+                        risk_level,
+                        detail.get("final_score"),
+                        "unprocessed",
+                        json.dumps(detail.get("evidence") or [], ensure_ascii=False),
+                    ),
+                )
+                cur.execute(
+                    "UPDATE detection_candidates SET decision='attack_event' WHERE event_id=%s",
+                    (event_key,),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO demo_attack_events(
+                      event_id, occurred_at, risk_level, attack_type, source_ip, source_region, target_node, target_interface,
+                      attack_result, process_status, acked, attack_payload, request_log, protection_action, handling_suggestion,
+                      note, response_ms, anomaly_detected, machine_id
+                    )
+                    VALUES(
+                      %s, COALESCE(STR_TO_DATE(%s, '%%Y-%%m-%%dT%%H:%%i:%%s'), NOW(3)), %s, %s, %s, %s, %s, %s,
+                      %s, %s, 0, %s, %s, %s, %s, '', 0, 1, NULL
+                    )
+                    ON DUPLICATE KEY UPDATE
+                      risk_level=VALUES(risk_level),
+                      attack_type=VALUES(attack_type),
+                      source_ip=VALUES(source_ip),
+                      source_region=VALUES(source_region),
+                      target_interface=VALUES(target_interface),
+                      attack_payload=VALUES(attack_payload),
+                      request_log=VALUES(request_log),
+                      protection_action=VALUES(protection_action),
+                      handling_suggestion=VALUES(handling_suggestion),
+                      anomaly_detected=1
+                    """,
+                    (
+                        event_key,
+                        str(occurred_at or ""),
+                        risk_level,
+                        attack_type,
+                        source_ip,
+                        source_region,
+                        "candidate-review",
+                        target_interface,
+                        "blocked",
+                        "unprocessed",
+                        str(raw.get("request_text") or "")[:20000],
+                        str(raw.get("request_text") or "")[:20000],
+                        "候选事件已由管理员提升为攻击事件。",
+                        "建议进一步核查来源 IP、请求载荷和业务接口日志。",
+                    ),
+                )
+                log_action(conn, g.session["username"], g.session["role"], "candidate_promote", event_key, str(detail.get("case_id") or ""))
+            conn.commit()
+        return jsonify({"ok": True, "event_id": event_id})
+
     @app.route("/api/v2/pro/events/<event_id>", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def pro_event_detail(event_id: str):

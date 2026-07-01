@@ -26,6 +26,19 @@ SERVER_ROWS = PROJECT_ROOT / "output" / "server_all_joined_rows.json"
 
 NORMAL_PATHS = ["/", "/login", "/sql", "/xss", "/upload", "/command", "/traversal", "/ssrf", "/xxe", "/deserialize", "/graphql", "/ssti", "/bruteforce", "/api/products", "/api/search", "/api/profile", "/assets/app.js", "/favicon.ico"]
 NORMAL_QUERIES = ["hello", "admin", "report", "测试", "product 123", "status ok", "select a city", "union station", "script writing", "orange and apple"]
+NORMAL_USERNAMES = ["admin", "user", "guest", "alice", "bob", "operator", "security", "test01", "zhangsan", "lisi"]
+NORMAL_PASSWORDS = [
+    "admin",
+    "123456",
+    "wrongpass",
+    "hello2026",
+    "correct-password",
+    "P@ssw0rd2026!",
+    "Lwh20060523",
+    "Qwer1234!",
+    "summer2026",
+    "normal_login_001",
+]
 USER_AGENTS = ["Mozilla/5.0", "Chrome/126.0", "Edge/126.0", "curl/8.0", "PostmanRuntime/7.37", "python-requests/2.31"]
 
 ATTACK_PAYLOADS = {
@@ -96,8 +109,22 @@ def generate_synthetic(seed: int, normal_n: int, per_attack_n: int) -> List[Tupl
             rec = make_record("GET", uri, "", "", random.choice([200, 200, 200, 404]))
         else:
             uri = random.choice(["/api/auth/login", "/api/comment", "/api/profile", "/api/upload", "/api/search"])
-            body = json.dumps({"username": random.choice(["admin", "user", "guest"]), "password": random.choice(["admin", "123456", "wrongpass", "hello2026"]), "content": random.choice(NORMAL_QUERIES)}, ensure_ascii=False)
+            body = json.dumps({"username": random.choice(NORMAL_USERNAMES), "password": random.choice(NORMAL_PASSWORDS), "content": random.choice(NORMAL_QUERIES)}, ensure_ascii=False)
             rec = make_record("POST", uri, body, "application/json", random.choice([200, 401, 403]))
+        samples.append(("normal", payload_model_text(extract_request_from_record(rec)), rec))
+
+    # Hard negatives: real login traffic contains username/password fields, but the
+    # field names alone must not make the model learn "SQL injection".
+    for _ in range(max(1200, normal_n // 5)):
+        username = random.choice(NORMAL_USERNAMES)
+        password = random.choice(NORMAL_PASSWORDS)
+        body_shape = random.choice(["json", "form"])
+        if body_shape == "json":
+            body = json.dumps({"username": username, "password": password}, ensure_ascii=False)
+            rec = make_record("POST", "/api/auth/login", body, "application/json", random.choice([200, 200, 401]))
+        else:
+            body = f"username={quote_plus(username)}&password={quote_plus(password)}"
+            rec = make_record("POST", "/login", body, "application/x-www-form-urlencoded", random.choice([200, 302, 401]))
         samples.append(("normal", payload_model_text(extract_request_from_record(rec)), rec))
     for label, payloads in ATTACK_PAYLOADS.items():
         for _ in range(per_attack_n):

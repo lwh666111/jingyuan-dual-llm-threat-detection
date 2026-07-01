@@ -1,6 +1,6 @@
 ﻿# 使用文档（部署与运行）
 
-## 0. 最新版本快速使用（2026-06-04）
+## 0. 最新版本快速使用（2026-07-01）
 
 ### 0.1 直接安装（推荐）
 
@@ -31,13 +31,14 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 - 外部机器压测服务器时，抓包网卡使用业务网卡（如以太网）；服务器本机回环测试时改为回环网卡。
 
 
-### 0.3 2026-06-04 版本重点
+### 0.3 2026-07-01 版本重点
 
-- 检测模型已更新，普通登录等正常业务流量误报更低。
-- SQL 注入、XSS、命令注入、路径遍历、危险文件上传等经典攻击识别更稳定。
-- 管理员“系统配置”支持上传主页背景图。
-- 新高危异常流量会触发机械音提醒：“注意异常流量”。
-- 安装器版本号为 `2026.06.04`，真实安装包位于 `dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`。
+- Detection V2 已接入全链路：原始日志全量入库，候选事件进入复核队列，高置信攻击进入大屏。
+- 正常账号密码登录不会因为访问 `/login` 或包含 username/password 字段就进入告警。
+- SQL 注入、XSS、命令注入、路径遍历、危险上传等经典攻击继续保持高召回。
+- 行为窗口模型可辅助识别暴力破解、扫描、目录探测、高频请求。
+- 管理员“详情信息”页面支持候选事件查看、提升、忽略。
+- 安装包仍位于 `dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`。
 ## 1. 项目说明
 
 本项目提供完整的攻击检测与态势感知链路，包含：
@@ -248,6 +249,8 @@ python scripts/platform_api_demo.py
 
 - 1145 打不开：检查 Node 是否启动、端口是否被占用
 - 3049 无响应：检查 Flask 子进程日志
-- 数据为空：检查 `result/` 是否有新 case，及 DB 守护是否正常运行
+- 数据为空：先检查 `input/` 是否有新批次；如果只有正常访问，大屏不会出现攻击事件，可在数据库 `raw_http_logs` 中查看原始日志；再检查 `result/` 是否有高置信 case，及 DB 守护是否正常运行
 - MySQL 连接失败：检查 `config/db_config*.json` 中 host/port/user/password/database
+
+
 

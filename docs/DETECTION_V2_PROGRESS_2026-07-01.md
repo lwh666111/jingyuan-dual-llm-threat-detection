@@ -1,8 +1,8 @@
-﻿# Detection V2 架构落地与第一轮实验报告（2026-07-01）
+﻿# Detection V2 架构落地与第二轮实验报告（2026-07-01）
 
 ## 1. 本轮完成内容
 
-本轮已经把新架构的核心检测层做成可运行版本，并接入原项目主链路的 result 导出口。
+本轮已经把新架构的核心检测层做成可运行版本，并补齐到原项目主链路：抓包 input 全量入库、V2 分层检测、候选复核、攻击事件大屏同步、result/LLM 兼容链路。
 
 新增/修改文件：
 
@@ -11,7 +11,10 @@
 - `scripts/train_payload_model_v2.py`
 - `scripts/evaluate_detection_v2.py`
 - `scripts/sync_detection_v2_db.py`
+- `scripts/sync_raw_http_logs.py`
+- `scripts/train_behavior_model_v2.py`
 - `models/payload_model_v2.joblib`
+- `models/behavior_model_v2.joblib`
 - `scripts/export_demo_candidates_to_result.py`
 - `scripts/demo_workflow.py`
 - `scripts/run_demo_daemon.py`
@@ -74,7 +77,7 @@ TF-IDF 字符 n-gram (3,5) + LogisticRegression(class_weight=balanced)
 
 训练样本数量：
 
-- 总样本：`24671`
+- 总样本：`23271`
 - 服务器 hard samples：`557`
 
 训练集切分评估：
@@ -113,7 +116,7 @@ POC 规则作用：
 
 ## 5. 行为窗口分析
 
-当前已实现第一版规则阈值行为分析，窗口默认 5 分钟。
+当前已实现“规则阈值 + 行为模型”的组合分析，窗口默认 5 分钟。
 
 检测特征：
 
@@ -124,6 +127,7 @@ POC 规则作用：
 - 404 数量
 - User-Agent 数量
 - payload/rule 命中次数
+- 5xx 响应数量
 
 当前可识别：
 
@@ -133,6 +137,23 @@ POC 规则作用：
 - 疑似扫描探测
 - 目录探测
 - 高频请求
+
+行为模型文件：
+
+- `models/behavior_model_v2.joblib`
+
+行为模型训练脚本：
+
+```powershell
+python scripts/train_behavior_model_v2.py
+```
+
+行为模型训练集采用合成窗口特征，覆盖 normal、bruteforce、scan、high_frequency、dir_probe、payload_burst。训练报告：
+
+- Accuracy：`0.9952`
+- Macro F1：`0.9952`
+
+为避免行为模型过度积极，当前加入了上下文门控：窗口内请求量和异常证据不足时，行为模型只记录特征，不参与提升告警。
 
 ## 6. 融合评分
 
@@ -150,8 +171,10 @@ final_score =
 
 - 命中 high/critical POC：进入 attack_event
 - 行为窗口达到高危阈值：进入 attack_event
-- payload_score >= 0.90：进入 attack_event
+- payload_score >= 0.94：进入 attack_event
+- payload_score >= 0.90：进入 candidate，等待复核或结合 POC/行为证据再升级
 - 普通 GET 页面访问且无 query/body/POC：进入 raw_only
+- 仅“认证接口 + 较高 Payload 模型分”不再直接进入 attack_event，避免正常账号密码登录误报。
 
 ## 7. 评估结果
 
@@ -203,14 +226,14 @@ final_score =
 
 Detection V2 决策：
 
-- `attack_event`: 480
-- `raw_only`: 238
+- `attack_event`: 476
+- `raw_only`: 242
 - 总数：718
 
 也就是说：
 
 ```text
-旧系统中的 238 条事件会被 V2 压回原始日志，不再进入告警/大屏。
+旧系统中的 242 条事件会被 V2 压回原始日志，不再进入告警/大屏。
 ```
 
 这直接解决了“访问某个路径就一定记录成攻击事件”的核心问题。
@@ -258,7 +281,37 @@ python scripts/sync_detection_v2_db.py --result-dir result --mysql-host 127.0.0.
 - `poc_matches`
 - `behavior_windows`
 
-### 8.4 详情接口与前端证据链
+### 8.4 input 原始日志全量入库与大屏同步桥
+
+新增同步脚本：
+
+```powershell
+python scripts/sync_raw_http_logs.py --input-dir input --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user root --mysql-password 123456 --mysql-database traffic_pipeline
+```
+
+`result_db_daemon.py` 当前会同时监听：
+
+- `result/b.n`
+- `input/1.1.n.txt`
+
+这样所有 HTTP 请求/响应都会先进入 `raw_http_logs`。随后 Detection V2 会判定是否写入：
+
+- `detection_candidates`
+- `attack_events`
+- `demo_attack_events`
+
+其中 `demo_attack_events` 是旧大屏和详情页正在读取的兼容表。V2 的 `attack_event` 会同步写入该表，保证大屏实时刷新；`raw_only` 会删除对应告警，只保留原始日志。
+
+新增候选复核接口：
+
+- `GET /api/v2/pro/candidates`
+- `GET /api/v2/pro/candidates/{event_id}`
+- `POST /api/v2/pro/candidates/{event_id}/promote`
+- `POST /api/v2/pro/candidates/{event_id}/ignore`
+
+前端“详情信息”页面已新增“候选事件复核队列”。管理员可以查看候选事件、提升为攻击事件或忽略。
+
+### 8.5 详情接口与前端证据链
 
 `dashboard_api_server.py` 的事件详情接口已经兼容读取 v2 分层表：
 
@@ -306,7 +359,7 @@ GET /api/v2/pro/events/{event_id}
 - 行为窗口证据
 - 原始请求/响应折叠详情
 
-### 8.5 风险级别兼容
+### 8.6 风险级别兼容
 
 Detection V2 新增 `critical` 风险级别。前后端已做兼容：
 
@@ -342,9 +395,9 @@ Detection V2 新增 `critical` 风险级别。前后端已做兼容：
 ## 10. 当前限制
 
 - Payload 模型当前主要使用合成数据 + 服务器 hard samples，后续应继续接入 HTTP CSIC 2010、CSE-CIC-IDS2018 等公开数据做更大规模评估。
-- 行为窗口第一版是规则阈值，后续可以训练 LightGBM/XGBoost。
-- 前端列表仍以旧的 `demo_attack_events` 为主表，保证兼容现有大屏；详情页已通过 `v2_detection` 读取分层证据链。
-- `raw_http_logs` 当前主要同步 result 内的样本。下一阶段应把抓包后的所有原始 HTTP 请求先入 `raw_http_logs`，再进入检测。
+- 行为窗口已加入第一版机器学习模型，后续可继续用真实灰度数据训练 LightGBM/XGBoost。
+- 前端列表仍以旧的 `demo_attack_events` 为主表，保证兼容现有大屏；V2 raw 同步已自动把 `attack_event` 写入该表。
+- `raw_http_logs` 已接入抓包 input 全量入库。正常访问不再进入大屏告警。
 
 ## 11. 本地联调记录
 
@@ -356,19 +409,23 @@ Detection V2 新增 `critical` 风险级别。前后端已做兼容：
   - Adversarial 小样本：Accuracy `1.0000`，Macro F1 `1.0000`
   - 服务器真实可标注样本：Accuracy `0.9982`，Macro F1 `0.9868`
 - 临时 MySQL 冒烟：
-  - v2 分层表可创建。
-  - `b.1` 和 `EVT1` 均可查到同一事件详情。
-  - POC、模型预测、原始请求可正常返回。
+  - `raw_http_logs` 全量保留 3 条测试 HTTP。
+  - SQL 注入、XSS 两条进入 `attack_events` 与 `demo_attack_events`。
+  - 正常登录不进入候选/攻击事件。
+  - 候选事件列表、详情、提升、忽略接口均通过。
 - 浏览器联调：
   - 管理员登录成功。
-  - 详情信息页可显示 v2 证据链。
+  - 详情信息页可显示 v2 证据链、攻击列表和候选事件复核队列。
   - `critical` 显示为红色严重级别。
   - 中文证据链显示正常，无乱码。
 
 ## 12. 下一步建议
 
-1. 把抓包解析结果直接写入 `raw_http_logs`，实现真正“所有访问先入原始日志”。
-2. 下载/整理 HTTP CSIC 2010、CSE-CIC-IDS2018，补充外部评估报告。
-3. 用靶场自动发 1000 正常 + 1000 攻击流量，验证真实链路误报/漏报。
-4. 在服务器上灰度部署 v2 gate，并观察大屏是否不再展示普通路径访问。
-5. 将 `detection_candidates` 做成前端复核队列：低置信候选不直接告警，但可供专业用户审核。
+1. 扩展 POC 规则：SQLi time-based/error-based、DOM XSS、文件上传后门、常见 CVE 指纹。
+2. 增加人工复核反馈闭环：前端把误报/漏报写回训练样本池。
+3. 引入 HTTP CSIC 2010、CSE-CIC-IDS2018 等公开数据做更大规模外部评估。
+4. 用靶场自动发 1000 正常 + 1000 攻击流量，持续验证真实链路误报/漏报。
+5. 将候选复核操作沉淀为训练样本池，实现“忽略/提升 -> 后续训练”的闭环。
+
+
+

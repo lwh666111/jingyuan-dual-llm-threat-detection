@@ -224,6 +224,25 @@
 - `GET /api/v2/pro/nodes/{node_name}/detail`
   - 鉴权：`normal/admin`
 
+
+### 4.4.1 候选事件复核（v2）
+
+- `GET /api/v2/pro/candidates?page=1&page_size=20&q=`
+  - 鉴权：`normal/admin`
+  - 说明：查询 Detection V2 低/中置信候选事件，供人工复核。
+  - 返回字段：`event_id`, `case_id`, `decision`, `final_score`, `risk_level`, `attack_type`, `source_ip`, `target_interface`, `created_at`
+
+- `GET /api/v2/pro/candidates/{event_id}`
+  - 鉴权：`normal/admin`
+  - 说明：查看候选事件详情，返回结构兼容事件详情，并包含 `v2_detection` 证据链。
+
+- `POST /api/v2/pro/candidates/{event_id}/promote`
+  - 鉴权：`admin`
+  - 说明：将候选事件提升为攻击事件，写入 `attack_events` 和兼容大屏表 `demo_attack_events`。
+
+- `POST /api/v2/pro/candidates/{event_id}/ignore`
+  - 鉴权：`admin`
+  - 说明：将候选事件忽略为 `raw_only`，同时删除对应攻击事件记录，仅保留原始日志。
 ### 4.5 管理员（v2）
 
 - `GET /api/v2/admin/summary`
@@ -304,3 +323,4 @@
 
 - 当前 API 契约以 `scripts/dashboard_api_server.py` 为准
 - 若后端变更字段/路径，需同步更新本声明文档
+

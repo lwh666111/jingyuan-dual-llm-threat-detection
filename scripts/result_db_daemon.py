@@ -11,6 +11,7 @@ from sync_detection_v2_db import ensure_mysql as ensure_v2_mysql
 from sync_detection_v2_db import iter_case_dirs as iter_v2_case_dirs
 from sync_detection_v2_db import mysql_connect as v2_mysql_connect
 from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
+from sync_raw_http_logs import sync_input_dir_mysql
 
 
 def now_iso() -> str:
@@ -39,8 +40,11 @@ def write_state(path: Path, state: Dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def collect_watch_files(result_dir: Path) -> List[Path]:
+def collect_watch_files(result_dir: Path, input_dir: Path | None = None) -> List[Path]:
     files: List[Path] = []
+    if input_dir and input_dir.exists():
+        files.extend(sorted(input_dir.glob("1.1.*.txt")))
+
     manifest = result_dir / "manifest.jsonl"
     if manifest.exists():
         files.append(manifest)
@@ -55,18 +59,21 @@ def collect_watch_files(result_dir: Path) -> List[Path]:
     return files
 
 
-def calc_signature(result_dir: Path) -> Dict[str, str | int]:
+def calc_signature(result_dir: Path, input_dir: Path | None = None) -> Dict[str, str | int]:
     hasher = hashlib.sha256()
     file_count = 0
 
-    if not result_dir.exists():
-        hasher.update(b"RESULT_DIR_MISSING")
+    if not result_dir.exists() and (not input_dir or not input_dir.exists()):
+        hasher.update(b"WATCH_DIRS_MISSING")
         return {"signature": hasher.hexdigest(), "file_count": 0}
 
-    for path in collect_watch_files(result_dir):
+    for path in collect_watch_files(result_dir, input_dir):
         try:
             st = path.stat()
-            rel = path.relative_to(result_dir).as_posix()
+            try:
+                rel = path.relative_to(result_dir.parent).as_posix()
+            except Exception:
+                rel = str(path)
             hasher.update(f"{rel}|{st.st_mtime_ns}|{st.st_size}\n".encode("utf-8"))
             file_count += 1
         except Exception:
@@ -77,6 +84,7 @@ def calc_signature(result_dir: Path) -> Dict[str, str | int]:
 
 def run_sync(
     result_dir: Path,
+    input_dir: Path,
     backend: str,
     db_path: Path,
     mysql_config: MySQLConfig,
@@ -94,6 +102,7 @@ def run_sync(
         try:
             conn = v2_mysql_connect(mysql_config)
             ensure_v2_mysql(conn)
+            raw_totals = sync_input_dir_mysql(conn, input_dir)
             v2_totals = {"cases": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
             for case_dir in iter_v2_case_dirs(result_dir):
                 row_stats = sync_v2_case_mysql(conn, case_dir)
@@ -103,6 +112,7 @@ def run_sync(
                     v2_totals[key] += int(row_stats.get(key, 0))
             conn.close()
             stats["v2_layered_rows"] = v2_totals
+            stats["raw_input_rows"] = raw_totals
         except Exception as exc:  # noqa: BLE001
             stats["v2_layered_error"] = str(exc)
     state["last_synced_at"] = now_iso()
@@ -117,7 +127,8 @@ def run_sync(
         + f"req={stats['requests_rows']} "
         + f"rsp={stats['responses_rows']} "
         + f"ana={stats['analyses_rows']} "
-        + f"demo={stats.get('demo_event_rows', 0)}",
+        + f"demo={stats.get('demo_event_rows', 0)} "
+        + f"raw_input={stats.get('raw_input_rows', {}).get('raw', 0) if isinstance(stats.get('raw_input_rows'), dict) else 0}",
         log_file,
     )
     return stats
@@ -129,6 +140,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Watch result/b.* and sync into database")
     parser.add_argument("--result-dir", default="result", help="result root directory")
+    parser.add_argument("--input-dir", default="input", help="input raw HTTP txt directory")
     parser.add_argument("--backend", choices=["sqlite", "mysql"], default="mysql", help="database backend")
     parser.add_argument("--db-path", default="result/result_cases.db", help="sqlite db path")
 
@@ -145,6 +157,7 @@ def main() -> None:
     args = parser.parse_args()
 
     result_dir = (project_root / args.result_dir).resolve()
+    input_dir = (project_root / args.input_dir).resolve()
     db_path = (project_root / args.db_path).resolve()
     state_file = (project_root / args.state_file).resolve()
     log_file = (project_root / args.log_file).resolve()
@@ -158,12 +171,14 @@ def main() -> None:
     )
 
     result_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
     if args.backend == "sqlite":
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
     state = read_state(state_file)
     state["project_root"] = str(project_root)
     state["result_dir"] = str(result_dir)
+    state["input_dir"] = str(input_dir)
     state["backend"] = args.backend
     if args.backend == "sqlite":
         state["db_target"] = str(db_path)
@@ -172,15 +187,16 @@ def main() -> None:
     write_state(state_file, state)
 
     log(f"result db daemon started result_dir={result_dir}", log_file)
+    log(f"raw input watch dir={input_dir}", log_file)
     log(f"backend={args.backend} target={state['db_target']}", log_file)
 
-    sig_obj = calc_signature(result_dir)
+    sig_obj = calc_signature(result_dir, input_dir)
     state["last_signature"] = sig_obj["signature"]
     state["last_file_count"] = sig_obj["file_count"]
     write_state(state_file, state)
 
     try:
-        run_sync(result_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
+        run_sync(result_dir, input_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
     except Exception as exc:  # noqa: BLE001
         state["last_error"] = str(exc)
         state["last_error_at"] = now_iso()
@@ -195,7 +211,7 @@ def main() -> None:
 
     while True:
         time.sleep(max(args.poll_seconds, 1))
-        sig_obj = calc_signature(result_dir)
+        sig_obj = calc_signature(result_dir, input_dir)
         current_sig = str(sig_obj["signature"])
         if current_sig == str(state.get("last_signature", "")):
             continue
@@ -206,7 +222,7 @@ def main() -> None:
         log(f"change detected files={sig_obj['file_count']}", log_file)
 
         try:
-            run_sync(result_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
+            run_sync(result_dir, input_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
         except Exception as exc:  # noqa: BLE001
             state["last_error"] = str(exc)
             state["last_error_at"] = now_iso()

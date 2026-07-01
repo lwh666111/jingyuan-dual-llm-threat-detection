@@ -819,6 +819,21 @@ tbody tr.active {
   margin-top: 0;
 }
 
+.candidate-panel {
+  margin-top: 14px;
+}
+
+.candidate-table-shell {
+  max-height: 300px;
+}
+
+.candidate-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .blocked-table-shell {
   max-height: 320px;
 }

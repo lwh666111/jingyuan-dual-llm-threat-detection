@@ -468,6 +468,8 @@ def build_db_cmd(args, script_dir: Path) -> List[str]:
         str(script_dir / "result_db_daemon.py"),
         "--result-dir",
         args.db_result_dir,
+        "--input-dir",
+        args.input_dir,
         "--backend",
         args.db_backend,
         "--db-path",
@@ -911,7 +913,7 @@ def main() -> None:
     if run_llm:
         required_scripts.extend(["llm_analyzer_daemon.py", "build_rag_db.py"])
     if run_db:
-        required_scripts.extend(["result_db_daemon.py", "build_result_db.py"])
+        required_scripts.extend(["result_db_daemon.py", "build_result_db.py", "sync_raw_http_logs.py"])
     if run_api:
         required_scripts.append("dashboard_api_server.py")
     ensure_scripts(scripts_dir, required_scripts)

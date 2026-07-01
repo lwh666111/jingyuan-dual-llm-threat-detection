@@ -16,6 +16,7 @@ import joblib
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES_PATH = PROJECT_ROOT / "rules" / "poc_rules.json"
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "payload_model_v2.joblib"
+DEFAULT_BEHAVIOR_MODEL_PATH = PROJECT_ROOT / "models" / "behavior_model_v2.joblib"
 
 ATTACK_TYPE_PRIORITY = {
     "XXE": 100,
@@ -301,9 +302,22 @@ class PayloadModel:
 
 
 class BehaviorWindowAnalyzer:
-    def __init__(self, window_minutes: int = 5):
+    def __init__(self, window_minutes: int = 5, model_path: Path | str = DEFAULT_BEHAVIOR_MODEL_PATH):
         self.window = timedelta(minutes=window_minutes)
         self.events_by_ip: Dict[str, deque] = defaultdict(deque)
+        self.model_path = Path(model_path)
+        self.model_bundle = None
+        self.model = None
+        self.model_features = []
+        if self.model_path.exists():
+            try:
+                self.model_bundle = joblib.load(self.model_path)
+                self.model = self.model_bundle.get("model") if isinstance(self.model_bundle, dict) else self.model_bundle
+                self.model_features = list(self.model_bundle.get("features", [])) if isinstance(self.model_bundle, dict) else []
+            except Exception:
+                self.model_bundle = None
+                self.model = None
+                self.model_features = []
 
     def observe(self, event: Dict[str, Any], payload_or_rule_hit: bool = False) -> Dict[str, Any]:
         ip = str(event.get("source_ip") or "")
@@ -338,6 +352,7 @@ class BehaviorWindowAnalyzer:
         not_found = sum(1 for x in items if x["status_code"] == 404)
         ua_count = len({x["ua"] for x in items if x["ua"]})
         payload_hits = sum(1 for x in items if x["payload_or_rule_hit"])
+        status_5xx = sum(1 for x in items if 500 <= int(x["status_code"] or 0) <= 599)
         features = {
             "request_count": req_count,
             "distinct_path_count": len(paths),
@@ -346,6 +361,7 @@ class BehaviorWindowAnalyzer:
             "not_found_count": not_found,
             "user_agent_count": ua_count,
             "payload_hit_count": payload_hits,
+            "status_5xx_count": status_5xx,
         }
         evidence: List[str] = []
         score = 0.0
@@ -371,7 +387,62 @@ class BehaviorWindowAnalyzer:
         if req_count >= 200:
             score, typ = max(score, 0.9), "高频请求"
             evidence.append(f"{self.window} 内请求 {req_count} 次")
+
+        model_supported = self.behavior_model_supported(features)
+        model_result = self.score_with_model(features) if model_supported else {"score": 0.0, "label": "not_enough_context", "type": "normal"}
+        if float(model_result.get("score") or 0.0) > score:
+            score = float(model_result.get("score") or 0.0)
+            typ = str(model_result.get("type") or typ)
+            evidence.append(f"行为模型判定 {typ}, score={score:.3f}")
+        features["behavior_model_label"] = model_result.get("label") or ""
+        features["behavior_model_score"] = model_result.get("score") or 0.0
+        features["behavior_model_supported"] = model_supported
         return {"score": score, "type": typ, "evidence": evidence, "features": features}
+
+    def behavior_model_supported(self, features: Dict[str, Any]) -> bool:
+        req_count = int(features.get("request_count") or 0)
+        distinct_path_count = int(features.get("distinct_path_count") or 0)
+        login_fail_count = int(features.get("login_fail_count") or 0)
+        not_found_count = int(features.get("not_found_count") or 0)
+        payload_hit_count = int(features.get("payload_hit_count") or 0)
+        status_5xx_count = int(features.get("status_5xx_count") or 0)
+        if req_count < 12:
+            return False
+        return (
+            login_fail_count >= 4
+            or distinct_path_count >= 8
+            or not_found_count >= 6
+            or payload_hit_count >= 3
+            or status_5xx_count >= 5
+            or req_count >= 60
+        )
+
+    def score_with_model(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        if self.model is None or not self.model_features:
+            return {"score": 0.0, "label": "unavailable", "type": "normal"}
+        vector = [[float(features.get(k) or 0.0) for k in self.model_features]]
+        try:
+            label = str(self.model.predict(vector)[0])
+            proba = {}
+            if hasattr(self.model, "predict_proba"):
+                values = self.model.predict_proba(vector)[0]
+                labels = list(getattr(self.model, "classes_", []))
+                proba = {str(k): float(v) for k, v in zip(labels, values)}
+                normal_score = float(proba.get("normal", 0.0))
+                score = max(0.0, 1.0 - normal_score)
+            else:
+                score = 0.75 if label != "normal" else 0.0
+        except Exception:
+            return {"score": 0.0, "label": "error", "type": "normal"}
+        type_map = {
+            "bruteforce": "暴力破解",
+            "scan": "扫描探测",
+            "high_frequency": "高频请求",
+            "dir_probe": "目录探测",
+            "payload_burst": "Payload异常突增",
+            "normal": "normal",
+        }
+        return {"score": score if label != "normal" else 0.0, "label": label, "type": type_map.get(label, label)}
 
 
 def severity_from_score(score: float) -> str:
@@ -414,16 +485,17 @@ def fuse_detection(
 
     final_score = payload_score * 0.45 + behavior_score * 0.30 + poc_score * 0.20 + ctx_score * 0.05
     strong_poc = any(m.severity in {"high", "critical"} for m in poc_matches)
-    strong_behavior = behavior_score >= 0.82
-    high_payload = payload_score >= 0.85 and payload_label != "normal"
+    behavior_features = behavior.get("features") or {}
+    behavior_supported = bool(behavior_features.get("behavior_model_supported", True))
+    strong_behavior = behavior_score >= 0.82 and behavior_supported
+    high_payload = payload_score >= 0.90 and payload_label != "normal"
 
     candidate = final_score >= candidate_threshold or strong_poc or strong_behavior or high_payload
     attack_event = (
         final_score >= event_threshold
         or strong_poc
         or strong_behavior
-        or payload_score >= 0.90
-        or (payload_score >= 0.82 and ctx_score >= 0.75)
+        or payload_score >= 0.94
         or (payload_score >= 0.80 and poc_score >= 0.65)
     )
 
@@ -434,10 +506,10 @@ def fuse_detection(
             key=lambda m: (SEVERITY_SCORE.get(m.severity, 0), ATTACK_TYPE_PRIORITY.get(m.attack_type, 0), m.score),
             reverse=True,
         )[0].attack_type
-    elif behavior_score >= 0.82:
-        attack_type = str(behavior.get("type") or "行为异常")
     elif payload_label and payload_label not in {"normal", "unknown"}:
         attack_type = payload_label
+    elif behavior_score >= 0.82:
+        attack_type = str(behavior.get("type") or "行为异常")
     elif poc_matches:
         attack_type = sorted(poc_matches, key=lambda m: (ATTACK_TYPE_PRIORITY.get(m.attack_type, 0), m.score), reverse=True)[0].attack_type
     else:
@@ -478,11 +550,12 @@ class DetectionEngineV2:
         self,
         model_path: Path | str = DEFAULT_MODEL_PATH,
         rules_path: Path | str = DEFAULT_RULES_PATH,
+        behavior_model_path: Path | str = DEFAULT_BEHAVIOR_MODEL_PATH,
         behavior_window_minutes: int = 5,
     ):
         self.payload_model = PayloadModel(model_path)
         self.poc_engine = POCRuleEngine(rules_path)
-        self.behavior = BehaviorWindowAnalyzer(behavior_window_minutes)
+        self.behavior = BehaviorWindowAnalyzer(behavior_window_minutes, behavior_model_path)
 
     def detect(self, record: Dict[str, Any]) -> Dict[str, Any]:
         event = extract_request_from_record(record)

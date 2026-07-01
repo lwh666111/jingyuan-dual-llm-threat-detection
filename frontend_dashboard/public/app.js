@@ -70,6 +70,13 @@ const state = {
     selectedEventId: "",
     selectedEventDetail: null,
     selectedNodeDetail: null,
+    candidates: {
+      q: "",
+      page: 1,
+      pageSize: 8,
+      total: 0,
+      items: [],
+    },
     blocked: {
       q: "",
       page: 1,
@@ -870,6 +877,40 @@ function renderProQueryView() {
       </article>
     </section>
 
+    <section class="panel candidate-panel">
+      <div class="panel-head">
+        <h3 class="panel-title">候选事件复核队列</h3>
+        <div class="ops-group">
+          <input id="candidate_q" placeholder="按事件ID/IP/接口搜索候选" />
+          <button id="candidate_refresh" class="btn btn-success">刷新候选</button>
+        </div>
+      </div>
+      <div class="table-shell candidate-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>候选ID</th>
+              <th>评分</th>
+              <th>风险</th>
+              <th>类型</th>
+              <th>来源IP</th>
+              <th>目标接口</th>
+              <th>时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="candidate_table_body"></tbody>
+        </table>
+      </div>
+      <div class="table-pager">
+        <span class="panel-sub" id="candidate_total">总计 0 条</span>
+        <div class="ops-group">
+          <button id="candidate_prev" class="btn btn-ghost">上一页</button>
+          <button id="candidate_next" class="btn btn-ghost">下一页</button>
+        </div>
+      </div>
+    </section>
+
     <section class="panel blocked-ip-panel">
       <div class="panel-head">
         <h3 class="panel-title">已封禁IP列表</h3>
@@ -918,6 +959,19 @@ function renderProQueryView() {
     loadProEvents().catch((err) => showToast(err.message));
   });
   document.getElementById("blocked_ip_refresh")?.addEventListener("click", () => loadBlockedIpList(true));
+  document.getElementById("candidate_refresh")?.addEventListener("click", () => loadProCandidates(true));
+  document.getElementById("candidate_q")?.addEventListener("keyup", (ev) => {
+    if (ev.key === "Enter") loadProCandidates(true).catch((err) => showToast(err.message));
+  });
+  document.getElementById("candidate_prev")?.addEventListener("click", () => {
+    state.pro.candidates.page = Math.max(1, state.pro.candidates.page - 1);
+    loadProCandidates().catch((err) => showToast(err.message));
+  });
+  document.getElementById("candidate_next")?.addEventListener("click", () => {
+    const maxPage = Math.max(1, Math.ceil(state.pro.candidates.total / state.pro.candidates.pageSize));
+    state.pro.candidates.page = Math.min(maxPage, state.pro.candidates.page + 1);
+    loadProCandidates().catch((err) => showToast(err.message));
+  });
   document.getElementById("blocked_ip_q")?.addEventListener("keyup", (ev) => {
     if (ev.key === "Enter") loadBlockedIpList(true).catch((err) => showToast(err.message));
   });
@@ -968,11 +1022,13 @@ function renderProQueryView() {
 
   initProOptions().catch((err) => showToast(`加载筛选项失败：${err.message}`));
   loadProEvents().catch((err) => showToast(`加载事件失败：${err.message}`));
+  loadProCandidates(true).catch((err) => showToast(`加载候选失败：${err.message}`));
   loadBlockedIpList(true).catch((err) => showToast(`加载封禁列表失败：${err.message}`));
 }
 
 async function refreshProWorkspace() {
   await loadProEvents();
+  await loadProCandidates();
   await loadBlockedIpList();
 }
 
@@ -1185,6 +1241,97 @@ async function loadProEventDetail(eventId) {
   state.pro.selectedEventDetail = await api(`/api/v2/pro/events/${encodeURIComponent(eventId)}`);
   renderProTable();
   renderProEventDetail();
+}
+
+async function loadProCandidates(forcePageOne = false) {
+  if (forcePageOne) state.pro.candidates.page = 1;
+  state.pro.candidates.q = String(document.getElementById("candidate_q")?.value || "").trim();
+  const params = new URLSearchParams();
+  params.set("page", String(state.pro.candidates.page));
+  params.set("page_size", String(state.pro.candidates.pageSize));
+  if (state.pro.candidates.q) params.set("q", state.pro.candidates.q);
+  const data = await api(`/api/v2/pro/candidates?${params.toString()}`);
+  state.pro.candidates.items = Array.isArray(data.items) ? data.items : [];
+  state.pro.candidates.total = Number(data.total || 0);
+  renderProCandidateTable();
+}
+
+function renderProCandidateTable() {
+  const bodyEl = document.getElementById("candidate_table_body");
+  const totalEl = document.getElementById("candidate_total");
+  const canHandle = state.profile?.role === ROLE_ADMIN;
+  if (totalEl) {
+    const maxPage = Math.max(1, Math.ceil(state.pro.candidates.total / state.pro.candidates.pageSize));
+    totalEl.textContent = `总计 ${state.pro.candidates.total} 条，当前第 ${state.pro.candidates.page}/${maxPage} 页`;
+  }
+  if (!bodyEl) return;
+  if (!state.pro.candidates.items.length) {
+    bodyEl.innerHTML = `<tr><td colspan="8" class="panel-sub">暂无候选事件</td></tr>`;
+    return;
+  }
+  bodyEl.innerHTML = state.pro.candidates.items
+    .map(
+      (row) => `
+        <tr>
+          <td><span class="link-btn" data-candidate-detail="${escapeHtml(row.event_id || "")}">${escapeHtml(row.event_id || "-")}</span></td>
+          <td>${escapeHtml(formatPercentScore(row.final_score))}</td>
+          <td>${riskBadge(row.risk_level)}</td>
+          <td>${escapeHtml(formatAttackType(row.attack_type || "-"))}</td>
+          <td>${escapeHtml(row.source_ip || "-")}</td>
+          <td>${escapeHtml(row.target_interface || "-")}</td>
+          <td>${escapeHtml(row.created_at || "-")}</td>
+          <td>
+            <div class="candidate-actions">
+              <button class="btn btn-primary" data-candidate-detail="${escapeHtml(row.event_id || "")}">查看</button>
+              <button class="btn btn-danger" data-candidate-promote="${escapeHtml(row.event_id || "")}" ${canHandle ? "" : "disabled"}>提升</button>
+              <button class="btn btn-ghost" data-candidate-ignore="${escapeHtml(row.event_id || "")}" ${canHandle ? "" : "disabled"}>忽略</button>
+            </div>
+          </td>
+        </tr>
+      `
+    )
+    .join("");
+  bodyEl.querySelectorAll("[data-candidate-detail]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const eventId = el.getAttribute("data-candidate-detail");
+      if (!eventId) return;
+      loadProCandidateDetail(eventId).catch((err) => showToast(`加载候选详情失败：${err.message}`));
+    });
+  });
+  bodyEl.querySelectorAll("[data-candidate-promote]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const eventId = el.getAttribute("data-candidate-promote");
+      if (!eventId) return;
+      promoteProCandidate(eventId).catch((err) => showToast(`提升失败：${err.message}`));
+    });
+  });
+  bodyEl.querySelectorAll("[data-candidate-ignore]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const eventId = el.getAttribute("data-candidate-ignore");
+      if (!eventId) return;
+      ignoreProCandidate(eventId).catch((err) => showToast(`忽略失败：${err.message}`));
+    });
+  });
+}
+
+async function loadProCandidateDetail(eventId) {
+  state.pro.selectedEventId = "";
+  state.pro.selectedEventDetail = await api(`/api/v2/pro/candidates/${encodeURIComponent(eventId)}`);
+  renderProTable();
+  renderProEventDetail();
+}
+
+async function promoteProCandidate(eventId) {
+  await api(`/api/v2/pro/candidates/${encodeURIComponent(eventId)}/promote`, { method: "POST", body: {} });
+  showToast("候选事件已提升为攻击事件");
+  await loadProEvents(true);
+  await loadProCandidates(true);
+}
+
+async function ignoreProCandidate(eventId) {
+  await api(`/api/v2/pro/candidates/${encodeURIComponent(eventId)}/ignore`, { method: "POST", body: {} });
+  showToast("候选事件已忽略");
+  await loadProCandidates(true);
 }
 
 function formatPercentScore(value) {

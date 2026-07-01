@@ -1,5 +1,18 @@
 ﻿# 版本记录
 
+## v2026.07.01
+
+- 日期：2026-07-01
+- 分支：`main`
+- 说明：Detection V2 重构验证版。完成 raw 全量入库、候选事件复核队列、行为窗口模型、大屏同步桥和正常登录误报修复。
+- 验证：Adversarial Accuracy/Macro F1 `1.0000/1.0000`；服务器真实可标注样本 Accuracy/Macro F1 `0.9982/0.9868`；本地 MySQL/API/前端浏览器烟测通过。
+- 安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
+- 安装包大小/SHA256：以当前 `dist` 目录实际文件为准，可执行：
+
+```powershell
+Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256
+(Get-Item .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe).Length
+```
 ## v2026.06.04
 
 - 日期：2026-06-04
@@ -27,3 +40,5 @@ Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA2
 
 - 日期：2026-05-04
 - 说明：3000 端口检测链路可靠性修复（模型文件补齐、BOM 兼容、抓包配置增强），新增 `test/` 靶场脚本目录。
+
+

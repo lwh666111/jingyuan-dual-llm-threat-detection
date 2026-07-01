@@ -60,9 +60,19 @@
 - `models/payload_model_v2.joblib`
 - `rules/poc_rules.json`
 - `scripts/security_detection_v2.py`
+- `scripts/train_behavior_model_v2.py`
+- `scripts/sync_raw_http_logs.py`
 - `scripts/sync_detection_v2_db.py`
 
 详情页已接入 v2 证据链，可查看融合评分、Payload 模型置信度、POC 命中、行为窗口和原始请求/响应。
+
+2026-07-01 重构补齐项：
+
+- `input/1.1.n.txt` 会先全量入库到 `raw_http_logs`，正常访问只保留原始日志，不进入告警。
+- V2 检测出的 `attack_event` 会同步写入 `demo_attack_events`，大屏和详情信息能实时刷新。
+- V2 检测出的 `candidate` 会进入管理员/专业详情页的“候选事件复核队列”，可查看、提升为攻击事件或忽略。
+- 新增 `models/behavior_model_v2.joblib` 行为窗口模型，用于识别暴力破解、扫描、目录探测、高频请求等仅靠单包 Payload 难以判断的行为。
+- Payload 模型补充正常登录 hard negative，融合层收紧“认证接口 + 模型高分”规则，降低普通账号密码登录误报。
 
 ## Project Layout
 
@@ -261,6 +271,7 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\stop_ta
    - `rerank_model_result.py`
    - `build_demo_candidates.py`
    - `export_demo_candidates_to_result.py`
+   - Detection V2 gate 默认启用，先判定 `raw_only/candidate/attack_event`
 5. `result/b.n`
 6. `scripts/llm_analyzer_daemon.py` reads `result/b.n` and writes:
    - `result/b.n/analysis.json`
@@ -268,7 +279,9 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\stop_ta
 7. `scripts/result_db_daemon.py` watches `result/b.n` and upserts into:
    - default MySQL: `traffic_pipeline` (127.0.0.1:3306, root/123456)
    - sqlite fallback: `result/result_cases.db`
-   - tables: `requests`, `responses`, `analyses`
+   - legacy tables: `requests`, `responses`, `analyses`, `demo_attack_events`
+   - v2 tables: `raw_http_logs`, `detection_candidates`, `attack_events`, `model_predictions`, `poc_matches`, `behavior_windows`
+   - 同时监听 `input/1.1.n.txt`，实现原始 HTTP 日志全量入库
 8. `scripts/dashboard_api_server.py` serves frontend query API on `:3049`
 
 ## Frontend API
@@ -348,6 +361,10 @@ Details view:
 
 - `GET /api/v2/pro/events?time_range=24h&page=1&page_size=20`
 - `GET /api/v2/pro/events/{event_id}`
+- `GET /api/v2/pro/candidates?page=1&page_size=20&q=`
+- `GET /api/v2/pro/candidates/{event_id}`
+- `POST /api/v2/pro/candidates/{event_id}/promote`
+- `POST /api/v2/pro/candidates/{event_id}/ignore`
 - `GET /api/v2/pro/nodes/{node_name}/detail`
 
 Admin:
