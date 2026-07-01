@@ -1174,6 +1174,8 @@ def main() -> None:
         next_capture_cfg_check_ts = 0.0
         next_llm_cfg_check_ts = 0.0
         capture_cfg_poll_seconds = max(1, int(args.capture_config_poll_seconds))
+        capture_restart_count = 0
+        last_capture_restart_ts = 0.0
 
         log("workflow is running; press Ctrl+C to stop all", app_log)
 
@@ -1285,17 +1287,58 @@ def main() -> None:
 
             if run_capture and capture_proc and cap_rc is not None:
                 log(f"capture exited rc={cap_rc}", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(cap_rc)
+                capture_proc = None
+                now = time.time()
+                if now - last_capture_restart_ts > 300:
+                    capture_restart_count = 0
+                capture_restart_count += 1
+                last_capture_restart_ts = now
+                restart_delay = min(60, 3 * capture_restart_count)
+                log(
+                    "capture will restart without stopping other services "
+                    + f"in {restart_delay}s (attempt={capture_restart_count})",
+                    app_log,
+                )
+                time.sleep(restart_delay)
+                updated_cfg = load_capture_runtime_config(args, cli_capture_ports, cli_capture_batch_size)
+                cfg_error = str(updated_cfg.get("error") or "")
+                if cfg_error:
+                    log(f"capture restart uses previous config because reload failed: {cfg_error}", app_log)
+                    updated_cfg = capture_runtime_cfg
+                else:
+                    capture_runtime_cfg = updated_cfg
+                    capture_cfg_key = (
+                        f"ports={','.join(str(x) for x in updated_cfg.get('ports', []))}|"
+                        f"batch={updated_cfg.get('batch_size')}|"
+                        f"iface={updated_cfg.get('interface') or ''}"
+                    )
+                    capture_cmd = build_capture_cmd(
+                        args,
+                        scripts_dir,
+                        input_dir,
+                        monitor_ports=updated_cfg["ports"],
+                        batch_size=updated_cfg["batch_size"],
+                        capture_interface=updated_cfg.get("interface", ""),
+                    )
+                capture_proc = subprocess.Popen(
+                    capture_cmd,
+                    cwd=str(project_root),
+                    stdout=capture_out_f,
+                    stderr=capture_err_f,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                runtime_state["capture"]["pid"] = capture_proc.pid
+                runtime_state["capture"]["cmd"] = capture_cmd
+                runtime_state["capture"]["config_source"] = capture_runtime_cfg.get("source")
+                runtime_state["capture"]["monitor_ports"] = capture_runtime_cfg.get("ports")
+                runtime_state["capture"]["batch_size"] = capture_runtime_cfg.get("batch_size")
+                runtime_state["capture"]["capture_interface"] = capture_runtime_cfg.get("interface") or ""
+                write_runtime_state(state_file, runtime_state)
+                next_capture_cfg_check_ts = time.time() + capture_cfg_poll_seconds
+                log(f"capture restarted pid={capture_proc.pid}", app_log)
+                continue
 
             if run_daemon and daemon_proc and dmn_rc is not None:
                 log(f"daemon exited rc={dmn_rc}", app_log)
