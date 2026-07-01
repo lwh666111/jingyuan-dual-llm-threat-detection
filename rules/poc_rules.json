@@ -1,0 +1,125 @@
+﻿[
+  {
+    "id": "web-sqli-login-bypass-001",
+    "name": "SQL注入登录绕过",
+    "attack_type": "SQL注入",
+    "severity": "high",
+    "score": 0.95,
+    "tags": ["sqli", "auth", "login"],
+    "request": {
+      "path_regex": ["(?i)(/login|/auth|/signin|/session)"],
+      "text_regex": ["(?i)(?:'|%27|\\\")\\s*(?:or|and)\\s+['\\\"]?\\d+['\\\"]?\\s*=\\s*['\\\"]?\\d+", "(?i)union\\s+(?:all\\s+)?select", "(?i)(sleep|benchmark)\\s*\\("]
+    }
+  },
+  {
+    "id": "web-sqli-generic-001",
+    "name": "通用SQL注入特征",
+    "attack_type": "SQL注入",
+    "severity": "high",
+    "score": 0.9,
+    "tags": ["sqli"],
+    "request": {
+      "text_regex": ["(?i)information_schema", "(?i)extractvalue\\s*\\(", "(?i)updatexml\\s*\\(", "(?i)(?:--|#|/\\*)\\s*(?:$|[+\\s])"]
+    }
+  },
+  {
+    "id": "web-xss-reflected-001",
+    "name": "反射型XSS Payload",
+    "attack_type": "XSS",
+    "severity": "high",
+    "score": 0.94,
+    "tags": ["xss"],
+    "request": {
+      "text_regex": ["(?i)<\\s*script\\b", "(?i)<\\s*(?:img|svg|iframe|body|details)\\b[^>]*(?:onerror|onload|onclick|onmouseover)\\s*=", "(?i)javascript\\s*:", "(?i)document\\s*\\.\\s*cookie"]
+    }
+  },
+  {
+    "id": "web-command-injection-001",
+    "name": "命令注入",
+    "attack_type": "命令注入",
+    "severity": "critical",
+    "score": 0.97,
+    "tags": ["rce", "command"],
+    "request": {
+      "text_regex": ["(?i)(?:;|\\|\\||&&|`|\\$\\()\\s*(?:cat|whoami|id|uname|curl|wget|powershell|cmd\\.exe|nc|bash|sh)\\b", "(?i)\\b(?:powershell|cmd\\.exe|/bin/sh|/bin/bash)\\b"]
+    }
+  },
+  {
+    "id": "web-path-traversal-001",
+    "name": "路径遍历/敏感文件读取",
+    "attack_type": "路径遍历",
+    "severity": "high",
+    "score": 0.92,
+    "tags": ["lfi", "path-traversal"],
+    "request": {
+      "text_regex": ["(?i)(?:\\.\\./|\\.\\.\\\\|%2e%2e%2f|%252e%252e%252f){1,}", "(?i)(/etc/passwd|/etc/shadow|boot\\.ini|win\\.ini|windows\\\\system32)"]
+    }
+  },
+  {
+    "id": "web-ssrf-001",
+    "name": "SSRF内网访问",
+    "attack_type": "SSRF",
+    "severity": "high",
+    "score": 0.9,
+    "tags": ["ssrf"],
+    "request": {
+      "text_regex": ["(?i)(url|target|dest|redirect|callback|next)\\s*=\\s*https?://(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|169\\.254\\.169\\.254|10\\.|192\\.168\\.|172\\.(?:1[6-9]|2\\d|3[01])\\.)", "(?i)(url|target|dest|redirect|callback|next)\\s*=\\s*file://"]
+    }
+  },
+  {
+    "id": "web-xxe-001",
+    "name": "XXE外部实体",
+    "attack_type": "XXE",
+    "severity": "high",
+    "score": 0.91,
+    "tags": ["xxe", "xml"],
+    "request": {
+      "text_regex": ["(?i)<!DOCTYPE\\s+[^>]+\\[", "(?i)<!ENTITY\\s+", "(?i)SYSTEM\\s+['\"]file://"]
+    }
+  },
+  {
+    "id": "web-ssti-001",
+    "name": "服务端模板注入",
+    "attack_type": "SSTI",
+    "severity": "high",
+    "score": 0.9,
+    "tags": ["ssti"],
+    "request": {
+      "text_regex": ["\\{\\{\\s*7\\s*\\*\\s*7\\s*\\}\\}", "(?i)\\{\\{.*(__class__|config|request|self|subclasses).*\\}\\}"]
+    }
+  },
+  {
+    "id": "web-dangerous-upload-001",
+    "name": "危险文件上传",
+    "attack_type": "危险文件上传",
+    "severity": "high",
+    "score": 0.9,
+    "tags": ["upload", "webshell"],
+    "request": {
+      "text_regex": ["(?i)filename\\s*=\\s*['\"]?[^\\r\\n;]+\\.(?:php|phtml|php5|jsp|jspx|asp|aspx|exe|bat|cmd|ps1|sh)\\b", "(?i)Content-Type:\\s*(?:application/x-php|application/x-msdownload)"]
+    }
+  },
+  {
+    "id": "web-deserialization-001",
+    "name": "反序列化攻击特征",
+    "attack_type": "反序列化",
+    "severity": "high",
+    "score": 0.88,
+    "tags": ["deserialization"],
+    "request": {
+      "text_regex": ["(?i)(rO0AB|aced0005|ysoserial|__wakeup|pickle|ObjectInputStream)"]
+    }
+  },
+  {
+    "id": "web-graphql-introspection-001",
+    "name": "GraphQL Introspection探测",
+    "attack_type": "GraphQL探测",
+    "severity": "medium",
+    "score": 0.72,
+    "tags": ["graphql", "recon"],
+    "request": {
+      "text_regex": ["(?i)__schema", "(?i)IntrospectionQuery", "(?i)__type\\s*\\("]
+    }
+  }
+]
+

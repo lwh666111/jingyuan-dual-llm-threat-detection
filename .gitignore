@@ -40,6 +40,7 @@ models/*.pt
 models/*.joblib
 !models/best_mlp.pth
 !models/preprocessor.joblib
+!models/payload_model_v2.joblib
 
 # RAG artifacts
 llm/rag/rag_knowledge.db

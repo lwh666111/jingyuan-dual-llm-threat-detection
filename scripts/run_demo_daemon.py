@@ -97,6 +97,8 @@ def build_demo_command(args, input_path: Path) -> List[str]:
         cmd.extend(["--model", str(args.model)])
     if args.update_existing_export:
         cmd.append("--update-existing-export")
+    if args.enable_v2_gate:
+        cmd.append("--enable-v2-gate")
     return cmd
 
 
@@ -253,6 +255,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--export-min-score", type=float, default=0.3)
     parser.add_argument("--update-existing-export", action="store_true")
+    parser.add_argument("--enable-v2-gate", action="store_true", help="传给 demo_workflow，启用 v2 检测门控")
 
     args = parser.parse_args()
 

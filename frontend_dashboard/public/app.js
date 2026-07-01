@@ -804,6 +804,7 @@ function renderProQueryView() {
           </select>
           <select id="pro_risk_level">
             <option value="all">全部风险</option>
+            <option value="critical">严重</option>
             <option value="high">高危</option>
             <option value="medium">中危</option>
             <option value="low">低危</option>
@@ -1186,6 +1187,152 @@ async function loadProEventDetail(eventId) {
   renderProEventDetail();
 }
 
+function formatPercentScore(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return `${(num * 100).toFixed(1)}%`;
+}
+
+function formatV2Decision(value) {
+  const map = {
+    raw_only: "原始日志",
+    candidate: "候选事件",
+    attack_event: "攻击事件",
+  };
+  return map[String(value || "")] || value || "-";
+}
+
+function renderEvidenceList(items) {
+  const arr = Array.isArray(items) ? items : [];
+  if (!arr.length) return `<div class="v2-empty">暂无证据</div>`;
+  return `
+    <ul class="v2-evidence-list">
+      ${arr
+        .map((item) => {
+          const text = typeof item === "string" ? item : JSON.stringify(item, null, 2);
+          return `<li>${escapeHtml(text)}</li>`;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderV2DetectionDetail(row) {
+  const v2 = row?.v2_detection;
+  if (!v2) {
+    return `
+      <section class="v2-section">
+        <div class="v2-section-head">
+          <span>新架构证据链</span>
+          <em>当前事件尚未同步到 v2 分层表</em>
+        </div>
+        <div class="v2-empty">旧数据仍可正常查看；新产生的攻击事件会自动写入模型、规则、行为证据。</div>
+      </section>
+    `;
+  }
+  const predictions = Array.isArray(v2.model_predictions) ? v2.model_predictions : [];
+  const pocs = Array.isArray(v2.poc_matches) ? v2.poc_matches : [];
+  const windows = Array.isArray(v2.behavior_windows) ? v2.behavior_windows : [];
+  const raw = v2.raw_http || {};
+  return `
+    <section class="v2-section">
+      <div class="v2-section-head">
+        <span>新架构证据链</span>
+        <em>${escapeHtml(v2.case_id || "-")}</em>
+      </div>
+      <div class="v2-summary-grid">
+        <div class="v2-summary-card">
+          <span>融合判定</span>
+          <strong>${escapeHtml(formatV2Decision(v2.decision))}</strong>
+        </div>
+        <div class="v2-summary-card">
+          <span>融合评分</span>
+          <strong>${escapeHtml(formatPercentScore(v2.final_score))}</strong>
+        </div>
+        <div class="v2-summary-card">
+          <span>攻击类型</span>
+          <strong>${escapeHtml(formatAttackType(v2.attack_type || "-"))}</strong>
+        </div>
+        <div class="v2-summary-card">
+          <span>目标接口</span>
+          <strong>${escapeHtml(v2.target_interface || "-")}</strong>
+        </div>
+      </div>
+
+      <div class="v2-subtitle">Payload 模型预测</div>
+      <div class="v2-chip-row">
+        ${
+          predictions.length
+            ? predictions
+                .map(
+                  (p) => `
+                    <span class="v2-chip">
+                      ${escapeHtml(p.model_name || "payload_model_v2")}
+                      <b>${escapeHtml(formatAttackType(p.label || "-"))}</b>
+                      <i>${escapeHtml(formatPercentScore(p.score))}</i>
+                    </span>
+                  `
+                )
+                .join("")
+            : `<span class="v2-empty">暂无模型预测记录</span>`
+        }
+      </div>
+
+      <div class="v2-subtitle">POC 规则命中</div>
+      <div class="v2-rule-list">
+        ${
+          pocs.length
+            ? pocs
+                .map(
+                  (m) => `
+                    <div class="v2-rule-card">
+                      <div>
+                        <strong>${escapeHtml(m.rule_name || m.rule_id || "-")}</strong>
+                        <span>${escapeHtml(formatAttackType(m.attack_type || "-"))} / ${escapeHtml(formatRiskLevel(m.severity || "-"))}</span>
+                      </div>
+                      <b>${escapeHtml(formatPercentScore(m.score))}</b>
+                      ${renderEvidenceList(m.evidence)}
+                    </div>
+                  `
+                )
+                .join("")
+            : `<div class="v2-empty">未命中明确 POC 规则</div>`
+        }
+      </div>
+
+      <div class="v2-subtitle">行为窗口证据</div>
+      <div class="v2-chip-row">
+        ${
+          windows.length
+            ? windows
+                .map(
+                  (w) => `
+                    <span class="v2-chip v2-chip-wide">
+                      ${escapeHtml(w.behavior_type || "-")}
+                      <b>${escapeHtml(w.source_ip || "-")}</b>
+                      <i>${escapeHtml(formatPercentScore(w.score))}</i>
+                    </span>
+                  `
+                )
+                .join("")
+            : `<span class="v2-empty">暂无聚合行为命中</span>`
+        }
+      </div>
+
+      <div class="v2-subtitle">融合证据摘要</div>
+      ${renderEvidenceList(v2.evidence)}
+
+      <details class="v2-raw-detail">
+        <summary>查看原始请求/响应</summary>
+        <div class="v2-raw-grid">
+          <pre>${escapeHtml(raw.request_text || "")}</pre>
+          <pre>${escapeHtml(raw.response_text || "")}</pre>
+        </div>
+      </details>
+    </section>
+  `;
+}
+
 function renderProEventDetail() {
   const detailEl = document.getElementById("pro_event_detail");
   const hintEl = document.getElementById("pro_detail_hint");
@@ -1214,6 +1361,7 @@ function renderProEventDetail() {
       <div class="kv"><strong>处理状态：</strong>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</div>
       <div class="kv"><strong>响应耗时：</strong>${escapeHtml(String(row.response_ms || 0))} ms</div>
     </div>
+    ${renderV2DetectionDetail(row)}
     <div style="margin-top:8px;" class="kv"><strong>攻击载荷：</strong></div>
     <pre>${escapeHtml(row.attack_payload || "")}</pre>
     <div style="margin-top:8px;" class="kv"><strong>请求日志：</strong></div>
@@ -2804,7 +2952,7 @@ function animateTextNumber(id, value, suffix = "") {
 
 function riskBadge(level) {
   const safe = escapeHtml(formatRiskLevel(level || "-"));
-  if (level === "high") return `<span class="badge badge-high">${safe}</span>`;
+  if (level === "critical" || level === "high") return `<span class="badge badge-high">${safe}</span>`;
   if (level === "medium") return `<span class="badge badge-medium">${safe}</span>`;
   return `<span class="badge badge-low">${safe}</span>`;
 }
@@ -2877,6 +3025,13 @@ function formatAttackType(attackType) {
     "command injection": "命令注入",
     command_injection: "命令注入",
     rce: "远程代码执行",
+    xxe: "XXE外部实体",
+    ssti: "SSTI模板注入",
+    deserialization: "反序列化",
+    "dangerous file upload": "危险文件上传",
+    dangerous_file_upload: "危险文件上传",
+    "graphql introspection": "GraphQL探测",
+    graphql: "GraphQL探测",
   };
   return map[key] || attackType || "-";
 }

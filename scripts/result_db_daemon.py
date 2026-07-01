@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Dict, List
 
 from build_result_db import MySQLConfig, sync_result_to_db
+from sync_detection_v2_db import ensure_mysql as ensure_v2_mysql
+from sync_detection_v2_db import iter_case_dirs as iter_v2_case_dirs
+from sync_detection_v2_db import mysql_connect as v2_mysql_connect
+from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
 
 
 def now_iso() -> str:
@@ -86,6 +90,21 @@ def run_sync(
         db_path=db_path,
         mysql_config=mysql_config,
     )
+    if backend == "mysql":
+        try:
+            conn = v2_mysql_connect(mysql_config)
+            ensure_v2_mysql(conn)
+            v2_totals = {"cases": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
+            for case_dir in iter_v2_case_dirs(result_dir):
+                row_stats = sync_v2_case_mysql(conn, case_dir)
+                if row_stats.get("raw"):
+                    v2_totals["cases"] += 1
+                for key in ("raw", "candidate", "attack", "model", "poc", "behavior"):
+                    v2_totals[key] += int(row_stats.get(key, 0))
+            conn.close()
+            stats["v2_layered_rows"] = v2_totals
+        except Exception as exc:  # noqa: BLE001
+            stats["v2_layered_error"] = str(exc)
     state["last_synced_at"] = now_iso()
     state["last_error"] = ""
     state["last_error_at"] = ""

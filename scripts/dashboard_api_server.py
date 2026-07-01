@@ -39,7 +39,7 @@ ROLE_NORMAL = "normal"
 ROLE_ADMIN = "admin"
 
 PROCESS_STATUS_SET = {"unprocessed", "processing", "done", "ignored"}
-RISK_LEVEL_SET = {"high", "medium", "low"}
+RISK_LEVEL_SET = {"critical", "high", "medium", "low"}
 RAG_SEVERITY_SET = {"low", "medium", "high", "critical"}
 
 TOKEN_TTL_SECONDS = 12 * 3600
@@ -119,8 +119,13 @@ ATTACK_TYPES = [
     "命令注入",
     "路径遍历",
     "文件上传",
+    "危险文件上传",
     "SSRF",
     "RCE",
+    "XXE",
+    "SSTI",
+    "反序列化",
+    "GraphQL探测",
 ]
 
 SOURCE_REGIONS = [
@@ -176,6 +181,216 @@ def normalize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [normalize_row(r) for r in rows]
 
 
+def safe_json_loads(text: Any, default: Any = None) -> Any:
+    if default is None:
+        default = []
+    if text is None:
+        return default
+    if isinstance(text, (dict, list)):
+        return text
+    raw = str(text or "").strip()
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def db_table_exists(cur: Any, table_name: str) -> bool:
+    try:
+        cur.execute("SHOW TABLES LIKE %s", (table_name,))
+        return bool(cur.fetchone())
+    except Exception:
+        return False
+
+
+def event_id_to_v2_candidates(event_id: str) -> Tuple[List[str], List[str]]:
+    event = str(event_id or "").strip()
+    event_ids = [event] if event else []
+    case_ids = [event] if event else []
+    if event.startswith("b."):
+        event_ids.append(event.replace("b.", "EVT", 1))
+    if event.startswith("EVT"):
+        suffix = event[3:]
+        if suffix:
+            case_ids.append(f"b.{suffix}")
+    return list(dict.fromkeys(event_ids)), list(dict.fromkeys(case_ids))
+
+
+def load_v2_detection_detail(cur: Any, event_id: str) -> Optional[Dict[str, Any]]:
+    required_tables = [
+        "detection_candidates",
+        "raw_http_logs",
+        "model_predictions",
+        "poc_matches",
+        "behavior_windows",
+    ]
+    if not any(db_table_exists(cur, t) for t in required_tables):
+        return None
+
+    event_ids, case_ids = event_id_to_v2_candidates(event_id)
+    candidate = None
+    if db_table_exists(cur, "detection_candidates"):
+        for eid in event_ids:
+            cur.execute(
+                """
+                SELECT event_id, case_id, file_id, seq_id, decision, final_score, risk_level,
+                       attack_type, source_ip, target_interface, evidence_json, created_at
+                FROM detection_candidates
+                WHERE event_id=%s
+                LIMIT 1
+                """,
+                (eid,),
+            )
+            candidate = cur.fetchone()
+            if candidate:
+                break
+        if not candidate:
+            for cid in case_ids:
+                cur.execute(
+                    """
+                    SELECT event_id, case_id, file_id, seq_id, decision, final_score, risk_level,
+                           attack_type, source_ip, target_interface, evidence_json, created_at
+                    FROM detection_candidates
+                    WHERE case_id=%s
+                    LIMIT 1
+                    """,
+                    (cid,),
+                )
+                candidate = cur.fetchone()
+                if candidate:
+                    break
+
+    attack_event = None
+    if db_table_exists(cur, "attack_events"):
+        for eid in event_ids + ([str(candidate.get("event_id"))] if candidate else []):
+            if not eid:
+                continue
+            cur.execute(
+                """
+                SELECT event_id, case_id, occurred_at, source_ip, target_interface, attack_type,
+                       risk_level, confidence, status, evidence_json, created_at
+                FROM attack_events
+                WHERE event_id=%s
+                LIMIT 1
+                """,
+                (eid,),
+            )
+            attack_event = cur.fetchone()
+            if attack_event:
+                break
+
+    case_id = ""
+    if candidate:
+        case_id = str(candidate.get("case_id") or "")
+    if not case_id and attack_event:
+        case_id = str(attack_event.get("case_id") or "")
+    if not case_id:
+        for cid in case_ids:
+            if cid.startswith("b."):
+                case_id = cid
+                break
+    if not case_id:
+        return None
+
+    raw_http = None
+    if db_table_exists(cur, "raw_http_logs"):
+        cur.execute(
+            """
+            SELECT case_id, file_id, seq_id, event_time, source_ip, destination_ip, method,
+                   uri, host, status_code, request_text, response_text, created_at
+            FROM raw_http_logs
+            WHERE case_id=%s
+            LIMIT 1
+            """,
+            (case_id,),
+        )
+        raw_http = cur.fetchone()
+
+    model_predictions: List[Dict[str, Any]] = []
+    if db_table_exists(cur, "model_predictions"):
+        cur.execute(
+            """
+            SELECT model_name, label, score, proba_json, created_at
+            FROM model_predictions
+            WHERE case_id=%s
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (case_id,),
+        )
+        model_predictions = normalize_rows(cur.fetchall())
+        for pred in model_predictions:
+            pred["label"] = normalize_attack_type_label(pred.get("label"))
+            pred["proba"] = safe_json_loads(pred.pop("proba_json", None), {})
+
+    poc_matches: List[Dict[str, Any]] = []
+    if db_table_exists(cur, "poc_matches"):
+        cur.execute(
+            """
+            SELECT rule_id, rule_name, attack_type, severity, score, evidence_json, created_at
+            FROM poc_matches
+            WHERE case_id=%s
+            ORDER BY score DESC, id ASC
+            LIMIT 20
+            """,
+            (case_id,),
+        )
+        poc_matches = normalize_rows(cur.fetchall())
+        for match in poc_matches:
+            match["attack_type"] = normalize_attack_type_label(match.get("attack_type"))
+            match["evidence"] = safe_json_loads(match.pop("evidence_json", None), [])
+
+    behavior_windows: List[Dict[str, Any]] = []
+    if db_table_exists(cur, "behavior_windows"):
+        cur.execute(
+            """
+            SELECT source_ip, behavior_type, score, features_json, evidence_json, created_at
+            FROM behavior_windows
+            WHERE case_id=%s
+            ORDER BY score DESC, id ASC
+            LIMIT 10
+            """,
+            (case_id,),
+        )
+        behavior_windows = normalize_rows(cur.fetchall())
+        for win in behavior_windows:
+            win["features"] = safe_json_loads(win.pop("features_json", None), {})
+            win["evidence"] = safe_json_loads(win.pop("evidence_json", None), [])
+
+    evidence: List[Any] = []
+    if candidate:
+        evidence = safe_json_loads(candidate.get("evidence_json"), [])
+    if not evidence and attack_event:
+        evidence = safe_json_loads(attack_event.get("evidence_json"), [])
+
+    item: Dict[str, Any] = {
+        "case_id": case_id,
+        "event_id": str((candidate or attack_event or {}).get("event_id") or event_id),
+        "decision": str((candidate or {}).get("decision") or ("attack_event" if attack_event else "candidate")),
+        "final_score": (candidate or attack_event or {}).get("final_score")
+        if candidate
+        else (attack_event or {}).get("confidence"),
+        "risk_level": (candidate or attack_event or {}).get("risk_level"),
+        "attack_type": normalize_attack_type_label((candidate or attack_event or {}).get("attack_type")),
+        "source_ip": (candidate or attack_event or raw_http or {}).get("source_ip"),
+        "target_interface": (candidate or attack_event or raw_http or {}).get("target_interface") or (raw_http or {}).get("uri"),
+        "evidence": evidence,
+        "candidate": normalize_row(candidate) if candidate else None,
+        "attack_event": normalize_row(attack_event) if attack_event else None,
+        "raw_http": normalize_row(raw_http) if raw_http else None,
+        "model_predictions": model_predictions,
+        "poc_matches": poc_matches,
+        "behavior_windows": behavior_windows,
+    }
+    if item["candidate"]:
+        item["candidate"]["evidence_json"] = None
+    if item["attack_event"]:
+        item["attack_event"]["evidence_json"] = None
+    return item
+
+
 def normalize_attack_type_label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -200,10 +415,20 @@ def normalize_attack_type_label(value: Any) -> str:
         return "端口扫描"
     if any(x in raw for x in ["路径遍历", "璺緞閬嶅巻"]) or "traversal" in t:
         return "路径遍历"
+    if any(x in raw for x in ["危险文件上传", "危險文件上傳", "鍗遍櫓鏂囦欢涓婁紶"]) or "dangerousfileupload" in t:
+        return "危险文件上传"
     if any(x in raw for x in ["文件上传", "鏂囦欢涓婁紶"]) or "upload" in t:
         return "文件上传"
     if any(x in raw for x in ["命令注入", "鍛戒护娉ㄥ叆"]) or "cmd" in t or "commandinject" in t:
         return "命令注入"
+    if "xxe" in t or "外部实体" in raw:
+        return "XXE"
+    if "ssti" in t or "模板注入" in raw:
+        return "SSTI"
+    if "反序列化" in raw or "deserialization" in t:
+        return "反序列化"
+    if "graphql" in t:
+        return "GraphQL探测"
     return "可疑流量"
 
 
@@ -1443,7 +1668,7 @@ def refresh_machine_stats(conn: Any) -> None:
               SELECT
                 target_node,
                 SUM(CASE WHEN DATE(occurred_at)=CURDATE() THEN 1 ELSE 0 END) AS today_cnt,
-                SUM(CASE WHEN DATE(occurred_at)=CURDATE() AND risk_level='high' AND process_status IN ('unprocessed','processing') THEN 1 ELSE 0 END) AS alert_cnt,
+                SUM(CASE WHEN DATE(occurred_at)=CURDATE() AND risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing') THEN 1 ELSE 0 END) AS alert_cnt,
                 MAX(occurred_at) AS last_attack_time
               FROM demo_attack_events
               GROUP BY target_node
@@ -1890,7 +2115,7 @@ def create_app(
                     """
                     SELECT
                       MAX(occurred_at) AS latest_event_time,
-                      SUM(CASE WHEN risk_level='high' AND occurred_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END) AS high_10m
+                      SUM(CASE WHEN risk_level IN ('critical','high') AND occurred_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END) AS high_10m
                     FROM demo_attack_events
                     """
                 )
@@ -1931,7 +2156,7 @@ def create_app(
                     """
                     SELECT event_id, occurred_at, risk_level, attack_type, source_ip, target_node, target_interface
                     FROM demo_attack_events
-                    WHERE risk_level='high'
+                    WHERE risk_level IN ('critical','high')
                     ORDER BY occurred_at DESC
                     LIMIT %s
                     """,
@@ -1950,7 +2175,7 @@ def create_app(
                     """
                     SELECT event_id, occurred_at, attack_type, source_ip, target_node, target_interface
                     FROM demo_attack_events
-                    WHERE risk_level='high' AND acked=0
+                    WHERE risk_level IN ('critical','high') AND acked=0
                     ORDER BY occurred_at DESC
                     LIMIT %s
                     """,
@@ -2198,7 +2423,7 @@ def create_app(
                     """
                     SELECT COUNT(*) AS c
                     FROM demo_attack_events
-                    WHERE risk_level='high' AND process_status IN ('unprocessed','processing')
+                    WHERE risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing')
                     """
                 )
                 high_active = int((cur.fetchone() or {}).get("c", 0))
@@ -2467,6 +2692,8 @@ def create_app(
                 str(item.get("source_ip") or ""),
                 str(item.get("source_region") or ""),
             )
+            with conn.cursor() as cur:
+                item["v2_detection"] = load_v2_detection_detail(cur, event_id)
         return jsonify(item)
 
     @app.route("/api/v2/pro/events/<event_id>/block-ip", methods=["POST"])
@@ -2795,7 +3022,7 @@ def create_app(
                     """
                     SELECT COUNT(*) AS total_7d,
                            SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked_7d,
-                           SUM(CASE WHEN risk_level='high' THEN 1 ELSE 0 END) AS high_7d
+                           SUM(CASE WHEN risk_level IN ('critical','high') THEN 1 ELSE 0 END) AS high_7d
                     FROM demo_attack_events
                     WHERE target_node=%s AND occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
                     """,
@@ -3391,7 +3618,7 @@ def create_app(
                     SELECT DATE(occurred_at) AS day,
                            COUNT(*) AS attack_total,
                            SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked_total,
-                           SUM(CASE WHEN risk_level='high' THEN 1 ELSE 0 END) AS high_total
+                           SUM(CASE WHEN risk_level IN ('critical','high') THEN 1 ELSE 0 END) AS high_total
                     FROM demo_attack_events
                     WHERE occurred_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
                     GROUP BY DATE(occurred_at)
@@ -3564,6 +3791,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 

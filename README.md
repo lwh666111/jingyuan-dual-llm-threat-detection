@@ -6,16 +6,17 @@
 
 - 监听指定网卡和端口，抓取完整 HTTP 请求/响应
 - 生成标准化批次文件（`input/1.1.n.txt`）
-- 自动化检测与可疑事件导出（`result/b.n`）
+- Detection V2 先区分原始日志 / 候选事件 / 攻击事件，再导出高置信攻击（`result/b.n`）
 - Ollama 大模型研判 + SQLite FTS5 RAG 检索增强
-- MySQL 持久化（`requests` / `responses` / `analyses` 三表）
+- MySQL 持久化（兼容旧三表，并新增 raw/candidate/event/model/rule/behavior 分层表）
 - Flask API（3049）+ Node 前端大屏（1145）
 
-## 最新发布（2026-06-04）
+## 最新发布（2026-07-01）
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
 - 最新使用教程：`docs/USAGE.md`
+- Detection V2 实验与落地记录：`docs/DETECTION_V2_PROGRESS_2026-07-01.md`
 - 最新安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
 - 安装包校验：安装后可在发布机器执行 `Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256` 查看
 
@@ -36,6 +37,32 @@
 - 管理员系统配置支持模型/网卡/端口/分组数量/主页背景图配置
 - 高危异常流量触发机械音提醒：“注意异常流量”
 - 内置新训练的 Web 攻击检测模型，降低普通登录误报，增强 SQL/XSS/命令注入/路径遍历/危险上传识别
+
+## Detection V2 检测架构
+
+新版本不再把“访问过某个路径”直接等价为攻击事件，而是采用分层判定：
+
+```text
+原始 HTTP 请求/响应
+ -> Payload 模型
+ -> POC 规则引擎
+ -> 行为窗口分析
+ -> 融合评分
+ -> raw_only / candidate / attack_event
+```
+
+- `raw_only`：仅作为原始日志保留，不进入大屏告警。
+- `candidate`：低/中置信候选，可后续进入复核队列。
+- `attack_event`：高置信攻击事件，进入 result、LLM、MySQL 和大屏。
+
+当前已内置：
+
+- `models/payload_model_v2.joblib`
+- `rules/poc_rules.json`
+- `scripts/security_detection_v2.py`
+- `scripts/sync_detection_v2_db.py`
+
+详情页已接入 v2 证据链，可查看融合评分、Payload 模型置信度、POC 命中、行为窗口和原始请求/响应。
 
 ## Project Layout
 

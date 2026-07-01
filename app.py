@@ -395,6 +395,8 @@ def build_daemon_cmd(args, script_dir: Path, input_dir: Path, output_dir: Path) 
         str(args.export_min_score),
     ]
 
+    if args.enable_v2_gate:
+        cmd.append("--enable-v2-gate")
     if args.skip_existing_at_start:
         cmd.append("--skip-existing-at-start")
     if args.update_existing_export:
@@ -620,6 +622,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     detect_group.add_argument("--label-threshold", type=float, default=0.46, help="Model label threshold")
     detect_group.add_argument("--top-k", type=int, default=3, help="Top-k candidates per file")
     detect_group.add_argument("--export-min-score", type=float, default=0.3, help="Min raw_score exported to result")
+    detect_group.add_argument(
+        "--enable-v2-gate",
+        dest="enable_v2_gate",
+        action="store_true",
+        default=True,
+        help="Enable v2 payload/POC/behavior fusion gate before exporting result cases",
+    )
+    detect_group.add_argument(
+        "--disable-v2-gate",
+        dest="enable_v2_gate",
+        action="store_false",
+        help="Disable v2 gate and use legacy export behavior",
+    )
 
     behavior_group = parser.add_argument_group("Export behavior")
     behavior_group.add_argument(
@@ -890,6 +905,8 @@ def main() -> None:
         "capture_http_request_batches.py",
         "run_demo_daemon.py",
         "demo_workflow.py",
+        "security_detection_v2.py",
+        "export_demo_candidates_to_result.py",
     ]
     if run_llm:
         required_scripts.extend(["llm_analyzer_daemon.py", "build_rag_db.py"])

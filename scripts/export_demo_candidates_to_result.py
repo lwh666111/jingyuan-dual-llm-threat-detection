@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from web_attack_rules import apply_rule_signal, detect_request_attack, is_plain_auth_attempt
+from security_detection_v2 import DetectionEngineV2
 
 DEFAULT_LLM_TASK = (
     "\u8bf7\u5224\u65ad\u8be5\u8bf7\u6c42\u662f\u5426\u4e3a\u653b\u51fb\u884c\u4e3a\uff0c"
@@ -116,6 +117,13 @@ def main():
         help="Extra export threshold for one-off ordinary login attempts without attack signals.",
     )
     parser.add_argument("--update-existing", action="store_true", help="Overwrite an existing case with the same file_id and seq_id.")
+    parser.add_argument(
+        "--enable-v2-gate",
+        action="store_true",
+        help="Use v2 payload/POC/behavior fusion gate before exporting to result.",
+    )
+    parser.add_argument("--v2-model-path", default="models/payload_model_v2.joblib", help="v2 payload model path.")
+    parser.add_argument("--v2-rules-path", default="rules/poc_rules.json", help="v2 POC rules path.")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -131,15 +139,54 @@ def main():
     skipped = 0
     filtered_low_score = 0
     filtered_plain_auth = 0
+    filtered_v2_raw = 0
+    v2_candidate_count = 0
+    v2_attack_event_count = 0
     updated_existing = 0
     updated_case_ids = []
     new_case_ids = []
     next_case_num = max_case_num + 1
+    v2_engine = None
+    if args.enable_v2_gate:
+        project_root = Path(__file__).resolve().parent.parent
+        v2_engine = DetectionEngineV2(
+            model_path=(project_root / args.v2_model_path).resolve(),
+            rules_path=(project_root / args.v2_rules_path).resolve(),
+        )
 
     for cand in candidates:
         signal = detect_request_attack(cand)
         if signal:
             cand = apply_rule_signal(cand, signal)
+
+        v2_detection = None
+        if v2_engine is not None:
+            v2_detection = v2_engine.detect(cand)
+            fusion = v2_detection.get("fusion") or {}
+            decision = str(fusion.get("decision") or "")
+            if decision == "raw_only":
+                filtered_v2_raw += 1
+                continue
+            if decision == "candidate":
+                v2_candidate_count += 1
+            if decision == "attack_event":
+                v2_attack_event_count += 1
+            cand = dict(cand)
+            cand["v2_decision"] = decision
+            cand["v2_final_score"] = fusion.get("final_score")
+            cand["v2_risk_level"] = fusion.get("risk_level")
+            cand["v2_payload_label"] = fusion.get("payload_label")
+            cand["v2_payload_score"] = fusion.get("payload_score")
+            cand["v2_behavior_type"] = fusion.get("behavior_type")
+            cand["v2_behavior_score"] = fusion.get("behavior_score")
+            cand["v2_poc_score"] = fusion.get("poc_score")
+            cand["v2_evidence"] = fusion.get("evidence") or []
+            cand["v2_poc_matches"] = fusion.get("poc_matches") or []
+            if fusion.get("attack_type"):
+                cand["attack_type"] = fusion.get("attack_type")
+            if fusion.get("final_score") is not None:
+                cand["raw_score"] = max(get_candidate_score(cand), float(fusion.get("final_score") or 0.0))
+            cand["detection_source"] = "v2_fusion"
 
         score_value = get_candidate_score(cand)
         if not signal and is_plain_auth_attempt(cand) and score_value < args.plain_auth_min_score:
@@ -197,6 +244,16 @@ def main():
             "detection_source": cand.get("detection_source") or "model",
             "rule_score": cand.get("rule_score"),
             "rule_reason": cand.get("rule_reason"),
+            "v2_decision": cand.get("v2_decision"),
+            "v2_final_score": cand.get("v2_final_score"),
+            "v2_risk_level": cand.get("v2_risk_level"),
+            "v2_payload_label": cand.get("v2_payload_label"),
+            "v2_payload_score": cand.get("v2_payload_score"),
+            "v2_behavior_type": cand.get("v2_behavior_type"),
+            "v2_behavior_score": cand.get("v2_behavior_score"),
+            "v2_poc_score": cand.get("v2_poc_score"),
+            "v2_evidence": cand.get("v2_evidence"),
+            "v2_poc_matches": cand.get("v2_poc_matches"),
             "source_ip": cand.get("source_ip"),
             "destination_ip": cand.get("destination_ip"),
             "source_port": cand.get("source_port"),
@@ -230,6 +287,9 @@ def main():
             "label": cand.get("label"),
             "attack_type": cand.get("attack_type") or infer_attack_type(cand),
             "detection_source": cand.get("detection_source") or "model",
+            "v2_decision": cand.get("v2_decision"),
+            "v2_final_score": cand.get("v2_final_score"),
+            "v2_risk_level": cand.get("v2_risk_level"),
             "status": "pending",
             "case_dir": str(case_dir.resolve()).replace("\\", "/"),
         }
@@ -258,6 +318,9 @@ def main():
     print("input candidates:", len(candidates))
     print("low-score filtered:", filtered_low_score)
     print("plain auth false-positive guard filtered:", filtered_plain_auth)
+    print("v2 raw-only filtered:", filtered_v2_raw)
+    print("v2 candidate exported:", v2_candidate_count)
+    print("v2 attack-event exported:", v2_attack_event_count)
     print("existing/skipped:", skipped)
     print("new exported:", len(exported))
     print("updated existing:", updated_existing)

@@ -172,6 +172,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=3, help="demo candidates 输出条数")
     parser.add_argument("--export-min-score", type=float, default=0.3, help="导出到 result 的最低 raw_score 阈值")
     parser.add_argument("--update-existing-export", action="store_true", help="导出到 result 时若已存在则覆盖更新")
+    parser.add_argument("--enable-v2-gate", action="store_true", help="启用 v2 Payload/POC/行为融合门控")
     args = parser.parse_args()
 
     input_txt = Path(args.input_txt).resolve()
@@ -311,6 +312,8 @@ def main():
     ]
     if args.update_existing_export:
         export_cmd.append("--update-existing")
+    if args.enable_v2_gate:
+        export_cmd.append("--enable-v2-gate")
 
     run_command(export_cmd)
     require_file(manifest_jsonl, "result manifest")
