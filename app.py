@@ -494,6 +494,33 @@ def build_db_cmd(args, script_dir: Path) -> List[str]:
     return cmd
 
 
+def build_ssh_monitor_cmd(args, script_dir: Path) -> List[str]:
+    return [
+        args.python_exe,
+        str(script_dir / "ssh_bruteforce_monitor.py"),
+        "--mysql-host",
+        args.mysql_host,
+        "--mysql-port",
+        str(args.mysql_port),
+        "--mysql-user",
+        args.mysql_user,
+        "--mysql-password",
+        args.mysql_password,
+        "--mysql-database",
+        args.mysql_database,
+        "--window-minutes",
+        str(args.ssh_monitor_window_minutes),
+        "--bucket-minutes",
+        str(args.ssh_monitor_bucket_minutes),
+        "--threshold",
+        str(args.ssh_bruteforce_threshold),
+        "--poll-seconds",
+        str(args.ssh_monitor_poll_seconds),
+        "--log-file",
+        args.ssh_monitor_log_file,
+    ]
+
+
 def build_api_cmd(args, script_dir: Path) -> List[str]:
     cmd = [
         args.python_exe,
@@ -729,6 +756,26 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     db_group.add_argument("--db-state-file", default="output/result_db_daemon_state.json", help="DB daemon state file")
     db_group.add_argument("--db-log-file", default="output/result_db_daemon.log", help="DB daemon log file")
 
+    ssh_group = parser.add_argument_group("SSH brute-force monitor")
+    ssh_group.add_argument(
+        "--enable-ssh-monitor",
+        dest="enable_ssh_monitor",
+        action="store_true",
+        help="Enable Windows SSH/login failure aggregation monitor",
+    )
+    ssh_group.add_argument(
+        "--no-ssh-monitor",
+        dest="enable_ssh_monitor",
+        action="store_false",
+        help="Disable SSH brute-force monitor",
+    )
+    parser.set_defaults(enable_ssh_monitor=True)
+    ssh_group.add_argument("--ssh-monitor-window-minutes", type=int, default=10, help="SSH failure lookback window")
+    ssh_group.add_argument("--ssh-monitor-bucket-minutes", type=int, default=10, help="SSH aggregation bucket size")
+    ssh_group.add_argument("--ssh-bruteforce-threshold", type=int, default=5, help="Failed SSH logins per bucket before reporting")
+    ssh_group.add_argument("--ssh-monitor-poll-seconds", type=int, default=20, help="SSH monitor polling interval")
+    ssh_group.add_argument("--ssh-monitor-log-file", default="output/ssh_bruteforce_monitor.log", help="SSH monitor log file")
+
     api_group = parser.add_argument_group("API service")
     api_group.add_argument(
         "--enable-api",
@@ -851,6 +898,7 @@ def main() -> None:
     run_daemon = not args.only_capture
     run_llm = args.enable_llm and not args.only_capture
     run_db = args.enable_db and not args.only_capture
+    run_ssh_monitor = args.enable_ssh_monitor and run_db
     run_api = args.enable_api and not args.only_capture
     run_dashboard = args.enable_dashboard and not args.only_capture
 
@@ -914,6 +962,8 @@ def main() -> None:
         required_scripts.extend(["llm_analyzer_daemon.py", "build_rag_db.py"])
     if run_db:
         required_scripts.extend(["result_db_daemon.py", "build_result_db.py", "sync_raw_http_logs.py"])
+    if run_ssh_monitor:
+        required_scripts.append("ssh_bruteforce_monitor.py")
     if run_api:
         required_scripts.append("dashboard_api_server.py")
     ensure_scripts(scripts_dir, required_scripts)
@@ -934,6 +984,8 @@ def main() -> None:
     llm_stderr = runtime_dir / "llm_stderr.log"
     db_stdout = runtime_dir / "db_stdout.log"
     db_stderr = runtime_dir / "db_stderr.log"
+    ssh_monitor_stdout = runtime_dir / "ssh_monitor_stdout.log"
+    ssh_monitor_stderr = runtime_dir / "ssh_monitor_stderr.log"
     api_stdout = runtime_dir / "api_stdout.log"
     api_stderr = runtime_dir / "api_stderr.log"
     dashboard_stdout = runtime_dir / "dashboard_stdout.log"
@@ -954,6 +1006,7 @@ def main() -> None:
     daemon_cmd = build_daemon_cmd(args, scripts_dir, input_dir, output_dir) if run_daemon else []
     llm_cmd = build_llm_cmd(args, scripts_dir, llm_model=llm_runtime_cfg.get("model")) if run_llm else []
     db_cmd = build_db_cmd(args, scripts_dir) if run_db else []
+    ssh_monitor_cmd = build_ssh_monitor_cmd(args, scripts_dir) if run_ssh_monitor else []
     api_cmd = build_api_cmd(args, scripts_dir) if run_api else []
     dashboard_cmd = build_dashboard_cmd(args, dashboard_server) if run_dashboard else []
 
@@ -961,7 +1014,7 @@ def main() -> None:
     log(f"project_root={project_root}", app_log)
     log(f"scripts_dir={scripts_dir}", app_log)
     log(
-        f"mode capture={run_capture} daemon={run_daemon} llm={run_llm} db={run_db} api={run_api} dashboard={run_dashboard}",
+        f"mode capture={run_capture} daemon={run_daemon} llm={run_llm} db={run_db} ssh_monitor={run_ssh_monitor} api={run_api} dashboard={run_dashboard}",
         app_log,
     )
     if run_capture:
@@ -1003,15 +1056,17 @@ def main() -> None:
         )
     if run_db:
         log("db      cmd: " + " ".join(db_cmd), app_log)
+    if run_ssh_monitor:
+        log("sshmon  cmd: " + " ".join(ssh_monitor_cmd), app_log)
     if run_api:
         log("api     cmd: " + " ".join(api_cmd), app_log)
     if run_dashboard:
         log("dashboard cmd: " + " ".join(dashboard_cmd), app_log)
         log(f"dashboard api base: {dashboard_api_base}", app_log)
 
-    capture_proc = daemon_proc = llm_proc = db_proc = api_proc = dashboard_proc = None
+    capture_proc = daemon_proc = llm_proc = db_proc = ssh_monitor_proc = api_proc = dashboard_proc = None
     capture_out_f = capture_err_f = daemon_out_f = daemon_err_f = llm_out_f = llm_err_f = None
-    db_out_f = db_err_f = api_out_f = api_err_f = dashboard_out_f = dashboard_err_f = None
+    db_out_f = db_err_f = ssh_monitor_out_f = ssh_monitor_err_f = api_out_f = api_err_f = dashboard_out_f = dashboard_err_f = None
     dashboard_env = dict()
     if run_dashboard:
         dashboard_env = dict(os.environ)
@@ -1076,6 +1131,20 @@ def main() -> None:
             )
             log(f"db      started pid={db_proc.pid}", app_log)
 
+        if run_ssh_monitor:
+            ssh_monitor_out_f = ssh_monitor_stdout.open("a", encoding="utf-8")
+            ssh_monitor_err_f = ssh_monitor_stderr.open("a", encoding="utf-8")
+            ssh_monitor_proc = subprocess.Popen(
+                ssh_monitor_cmd,
+                cwd=str(project_root),
+                stdout=ssh_monitor_out_f,
+                stderr=ssh_monitor_err_f,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            log(f"sshmon  started pid={ssh_monitor_proc.pid}", app_log)
+
         if run_api:
             api_out_f = api_stdout.open("a", encoding="utf-8")
             api_err_f = api_stderr.open("a", encoding="utf-8")
@@ -1116,6 +1185,7 @@ def main() -> None:
                 "db": run_db,
                 "api": run_api,
                 "dashboard": run_dashboard,
+                "ssh_monitor": run_ssh_monitor,
             },
             "capture": {
                 "pid": capture_proc.pid if capture_proc else None,
@@ -1146,6 +1216,12 @@ def main() -> None:
                 "cmd": db_cmd,
                 "stdout": str(db_stdout),
                 "stderr": str(db_stderr),
+            },
+            "ssh_monitor": {
+                "pid": ssh_monitor_proc.pid if ssh_monitor_proc else None,
+                "cmd": ssh_monitor_cmd,
+                "stdout": str(ssh_monitor_stdout),
+                "stderr": str(ssh_monitor_stderr),
             },
             "api": {
                 "pid": api_proc.pid if api_proc else None,
@@ -1184,6 +1260,7 @@ def main() -> None:
             dmn_rc = daemon_proc.poll() if daemon_proc else None
             llm_rc = llm_proc.poll() if llm_proc else None
             db_rc = db_proc.poll() if db_proc else None
+            ssh_monitor_rc = ssh_monitor_proc.poll() if ssh_monitor_proc else None
             api_rc = api_proc.poll() if api_proc else None
             dashboard_rc = dashboard_proc.poll() if dashboard_proc else None
 
@@ -1191,6 +1268,7 @@ def main() -> None:
             dmn_alive = daemon_proc is not None and dmn_rc is None
             llm_alive = llm_proc is not None and llm_rc is None
             db_alive = db_proc is not None and db_rc is None
+            ssh_monitor_alive = ssh_monitor_proc is not None and ssh_monitor_rc is None
             api_alive = api_proc is not None and api_rc is None
             dashboard_alive = dashboard_proc is not None and dashboard_rc is None
 
@@ -1348,6 +1426,8 @@ def main() -> None:
                     terminate_process(llm_proc, "llm", app_log)
                 if db_proc:
                     terminate_process(db_proc, "db", app_log)
+                if ssh_monitor_proc:
+                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
                 if api_proc:
                     terminate_process(api_proc, "api", app_log)
                 if dashboard_proc:
@@ -1362,6 +1442,8 @@ def main() -> None:
                     terminate_process(daemon_proc, "daemon", app_log)
                 if db_proc:
                     terminate_process(db_proc, "db", app_log)
+                if ssh_monitor_proc:
+                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
                 if api_proc:
                     terminate_process(api_proc, "api", app_log)
                 if dashboard_proc:
@@ -1376,11 +1458,29 @@ def main() -> None:
                     terminate_process(daemon_proc, "daemon", app_log)
                 if llm_proc:
                     terminate_process(llm_proc, "llm", app_log)
+                if ssh_monitor_proc:
+                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
                 if api_proc:
                     terminate_process(api_proc, "api", app_log)
                 if dashboard_proc:
                     terminate_process(dashboard_proc, "dashboard", app_log)
                 raise SystemExit(db_rc)
+
+            if run_ssh_monitor and ssh_monitor_proc and ssh_monitor_rc is not None:
+                log(f"sshmon exited rc={ssh_monitor_rc}", app_log)
+                if capture_proc:
+                    terminate_process(capture_proc, "capture", app_log)
+                if daemon_proc:
+                    terminate_process(daemon_proc, "daemon", app_log)
+                if llm_proc:
+                    terminate_process(llm_proc, "llm", app_log)
+                if db_proc:
+                    terminate_process(db_proc, "db", app_log)
+                if api_proc:
+                    terminate_process(api_proc, "api", app_log)
+                if dashboard_proc:
+                    terminate_process(dashboard_proc, "dashboard", app_log)
+                raise SystemExit(ssh_monitor_rc)
 
             if run_api and api_proc and api_rc is not None:
                 log(f"api exited rc={api_rc}", app_log)
@@ -1392,6 +1492,8 @@ def main() -> None:
                     terminate_process(llm_proc, "llm", app_log)
                 if db_proc:
                     terminate_process(db_proc, "db", app_log)
+                if ssh_monitor_proc:
+                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
                 if dashboard_proc:
                     terminate_process(dashboard_proc, "dashboard", app_log)
                 raise SystemExit(api_rc)
@@ -1406,11 +1508,13 @@ def main() -> None:
                     terminate_process(llm_proc, "llm", app_log)
                 if db_proc:
                     terminate_process(db_proc, "db", app_log)
+                if ssh_monitor_proc:
+                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
                 if api_proc:
                     terminate_process(api_proc, "api", app_log)
                 raise SystemExit(dashboard_rc)
 
-            if not cap_alive and not dmn_alive and not llm_alive and not db_alive and not api_alive and not dashboard_alive:
+            if not cap_alive and not dmn_alive and not llm_alive and not db_alive and not ssh_monitor_alive and not api_alive and not dashboard_alive:
                 break
 
             time.sleep(1)
@@ -1422,6 +1526,7 @@ def main() -> None:
         terminate_process(daemon_proc, "daemon", app_log)
         terminate_process(llm_proc, "llm", app_log)
         terminate_process(db_proc, "db", app_log)
+        terminate_process(ssh_monitor_proc, "sshmon", app_log)
         terminate_process(api_proc, "api", app_log)
         terminate_process(dashboard_proc, "dashboard", app_log)
 
@@ -1441,6 +1546,10 @@ def main() -> None:
             db_out_f.close()
         if db_err_f:
             db_err_f.close()
+        if ssh_monitor_out_f:
+            ssh_monitor_out_f.close()
+        if ssh_monitor_err_f:
+            ssh_monitor_err_f.close()
         if api_out_f:
             api_out_f.close()
         if api_err_f:

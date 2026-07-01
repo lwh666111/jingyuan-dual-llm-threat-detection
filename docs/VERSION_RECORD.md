@@ -5,7 +5,9 @@
 - 日期：2026-07-01
 - 分支：`main`
 - 说明：Detection V2 重构验证版。完成 raw 全量入库、候选事件复核队列、行为窗口模型、大屏同步桥和正常登录误报修复。
+- 本次补充：RAG 知识库支持点击查看详情与在线编辑保存；HTTP 目录扫描、路径探测、高频请求、HTTP 爆破改为窗口聚合上报，避免大字典扫描刷屏；新增 SSH 爆破监控进程，读取 Windows 失败登录事件并生成 `SSH爆破` 告警。
 - 验证：Adversarial Accuracy/Macro F1 `1.0000/1.0000`；服务器真实可标注样本 Accuracy/Macro F1 `0.9982/0.9868`；本地 MySQL/API/前端浏览器烟测通过。
+- 新增验证：60 条目录扫描请求聚合为 1 个上报 ID；SSH 日志来源 IP 解析 smoke test 通过；服务器同步后 `py_compile` 通过。
 - 安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
 - 安装包大小/SHA256：以当前 `dist` 目录实际文件为准，可执行：
 

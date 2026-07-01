@@ -146,6 +146,10 @@
 - `GET /api/v2/rag/docs?page=1&page_size=20&q=&attack_type=`
   - 鉴权：`admin`
   - 说明：分页检索 RAG 文档
+- `GET /api/v2/rag/docs/{doc_id}`
+  - 鉴权：`admin`
+  - 说明：读取单条 RAG 文档完整详情，前端点击列表行后调用
+  - 返回字段：`doc_id`, `title`, `tags`, `attack_type`, `content`, `evidence`, `mitigation`, `severity`, `source`
 - `POST /api/v2/rag/docs`
   - 鉴权：`admin`
   - body（示例）：
@@ -162,6 +166,13 @@
 }
 ```
 
+- `PUT /api/v2/rag/docs/{doc_id}`
+  - 鉴权：`admin`
+  - 说明：更新指定 RAG 文档
+  - body：同新增接口，`title` 与 `content` 必填
+- `POST /api/v2/rag/docs/{doc_id}/update`
+  - 鉴权：`admin`
+  - 说明：更新指定 RAG 文档的兼容接口，前端默认使用该接口，避免部分代理/旧环境拦截 `PUT`
 - `POST /api/v2/rag/docs/{doc_id}/delete`
   - 鉴权：`admin`
   - 说明：删除指定文档
@@ -243,6 +254,20 @@
 - `POST /api/v2/pro/candidates/{event_id}/ignore`
   - 鉴权：`admin`
   - 说明：将候选事件忽略为 `raw_only`，同时删除对应攻击事件记录，仅保留原始日志。
+
+### 4.4.2 行为聚合与 SSH 爆破说明
+
+- HTTP 目录扫描、路径探测、高频请求、HTTP 爆破等行为型攻击会按“来源 IP + 攻击类型 + 10 分钟时间桶”聚合。
+- 聚合事件仍写入 `detection_candidates`、`attack_events` 与兼容大屏表 `demo_attack_events`，前端无需额外接口即可展示。
+- SSH 爆破由 `scripts/ssh_bruteforce_monitor.py` 常驻监控 Windows 事件日志后写入同一套事件表。
+- 默认阈值：同一来源 IP 在 10 分钟窗口内 SSH 登录失败达到 `5` 次，生成 `SSH爆破` 事件。
+- 相关启动参数：
+  - `--enable-ssh-monitor`
+  - `--no-ssh-monitor`
+  - `--ssh-monitor-window-minutes`
+  - `--ssh-monitor-bucket-minutes`
+  - `--ssh-bruteforce-threshold`
+  - `--ssh-monitor-poll-seconds`
 ### 4.5 管理员（v2）
 
 - `GET /api/v2/admin/summary`

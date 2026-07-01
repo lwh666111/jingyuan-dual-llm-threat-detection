@@ -1096,6 +1096,22 @@ def rag_list_docs(rag_db_path: str, q: str, attack_type: str, page: int, page_si
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
+def rag_get_doc(rag_db_path: str, doc_id: str) -> Optional[Dict[str, Any]]:
+    with closing(get_rag_conn(rag_db_path)) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT rowid, doc_id, title, tags, attack_type, content, evidence, mitigation, severity, source
+            FROM rag_docs
+            WHERE doc_id=?
+            LIMIT 1
+            """,
+            (doc_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
 def rag_delete_doc(rag_db_path: str, doc_id: str) -> int:
     with closing(get_rag_conn(rag_db_path)) as conn:
         cur = conn.cursor()
@@ -2263,6 +2279,62 @@ def create_app(
                 f"title={title[:60]}",
             )
         return jsonify({"ok": True, "doc_id": doc_id})
+
+    @app.route("/api/v2/rag/docs/<doc_id>", methods=["GET"])
+    @app.route("/api/v2/rag/docs/<doc_id>/", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag_docs_detail(doc_id: str):
+        row = rag_get_doc(app.config["RAG_DB_PATH"], doc_id=doc_id)
+        if not row:
+            return jsonify({"error": "doc_not_found"}), 404
+        return jsonify({"item": row})
+
+    @app.route("/api/v2/rag/docs/<doc_id>", methods=["PUT"])
+    @app.route("/api/v2/rag/docs/<doc_id>/update", methods=["POST"])
+    @app.route("/api/v2/rag/docs/<doc_id>/update/", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag_docs_update(doc_id: str):
+        old = rag_get_doc(app.config["RAG_DB_PATH"], doc_id=doc_id)
+        if not old:
+            return jsonify({"error": "doc_not_found"}), 404
+
+        body = request.get_json(silent=True) or {}
+        title = str(body.get("title", old.get("title", ""))).strip()
+        tags = str(body.get("tags", old.get("tags", ""))).strip()
+        attack_type = str(body.get("attack_type", old.get("attack_type", ""))).strip()
+        content = str(body.get("content", old.get("content", ""))).strip()
+        evidence = str(body.get("evidence", old.get("evidence", ""))).strip()
+        mitigation = str(body.get("mitigation", old.get("mitigation", ""))).strip()
+        severity = str(body.get("severity", old.get("severity", "medium"))).strip().lower() or "medium"
+        source = str(body.get("source", old.get("source", ""))).strip() or old.get("source", "")
+
+        if not title or not content:
+            return jsonify({"error": "title_and_content_required"}), 400
+        if severity not in RAG_SEVERITY_SET:
+            return jsonify({"error": "invalid_severity"}), 400
+
+        row = {
+            "doc_id": doc_id,
+            "title": title,
+            "tags": tags,
+            "attack_type": attack_type,
+            "content": content,
+            "evidence": evidence,
+            "mitigation": mitigation,
+            "severity": severity,
+            "source": source,
+        }
+        rag_upsert_doc(app.config["RAG_DB_PATH"], row)
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(
+                conn,
+                g.session["username"],
+                g.session["role"],
+                "rag_update_doc",
+                doc_id,
+                f"title={title[:60]}",
+            )
+        return jsonify({"ok": True, "doc_id": doc_id, "item": row})
 
     @app.route("/api/v2/rag/docs/<doc_id>/delete", methods=["POST"])
     @require_roles(ROLE_ADMIN)

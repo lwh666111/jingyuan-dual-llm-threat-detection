@@ -155,6 +155,43 @@ python scripts/train_behavior_model_v2.py
 
 为避免行为模型过度积极，当前加入了上下文门控：窗口内请求量和异常证据不足时，行为模型只记录特征，不参与提升告警。
 
+### 5.1 行为型攻击聚合上报
+
+目录扫描、路径探测、高频请求和爆破登录通常不是单包攻击，而是同一来源 IP 在短时间内产生大量相似异常行为。如果逐条请求上报，几万条字典扫描会把大屏、详情列表和 LLM 队列全部刷爆。
+
+当前处理策略：
+
+- 单条 HTTP 请求仍会进入 `raw_http_logs`，保证原始证据不丢失。
+- 行为窗口达到攻击事件条件后，不再按每个请求生成独立告警。
+- 聚合键：`来源 IP + 攻击类型 + 10 分钟时间桶`。
+- 聚合后的事件 ID 以 `AGG` 开头，重复命中时更新同一条 `detection_candidates`、`attack_events` 和 `demo_attack_events`。
+- 聚合证据中记录窗口范围、请求总数、不同路径数、404 次数、登录失败次数和代表性证据。
+
+验证结果：
+
+- 模拟 60 条目录扫描请求，其中 48 条达到 `attack_event` 条件。
+- 聚合后最终只生成 1 个上报事件 ID。
+- 这解决了“大字典扫描产生大量疑似流量”的展示与处置问题。
+
+### 5.2 SSH 爆破监控
+
+SSH 爆破不是 HTTP 请求，无法通过 tshark HTTP 抓包链路识别。因此新增独立监控进程：
+
+- 脚本：`scripts/ssh_bruteforce_monitor.py`
+- 默认随 `app.py` 启动。
+- 读取 Windows `Security` 日志中的 `4625` 登录失败事件。
+- 同时读取 `OpenSSH/Operational` 日志中的 OpenSSH 认证失败事件。
+- 按来源 IP 与 10 分钟窗口聚合，默认失败次数达到 5 次生成 `SSH爆破`。
+- 事件写入同一套 MySQL 表：`detection_candidates`、`attack_events`、`behavior_windows`、`demo_attack_events`。
+
+启动参数：
+
+```powershell
+python app.py --mysql-port 3307
+python app.py --mysql-port 3307 --no-ssh-monitor
+python app.py --mysql-port 3307 --ssh-bruteforce-threshold 10
+```
+
 ## 6. 融合评分
 
 融合评分来源：

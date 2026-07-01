@@ -716,8 +716,30 @@ tbody tr:hover {
   transition: background-color 0.16s var(--ease-out);
 }
 
+tbody tr.clickable-row {
+  cursor: pointer;
+}
+
+tbody tr.selected-row {
+  background:
+    linear-gradient(90deg, rgba(70, 166, 255, 0.26), rgba(70, 166, 255, 0.08)),
+    rgba(25, 75, 126, 0.22);
+  box-shadow: inset 3px 0 0 rgba(112, 202, 255, 0.9);
+}
+
 tbody tr.active {
   background: rgba(44, 167, 255, 0.18);
+}
+
+.compact-actions {
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 0;
+}
+
+.rag-detail-panel {
+  margin-top: 14px;
+  animation: sheetInRight 0.42s cubic-bezier(0.2, 0.85, 0.2, 1) both;
 }
 
 .badge {

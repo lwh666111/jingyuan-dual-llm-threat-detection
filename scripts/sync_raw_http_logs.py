@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -16,6 +17,17 @@ from build_result_db import MySQLConfig
 from extract_old_model_features_from_txt import build_request_text, parse_records, read_text_file
 from security_detection_v2 import DetectionEngineV2
 from sync_detection_v2_db import ensure_mysql, mysql_connect, upsert_mysql
+
+BEHAVIOR_AGG_BUCKET_MINUTES = 10
+AGGREGATED_BEHAVIOR_KEYWORDS = (
+    "扫描",
+    "探测",
+    "目录",
+    "高频",
+    "暴力破解",
+    "爆破",
+    "Payload异常突增",
+)
 
 
 DEMO_ATTACK_EVENTS_DDL = """
@@ -100,6 +112,70 @@ def mysql_datetime(value: Any) -> str:
     return text.replace("T", " ").replace("Z", "")[:23]
 
 
+def parse_dt(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.now()
+    text = text.replace("Z", "").replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:26], fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return datetime.now()
+
+
+def bucket_start(value: Any, minutes: int = BEHAVIOR_AGG_BUCKET_MINUTES) -> datetime:
+    dt = parse_dt(value)
+    minute = (dt.minute // minutes) * minutes
+    return dt.replace(minute=minute, second=0, microsecond=0)
+
+
+def should_aggregate_behavior(attack_type: str, detection: Dict[str, Any]) -> bool:
+    behavior = detection.get("behavior") or {}
+    behavior_type = str(behavior.get("type") or "")
+    text = f"{attack_type} {behavior_type}"
+    score = float(behavior.get("score") or 0.0)
+    if score < 0.72:
+        return False
+    return any(x in text for x in AGGREGATED_BEHAVIOR_KEYWORDS)
+
+
+def aggregate_event_id(record: Dict[str, Any], attack_type: str) -> str:
+    source_ip = str(record.get("source_ip") or "unknown")
+    start = bucket_start(record.get("event_time"))
+    key = f"{source_ip}|{attack_type}|{start.isoformat()}|{BEHAVIOR_AGG_BUCKET_MINUTES}"
+    digest = hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()[:22].upper()
+    return f"AGG{digest}"
+
+
+def aggregate_evidence(record: Dict[str, Any], detection: Dict[str, Any], evidence: Iterable[str]) -> list[str]:
+    behavior = detection.get("behavior") or {}
+    features = behavior.get("features") or {}
+    start = bucket_start(record.get("event_time"))
+    end = start + timedelta(minutes=BEHAVIOR_AGG_BUCKET_MINUTES)
+    lines = [
+        f"聚合窗口：{start.strftime('%Y-%m-%d %H:%M:%S')} ~ {end.strftime('%H:%M:%S')}",
+        f"来源IP：{record.get('source_ip') or 'unknown'}",
+        f"窗口请求数：{features.get('request_count', 0)}",
+        f"不同路径数：{features.get('distinct_path_count', 0)}",
+        f"404次数：{features.get('not_found_count', 0)}",
+        f"登录失败次数：{features.get('login_fail_count', 0)}",
+    ]
+    lines.extend(str(x) for x in evidence)
+    deduped: list[str] = []
+    seen = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        deduped.append(line)
+    return deduped[:20]
+
+
 def delete_demo_event(conn: Any, event_id: str) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM demo_attack_events WHERE event_id=%s", (event_id[:40],))
@@ -115,7 +191,12 @@ def upsert_demo_event(
 ) -> None:
     request_log = record.get("request_text") or record.get("raw_request_block") or ""
     payload = record.get("request_body") or request_log
-    suggestion = "V2融合检测命中，请结合请求载荷、POC证据和行为窗口复核处置。"
+    suggestion = "V2\u878d\u5408\u68c0\u6d4b\u547d\u4e2d\uff0c\u8bf7\u7ed3\u5408\u8bf7\u6c42\u8f7d\u8377\u3001POC\u8bc1\u636e\u548c\u884c\u4e3a\u7a97\u53e3\u590d\u6838\u5904\u7f6e\u3002"
+    source_region = "\u672a\u77e5\u5730\u533a"
+    target_node = record.get("host") or "\u672c\u673a\u8282\u70b9"
+    target_interface = record.get("target_interface_override") or record.get("uri") or ""
+    protection_action = "V2\u878d\u5408\u68c0\u6d4b\uff1aPayload\u6a21\u578b + POC\u89c4\u5219 + \u884c\u4e3a\u7a97\u53e3"
+    evidence_text = "\uff1b".join(str(x) for x in evidence)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -148,15 +229,15 @@ def upsert_demo_event(
                 risk_level,
                 attack_type,
                 record.get("source_ip") or "unknown",
-                "未知地区",
-                record.get("host") or "本机节点",
-                record.get("uri") or "",
-                "被拦截",
+                source_region,
+                target_node,
+                target_interface,
+                "\u5df2\u62e6\u622a",
                 "unprocessed",
                 payload,
                 request_log,
-                "V2融合检测：Payload模型 + POC规则 + 行为窗口",
-                suggestion + "\n证据：" + "；".join(str(x) for x in evidence),
+                protection_action,
+                suggestion + "\n\u8bc1\u636e\uff1a" + evidence_text,
                 0,
                 1,
             ),
@@ -187,6 +268,19 @@ def sync_detection_rows_mysql(
     risk_level = fusion.get("risk_level") or "medium"
     attack_type = fusion.get("attack_type") or payload.get("label") or "可疑流量"
     evidence = fusion.get("evidence") or []
+    raw_event_id = event_id
+    is_aggregated = decision == "attack_event" and should_aggregate_behavior(str(attack_type), detection)
+    if is_aggregated:
+        event_id = aggregate_event_id(record, str(attack_type))
+        evidence = aggregate_evidence(record, detection, evidence)
+        record = dict(record)
+        record["event_time"] = bucket_start(record.get("event_time")).isoformat(timespec="seconds")
+        record["target_interface_override"] = "聚合行为窗口"
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM detection_candidates WHERE event_id=%s", (raw_event_id,))
+            cur.execute("DELETE FROM attack_events WHERE event_id=%s", (raw_event_id,))
+        delete_demo_event(conn, raw_event_id)
+
     upsert_mysql(
         conn,
         "detection_candidates",
@@ -200,7 +294,7 @@ def sync_detection_rows_mysql(
             "risk_level": risk_level,
             "attack_type": attack_type,
             "source_ip": record.get("source_ip"),
-            "target_interface": record.get("uri"),
+            "target_interface": record.get("target_interface_override") or record.get("uri"),
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
         },
     )
@@ -264,7 +358,7 @@ def sync_detection_rows_mysql(
                 "case_id": case_id,
                 "occurred_at": record.get("event_time"),
                 "source_ip": record.get("source_ip"),
-                "target_interface": record.get("uri"),
+                "target_interface": record.get("target_interface_override") or record.get("uri"),
                 "attack_type": attack_type,
                 "risk_level": risk_level,
                 "confidence": final_score,

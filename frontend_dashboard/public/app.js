@@ -110,6 +110,8 @@ const state = {
     q: "",
     attackType: "",
     items: [],
+    selectedDocId: "",
+    selectedDoc: null,
   },
   plugins: {
     activeTool: "phishing",
@@ -1745,11 +1747,56 @@ function renderRagSettingsView() {
         </div>
       </article>
     </section>
+
+    <section class="panel rag-detail-panel">
+      <div class="panel-head">
+        <div>
+          <h3 class="panel-title">知识详情与编辑</h3>
+          <div class="panel-sub" id="rag_edit_hint">点击上方列表中的任意知识，即可查看完整内容并修改。</div>
+        </div>
+        <div class="ops-group">
+          <button id="rag_edit_reload" class="btn btn-ghost" disabled>重新读取</button>
+          <button id="rag_edit_save" class="btn btn-primary" disabled>保存修改</button>
+        </div>
+      </div>
+      <div class="detail-grid top-gap-sm">
+        <div><label class="panel-sub">文档ID</label><input id="rag_edit_doc_id" disabled /></div>
+        <div><label class="panel-sub">标题</label><input id="rag_edit_title" disabled /></div>
+        <div><label class="panel-sub">攻击类型</label><input id="rag_edit_attack_type" disabled /></div>
+        <div><label class="panel-sub">标签</label><input id="rag_edit_tags" disabled /></div>
+        <div>
+          <label class="panel-sub">严重度</label>
+          <select id="rag_edit_severity" disabled>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="critical">严重</option>
+          </select>
+        </div>
+        <div><label class="panel-sub">来源</label><input id="rag_edit_source" disabled /></div>
+      </div>
+      <div class="top-gap-sm">
+        <label class="panel-sub">正文内容</label>
+        <textarea id="rag_edit_content" rows="6" disabled placeholder="选择一条知识后显示完整正文"></textarea>
+      </div>
+      <div class="top-gap-sm">
+        <label class="panel-sub">判定证据</label>
+        <textarea id="rag_edit_evidence" rows="4" disabled></textarea>
+      </div>
+      <div class="top-gap-sm">
+        <label class="panel-sub">处置建议</label>
+        <textarea id="rag_edit_mitigation" rows="4" disabled></textarea>
+      </div>
+    </section>
   `;
 
   document.getElementById("rag_refresh")?.addEventListener("click", () => loadRagDocs(true));
   document.getElementById("rag_rebuild")?.addEventListener("click", rebuildRagFromSeed);
   document.getElementById("rag_add_doc")?.addEventListener("click", addRagDoc);
+  document.getElementById("rag_edit_reload")?.addEventListener("click", () => {
+    if (state.rag.selectedDocId) loadRagDocDetail(state.rag.selectedDocId).catch((err) => showToast(err.message));
+  });
+  document.getElementById("rag_edit_save")?.addEventListener("click", () => saveRagDoc().catch((err) => showToast(`保存失败：${err.message}`)));
   document.getElementById("rag_prev_page")?.addEventListener("click", () => {
     state.rag.page = Math.max(1, state.rag.page - 1);
     loadRagDocs().catch((err) => showToast(err.message));
@@ -1796,30 +1843,127 @@ function renderRagTable() {
   body.innerHTML = state.rag.items
     .map(
       (x) => `
-      <tr>
+      <tr class="clickable-row ${state.rag.selectedDocId === x.doc_id ? "selected-row" : ""}" data-rag-open="${escapeHtml(x.doc_id || "")}">
         <td>${escapeHtml(x.doc_id || "-")}</td>
         <td title="${escapeHtml(x.title || "")}">${escapeHtml((x.title || "-").slice(0, 36))}</td>
         <td>${escapeHtml(x.attack_type || "-")}</td>
         <td>${escapeHtml(x.severity || "-")}</td>
         <td>${escapeHtml(x.source || "-")}</td>
-        <td><button class="btn btn-danger" data-rag-del="${escapeHtml(x.doc_id || "")}">删除</button></td>
+        <td>
+          <div class="row-actions compact-actions">
+            <button class="btn btn-ghost" data-rag-view="${escapeHtml(x.doc_id || "")}">查看编辑</button>
+            <button class="btn btn-danger" data-rag-del="${escapeHtml(x.doc_id || "")}">删除</button>
+          </div>
+        </td>
       </tr>
     `
     )
     .join("");
+  body.querySelectorAll("[data-rag-open], [data-rag-view]").forEach((el) => {
+    el.addEventListener("click", (ev) => {
+      const docId = String(el.getAttribute("data-rag-open") || el.getAttribute("data-rag-view") || "");
+      if (!docId) return;
+      ev.stopPropagation();
+      loadRagDocDetail(docId).catch((err) => showToast(`加载详情失败：${err.message}`));
+    });
+  });
   body.querySelectorAll("[data-rag-del]").forEach((el) => {
-    el.addEventListener("click", async () => {
+    el.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
       const docId = String(el.getAttribute("data-rag-del") || "");
       if (!docId) return;
       try {
         await api(`/api/v2/rag/docs/${encodeURIComponent(docId)}/delete`, { method: "POST", body: {} });
         showToast(`已删除 ${docId}`);
+        if (state.rag.selectedDocId === docId) {
+          state.rag.selectedDocId = "";
+          state.rag.selectedDoc = null;
+          fillRagEditForm(null);
+        }
         await loadRagDocs();
       } catch (err) {
         showToast(`删除失败：${err.message}`);
       }
     });
   });
+}
+
+function setRagEditDisabled(disabled) {
+  [
+    "rag_edit_title",
+    "rag_edit_attack_type",
+    "rag_edit_tags",
+    "rag_edit_severity",
+    "rag_edit_source",
+    "rag_edit_content",
+    "rag_edit_evidence",
+    "rag_edit_mitigation",
+    "rag_edit_reload",
+    "rag_edit_save",
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+}
+
+function fillRagEditForm(doc) {
+  const empty = !doc;
+  const values = {
+    rag_edit_doc_id: doc?.doc_id || "",
+    rag_edit_title: doc?.title || "",
+    rag_edit_attack_type: doc?.attack_type || "",
+    rag_edit_tags: doc?.tags || "",
+    rag_edit_severity: doc?.severity || "medium",
+    rag_edit_source: doc?.source || "",
+    rag_edit_content: doc?.content || "",
+    rag_edit_evidence: doc?.evidence || "",
+    rag_edit_mitigation: doc?.mitigation || "",
+  };
+  Object.entries(values).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  setRagEditDisabled(empty);
+  const docIdEl = document.getElementById("rag_edit_doc_id");
+  if (docIdEl) docIdEl.disabled = true;
+  const hint = document.getElementById("rag_edit_hint");
+  if (hint) hint.textContent = empty ? "点击上方列表中的任意知识，即可查看完整内容并修改。" : `正在编辑：${doc.doc_id || ""}`;
+}
+
+async function loadRagDocDetail(docId) {
+  const data = await api(`/api/v2/rag/docs/${encodeURIComponent(docId)}`);
+  const doc = data.item || null;
+  state.rag.selectedDocId = doc?.doc_id || docId;
+  state.rag.selectedDoc = doc;
+  fillRagEditForm(doc);
+  renderRagTable();
+}
+
+async function saveRagDoc() {
+  const docId = state.rag.selectedDocId;
+  if (!docId) {
+    showToast("请先选择一条RAG知识");
+    return;
+  }
+  const payload = {
+    title: String(document.getElementById("rag_edit_title")?.value || "").trim(),
+    attack_type: String(document.getElementById("rag_edit_attack_type")?.value || "").trim(),
+    tags: String(document.getElementById("rag_edit_tags")?.value || "").trim(),
+    severity: String(document.getElementById("rag_edit_severity")?.value || "medium").trim().toLowerCase(),
+    source: String(document.getElementById("rag_edit_source")?.value || "").trim(),
+    content: String(document.getElementById("rag_edit_content")?.value || "").trim(),
+    evidence: String(document.getElementById("rag_edit_evidence")?.value || "").trim(),
+    mitigation: String(document.getElementById("rag_edit_mitigation")?.value || "").trim(),
+  };
+  if (!payload.title || !payload.content) {
+    showToast("标题和正文内容必填");
+    return;
+  }
+  const data = await api(`/api/v2/rag/docs/${encodeURIComponent(docId)}/update`, { method: "POST", body: payload });
+  state.rag.selectedDoc = data.item || { ...payload, doc_id: docId };
+  fillRagEditForm(state.rag.selectedDoc);
+  showToast("RAG知识已保存");
+  await loadRagDocs();
 }
 
 async function addRagDoc() {
