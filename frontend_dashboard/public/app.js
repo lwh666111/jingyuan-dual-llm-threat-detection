@@ -21,9 +21,108 @@ const WEEKDAY_LABELS = [
   "\u5468\u65e5",
 ];
 
+const BEIJING_COORD = [116.4074, 39.9042];
+const WORLD_MAP_NAME = "world";
+const WORLD_MAP_SCRIPT_URLS = [
+  "/assets/echarts-world-lonlat.js",
+  "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/js/world.js",
+];
+const REGION_COORDS = {
+  beijing: { label: "北京", coord: [116.4074, 39.9042] },
+  "\u5317\u4eac": { label: "北京", coord: [116.4074, 39.9042] },
+  shanghai: { label: "上海", coord: [121.4737, 31.2304] },
+  "\u4e0a\u6d77": { label: "上海", coord: [121.4737, 31.2304] },
+  guangdong: { label: "广东", coord: [113.2665, 23.1322] },
+  "\u5e7f\u4e1c": { label: "广东", coord: [113.2665, 23.1322] },
+  zhejiang: { label: "浙江", coord: [120.1551, 30.2741] },
+  "\u6d59\u6c5f": { label: "浙江", coord: [120.1551, 30.2741] },
+  jiangsu: { label: "江苏", coord: [118.7969, 32.0603] },
+  "\u6c5f\u82cf": { label: "江苏", coord: [118.7969, 32.0603] },
+  shandong: { label: "山东", coord: [117.1201, 36.6512] },
+  "\u5c71\u4e1c": { label: "山东", coord: [117.1201, 36.6512] },
+  henan: { label: "河南", coord: [113.6254, 34.7466] },
+  "\u6cb3\u5357": { label: "河南", coord: [113.6254, 34.7466] },
+  hunan: { label: "湖南", coord: [112.9823, 28.1941] },
+  "\u6e56\u5357": { label: "湖南", coord: [112.9823, 28.1941] },
+  hubei: { label: "湖北", coord: [114.3054, 30.5928] },
+  "\u6e56\u5317": { label: "湖北", coord: [114.3054, 30.5928] },
+  sichuan: { label: "四川", coord: [104.0668, 30.5728] },
+  "\u56db\u5ddd": { label: "四川", coord: [104.0668, 30.5728] },
+  hongkong: { label: "香港", coord: [114.1694, 22.3193] },
+  "hong kong": { label: "香港", coord: [114.1694, 22.3193] },
+  "\u9999\u6e2f": { label: "香港", coord: [114.1694, 22.3193] },
+  china: { label: "中国", coord: [104.1954, 35.8617] },
+  "\u4e2d\u56fd": { label: "中国", coord: [104.1954, 35.8617] },
+  poland: { label: "波兰", coord: [19.1451, 51.9194] },
+  "\u6ce2\u5170": { label: "波兰", coord: [19.1451, 51.9194] },
+  turkey: { label: "土耳其", coord: [35.2433, 38.9637] },
+  "\u571f\u8033\u5176": { label: "土耳其", coord: [35.2433, 38.9637] },
+  netherlands: { label: "荷兰", coord: [5.2913, 52.1326] },
+  "\u8377\u5170": { label: "荷兰", coord: [5.2913, 52.1326] },
+  "united states": { label: "美国", coord: [-98.5795, 39.8283] },
+  usa: { label: "美国", coord: [-98.5795, 39.8283] },
+  us: { label: "美国", coord: [-98.5795, 39.8283] },
+  america: { label: "美国", coord: [-98.5795, 39.8283] },
+  "\u7f8e\u56fd": { label: "美国", coord: [-98.5795, 39.8283] },
+  germany: { label: "德国", coord: [10.4515, 51.1657] },
+  "\u5fb7\u56fd": { label: "德国", coord: [10.4515, 51.1657] },
+  singapore: { label: "新加坡", coord: [103.8198, 1.3521] },
+  "\u65b0\u52a0\u5761": { label: "新加坡", coord: [103.8198, 1.3521] },
+  russia: { label: "俄罗斯", coord: [105.3188, 61.524] },
+  "\u4fc4\u7f57\u65af": { label: "俄罗斯", coord: [105.3188, 61.524] },
+  india: { label: "印度", coord: [78.9629, 20.5937] },
+  "\u5370\u5ea6": { label: "印度", coord: [78.9629, 20.5937] },
+  france: { label: "法国", coord: [2.2137, 46.2276] },
+  "\u6cd5\u56fd": { label: "法国", coord: [2.2137, 46.2276] },
+  "united kingdom": { label: "英国", coord: [-3.436, 55.3781] },
+  uk: { label: "英国", coord: [-3.436, 55.3781] },
+  britain: { label: "英国", coord: [-3.436, 55.3781] },
+  "\u82f1\u56fd": { label: "英国", coord: [-3.436, 55.3781] },
+  japan: { label: "日本", coord: [138.2529, 36.2048] },
+  "\u65e5\u672c": { label: "日本", coord: [138.2529, 36.2048] },
+  "south korea": { label: "韩国", coord: [127.7669, 35.9078] },
+  korea: { label: "韩国", coord: [127.7669, 35.9078] },
+  "\u97e9\u56fd": { label: "韩国", coord: [127.7669, 35.9078] },
+  vietnam: { label: "越南", coord: [108.2772, 14.0583] },
+  "\u8d8a\u5357": { label: "越南", coord: [108.2772, 14.0583] },
+  brazil: { label: "巴西", coord: [-51.9253, -14.235] },
+  "\u5df4\u897f": { label: "巴西", coord: [-51.9253, -14.235] },
+  canada: { label: "加拿大", coord: [-106.3468, 56.1304] },
+  "\u52a0\u62ff\u5927": { label: "加拿大", coord: [-106.3468, 56.1304] },
+  australia: { label: "澳大利亚", coord: [133.7751, -25.2744] },
+  "\u6fb3\u5927\u5229\u4e9a": { label: "澳大利亚", coord: [133.7751, -25.2744] },
+  anhui: { label: "安徽", coord: [117.283, 31.8612] },
+  "\u5b89\u5fbd": { label: "安徽", coord: [117.283, 31.8612] },
+  fujian: { label: "福建", coord: [119.2965, 26.0745] },
+  "\u798f\u5efa": { label: "福建", coord: [119.2965, 26.0745] },
+  jiangxi: { label: "江西", coord: [115.8582, 28.6829] },
+  "\u6c5f\u897f": { label: "江西", coord: [115.8582, 28.6829] },
+  tianjin: { label: "天津", coord: [117.2009, 39.0842] },
+  "\u5929\u6d25": { label: "天津", coord: [117.2009, 39.0842] },
+  chongqing: { label: "重庆", coord: [106.5516, 29.563] },
+  "\u91cd\u5e86": { label: "重庆", coord: [106.5516, 29.563] },
+  hainan: { label: "海南", coord: [110.3312, 20.031] },
+  "\u6d77\u5357": { label: "海南", coord: [110.3312, 20.031] },
+  guizhou: { label: "贵州", coord: [106.6302, 26.647] },
+  "\u8d35\u5dde": { label: "贵州", coord: [106.6302, 26.647] },
+  yunnan: { label: "云南", coord: [102.8329, 24.8801] },
+  "\u4e91\u5357": { label: "云南", coord: [102.8329, 24.8801] },
+  shaanxi: { label: "陕西", coord: [108.9542, 34.2655] },
+  "\u9655\u897f": { label: "陕西", coord: [108.9542, 34.2655] },
+  xinjiang: { label: "新疆", coord: [87.6168, 43.8256] },
+  "\u65b0\u7586": { label: "新疆", coord: [87.6168, 43.8256] },
+  bulgaria: { label: "保加利亚", coord: [25.4858, 42.7339] },
+  "\u4fdd\u52a0\u5229\u4e9a": { label: "保加利亚", coord: [25.4858, 42.7339] },
+  slovenia: { label: "斯洛文尼亚", coord: [14.9955, 46.1512] },
+  "\u65af\u6d1b\u6587\u5c3c\u4e9a": { label: "斯洛文尼亚", coord: [14.9955, 46.1512] },
+  andorra: { label: "安道尔", coord: [1.6016, 42.5462] },
+  "\u5b89\u9053\u5c14": { label: "安道尔", coord: [1.6016, 42.5462] },
+};
+
 const appEl = document.getElementById("app");
 const tooltipEl = document.getElementById("tooltip");
 const chartRegistry = {};
+const loadedScriptPromises = {};
 let viewTransitionSeq = 0;
 
 const state = {
@@ -112,6 +211,13 @@ const state = {
     items: [],
     selectedDocId: "",
     selectedDoc: null,
+  },
+  llmSettings: {
+    activePanel: "prompt",
+    prompt: "",
+    promptPath: "",
+    promptUpdatedAt: "",
+    promptMaxChars: 0,
   },
   plugins: {
     activeTool: "phishing",
@@ -231,60 +337,193 @@ async function loadHomepageBackground() {
   }
 }
 
+function loginStaticPieMarkup(rows, centerValue = "4", centerLabel = "\u7ef4\u80fd\u529b") {
+  const total = rows.reduce((sum, x) => sum + Number(x.value || 0), 0) || 1;
+  let cursor = 0;
+  const stops = rows
+    .map((row) => {
+      const start = cursor;
+      const end = cursor + (Number(row.value || 0) / total) * 100;
+      cursor = end;
+      return `${row.color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    })
+    .join(", ");
+  const legend = rows
+    .map((row) => {
+      const pct = Math.round((Number(row.value || 0) / total) * 100);
+      return `<span><i style="background:${escapeHtml(row.color)}"></i>${escapeHtml(row.name)} <b>${pct}%</b></span>`;
+    })
+    .join("");
+  return `
+    <div class="static-pie-wrap">
+      <div class="static-pie" style="--pie-stops:${stops};">
+        <div><strong>${escapeHtml(centerValue)}</strong><span>${escapeHtml(centerLabel)}</span></div>
+      </div>
+      <div class="static-pie-legend">${legend}</div>
+    </div>
+  `;
+}
+
 function renderLoginPage() {
   clearAllTimers();
+  disposeAllCharts();
   state.profile = null;
   state.currentView = "";
 
   appEl.innerHTML = `
-    <section class="login-shell">
-      <div class="login-card">
-        <h1 class="login-title">AI\u653b\u51fb\u6001\u52bf\u611f\u77e5\u5e73\u53f0</h1>
-        <p class="login-subtitle">\u8bf7\u9009\u62e9\u8eab\u4efd\u540e\u81ea\u52a8\u586b\u5145\u8d26\u53f7\uff0c\u70b9\u51fb\u767b\u5f55\u8fdb\u5165\u5bf9\u5e94\u9875\u9762</p>
+    <div class="login-page">
+      <section class="login-shell">
+        <div class="login-orb orb-a"></div>
+        <div class="login-orb orb-b"></div>
+        <div class="login-card">
+          <h1 class="login-title">AI\u653b\u51fb\u6001\u52bf\u611f\u77e5\u5e73\u53f0</h1>
+          <p class="login-subtitle">\u8bf7\u9009\u62e9\u8eab\u4efd\u540e\u81ea\u52a8\u586b\u5145\u8d26\u53f7\uff0c\u70b9\u51fb\u767b\u5f55\u8fdb\u5165\u5bf9\u5e94\u9875\u9762</p>
 
-        <div class="form-row">
-          <label for="loginUsername">\u7528\u6237\u540d</label>
-          <input id="loginUsername" type="text" autocomplete="username" />
-        </div>
-        <div class="form-row">
-          <label for="loginPassword">\u5bc6\u7801</label>
-          <input id="loginPassword" type="password" autocomplete="current-password" />
-        </div>
-
-        <div class="form-row">
-          <label>\u8eab\u4efd\u5feb\u6377\u5207\u6362</label>
-          <div class="role-switch">
-            <button class="btn active" data-login-role="${ROLE_NORMAL}">\u666e\u901a\u7528\u6237</button>
-            <button class="btn" data-login-role="${ROLE_ADMIN}">\u7ba1\u7406\u5458</button>
-          </div>
-        </div>
-
-        <button id="loginBtn" class="btn btn-primary" style="width:100%;">\u767b\u5f55\u7cfb\u7edf</button>
-        <button id="toggleRegisterBtn" class="btn btn-ghost" style="width:100%;margin-top:8px;">\u6ce8\u518c\u65b0\u8d26\u53f7</button>
-        <div id="loginError" class="login-error"></div>
-
-        <div id="registerPanel" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(95,152,206,0.25);">
           <div class="form-row">
-            <label for="registerDisplayName">\u663e\u793a\u540d\u79f0</label>
-            <input id="registerDisplayName" type="text" autocomplete="nickname" />
+            <label for="loginUsername">\u7528\u6237\u540d</label>
+            <input id="loginUsername" type="text" autocomplete="username" />
           </div>
           <div class="form-row">
-            <label for="registerUsername">\u6ce8\u518c\u7528\u6237\u540d\uff08\u5b57\u6bcd/\u6570\u5b57/\u4e0b\u5212\u7ebf\uff09</label>
-            <input id="registerUsername" type="text" autocomplete="username" />
+            <label for="loginPassword">\u5bc6\u7801</label>
+            <input id="loginPassword" type="password" autocomplete="current-password" />
           </div>
+
           <div class="form-row">
-            <label for="registerPassword">\u6ce8\u518c\u5bc6\u7801\uff08\u81f3\u5c116\u4f4d\uff09</label>
-            <input id="registerPassword" type="password" autocomplete="new-password" />
+            <label>\u8eab\u4efd\u5feb\u6377\u5207\u6362</label>
+            <div class="role-switch">
+              <button class="btn active" data-login-role="${ROLE_NORMAL}">\u666e\u901a\u7528\u6237</button>
+              <button class="btn" data-login-role="${ROLE_ADMIN}">\u7ba1\u7406\u5458</button>
+            </div>
           </div>
-          <div class="form-row">
-            <label for="registerPassword2">\u786e\u8ba4\u5bc6\u7801</label>
-            <input id="registerPassword2" type="password" autocomplete="new-password" />
+
+          <button id="loginBtn" class="btn btn-primary" style="width:100%;">\u767b\u5f55\u7cfb\u7edf</button>
+          <button id="toggleRegisterBtn" class="btn btn-ghost" style="width:100%;margin-top:8px;">\u6ce8\u518c\u65b0\u8d26\u53f7</button>
+          <div id="loginError" class="login-error"></div>
+
+          <div id="registerPanel" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(95,152,206,0.25);">
+            <div class="form-row">
+              <label for="registerDisplayName">\u663e\u793a\u540d\u79f0</label>
+              <input id="registerDisplayName" type="text" autocomplete="nickname" />
+            </div>
+            <div class="form-row">
+              <label for="registerUsername">\u6ce8\u518c\u7528\u6237\u540d\uff08\u5b57\u6bcd/\u6570\u5b57/\u4e0b\u5212\u7ebf\uff09</label>
+              <input id="registerUsername" type="text" autocomplete="username" />
+            </div>
+            <div class="form-row">
+              <label for="registerPassword">\u6ce8\u518c\u5bc6\u7801\uff08\u81f3\u5c116\u4f4d\uff09</label>
+              <input id="registerPassword" type="password" autocomplete="new-password" />
+            </div>
+            <div class="form-row">
+              <label for="registerPassword2">\u786e\u8ba4\u5bc6\u7801</label>
+              <input id="registerPassword2" type="password" autocomplete="new-password" />
+            </div>
+            <button id="registerBtn" class="btn btn-success" style="width:100%;">\u63d0\u4ea4\u6ce8\u518c</button>
+            <div id="registerError" class="login-error"></div>
           </div>
-          <button id="registerBtn" class="btn btn-success" style="width:100%;">\u63d0\u4ea4\u6ce8\u518c</button>
-          <div id="registerError" class="login-error"></div>
+
+          <div class="scroll-cue" aria-hidden="true">
+            <span>\u5411\u4e0b\u6ed1\u52a8\u4e86\u89e3\u5e73\u53f0\u80fd\u529b</span>
+            <b></b>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <section class="intro-section intro-overview intro-reveal">
+        <div class="intro-kicker">\u4f5c\u54c1\u6982\u89c8</div>
+        <h2>\u4e0d\u53ea\u662f\u770b\u5230\u653b\u51fb\uff0c\u800c\u662f\u628a\u653b\u51fb\u8bb2\u6e05\u695a\u3001\u7ba1\u8d77\u6765\u3002</h2>
+        <p class="intro-lead">
+          \u667a\u5fa1\u6001\u52bf\u9762\u5411 Web \u670d\u52a1\u548c\u8f7b\u91cf\u5b9e\u6218\u9632\u62a4\u573a\u666f\uff0c\u5c06\u6293\u5305\u7559\u75d5\u3001AI \u5206\u5c42\u68c0\u6d4b\u3001LLM/RAG \u7814\u5224\u3001\u6570\u636e\u5927\u5c4f\u548c IP \u5904\u7f6e\u4e32\u6210\u4e00\u6761\u5b8c\u6574\u95ed\u73af\u3002
+        </p>
+        <div class="intro-stat-grid">
+          <article><strong>raw_only</strong><span>\u6b63\u5e38\u8bbf\u95ee\u4ec5\u7559\u5b58</span></article>
+          <article><strong>candidate</strong><span>\u4f4e\u4e2d\u7f6e\u4fe1\u8fdb\u5165\u590d\u6838</span></article>
+          <article><strong>attack_event</strong><span>\u9ad8\u7f6e\u4fe1\u4e8b\u4ef6\u89e6\u53d1\u7814\u5224</span></article>
+          <article><strong>RAG + LLM</strong><span>\u8f93\u51fa\u8bc1\u636e\u548c\u5904\u7f6e\u5efa\u8bae</span></article>
+        </div>
+      </section>
+
+      <section class="intro-section intro-charts intro-reveal">
+        <div class="intro-copy">
+          <div class="intro-kicker">\u5e73\u53f0\u4f18\u52bf</div>
+          <h2>\u7528\u591a\u6a21\u578b\u878d\u5408\u964d\u4f4e\u8bef\u62a5\uff0c\u7528\u884c\u4e3a\u7a97\u53e3\u6355\u6349\u626b\u63cf\u548c\u7206\u7834\u3002</h2>
+          <p>
+            \u7cfb\u7edf\u4e0d\u628a\u201c\u8bbf\u95ee\u8def\u5f84\u201d\u7b80\u5355\u7b49\u540c\u4e8e\u653b\u51fb\uff0c\u800c\u662f\u540c\u65f6\u89c2\u5bdf Payload\u3001POC \u89c4\u5219\u3001\u884c\u4e3a\u9891\u7387\u548c\u4e0a\u4e0b\u6587\u8bc1\u636e\u3002\u8fd9\u4f7f\u666e\u901a\u8bbf\u95ee\u4e0d\u88ab\u8f7b\u6613\u63a8\u5230\u544a\u8b66\u533a\uff0c\u4e5f\u8ba9\u5b57\u5178\u626b\u63cf\u3001\u5f31\u53e3\u4ee4\u7206\u7834\u7b49\u884c\u4e3a\u578b\u5a01\u80c1\u53ef\u4ee5\u88ab\u805a\u5408\u8bc6\u522b\u3002
+          </p>
+          <div class="intro-feature-list">
+            <span>\u8bc1\u636e\u94fe\u6e05\u6670</span>
+            <span>\u544a\u8b66\u805a\u5408</span>
+            <span>\u672c\u5730\u5927\u6a21\u578b</span>
+            <span>\u652f\u6301\u5c01\u7981 / \u89e3\u5c01</span>
+          </div>
+        </div>
+        <div class="intro-chart-grid">
+          <article class="intro-chart-card">
+            <h3>\u68c0\u6d4b\u80fd\u529b\u6784\u6210</h3>
+            <div id="loginChartCapability" class="intro-chart-box">
+              ${loginStaticPieMarkup([
+                { name: "Payload\u68c0\u6d4b", value: 35, color: "#3bb7ff" },
+                { name: "\u884c\u4e3a\u7a97\u53e3", value: 25, color: "#18d99a" },
+                { name: "POC\u89c4\u5219", value: 22, color: "#ffbf4d" },
+                { name: "LLM/RAG\u7814\u5224", value: 18, color: "#8a7cff" },
+              ])}
+            </div>
+          </article>
+          <article class="intro-chart-card">
+            <h3>\u544a\u8b66\u964d\u566a\u6548\u679c</h3>
+            <div id="loginChartNoise" class="intro-chart-box">
+              ${loginStaticPieMarkup([
+                { name: "\u539f\u59cb\u65e5\u5fd7\u7559\u5b58", value: 62, color: "#5fb4ff" },
+                { name: "\u5019\u9009\u590d\u6838", value: 24, color: "#ffbf4d" },
+                { name: "\u9ad8\u7f6e\u4fe1\u544a\u8b66", value: 14, color: "#ff5b73" },
+              ], "3", "\u7ea7\u5206\u6d41")}
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="intro-section intro-flow intro-reveal">
+        <div class="intro-kicker">\u4f7f\u7528\u65b9\u6cd5</div>
+        <h2>\u4ece\u90e8\u7f72\u5230\u5904\u7f6e\uff0c\u6f14\u793a\u8def\u5f84\u6e05\u6670\u53ef\u590d\u73b0\u3002</h2>
+        <div class="intro-step-grid">
+          <article><b>01</b><strong>\u542f\u52a8\u76d1\u542c</strong><span>\u914d\u7f6e\u7aef\u53e3\u548c\u7f51\u5361\uff0capp.py \u62c9\u8d77\u6293\u5305\u3001\u68c0\u6d4b\u3001API \u548c\u524d\u7aef\u3002</span></article>
+          <article><b>02</b><strong>\u89c2\u5bdf\u5927\u5c4f</strong><span>\u67e5\u770b\u653b\u51fb\u7c7b\u578b\u3001\u6765\u6e90\u5730\u533a\u3001\u8d8b\u52bf\u548c\u9ad8\u5371\u4e8b\u4ef6\u3002</span></article>
+          <article><b>03</b><strong>\u8fdb\u5165\u8be6\u60c5</strong><span>\u5c55\u5f00\u8bf7\u6c42\u4f53\u3001\u54cd\u5e94\u4f53\u3001\u89c4\u5219\u8bc1\u636e\u548c LLM \u7814\u5224\u7ed3\u679c\u3002</span></article>
+          <article><b>04</b><strong>\u8f85\u52a9\u5904\u7f6e</strong><span>\u5bf9\u786e\u8ba4\u653b\u51fb\u7684\u6765\u6e90 IP \u8fdb\u884c\u5c01\u7981\uff0c\u4e5f\u53ef\u5728\u5217\u8868\u4e2d\u89e3\u5c01\u3002</span></article>
+        </div>
+      </section>
+
+      <section class="intro-section intro-architecture intro-reveal">
+        <div class="intro-card-stack">
+          <article>
+            <small>01</small>
+            <strong>\u539f\u59cb\u8bf7\u6c42\u5168\u91cf\u7559\u5b58</strong>
+            <span>\u8bf7\u6c42\u3001\u54cd\u5e94\u548c\u5206\u6790\u7ed3\u679c\u5165\u5e93\uff0c\u4fbf\u4e8e\u590d\u76d8\u548c\u7b54\u8fa9\u5c55\u793a\u3002</span>
+          </article>
+          <article>
+            <small>02</small>
+            <strong>\u591a\u7ea7\u5019\u9009\u4e8b\u4ef6\u7b5b\u9009</strong>
+            <span>\u901a\u8fc7 raw_only / candidate / attack_event \u5206\u7ea7\u51cf\u5c11\u544a\u8b66\u566a\u58f0\u3002</span>
+          </article>
+          <article>
+            <small>03</small>
+            <strong>\u77e5\u8bc6\u5e93\u53ef\u7ef4\u62a4</strong>
+            <span>\u7ba1\u7406\u5458\u53ef\u5728\u524d\u7aef\u589e\u5220\u6539 RAG \u77e5\u8bc6\uff0c\u8ba9\u7814\u5224\u8bdd\u672f\u8ddf\u968f\u573a\u666f\u8fdb\u5316\u3002</span>
+          </article>
+        </div>
+        <div class="intro-chart-card intro-wide-chart">
+          <h3>\u5b9e\u6218\u4ef7\u503c\u5206\u5e03</h3>
+          <div id="loginChartValue" class="intro-chart-box wide">
+            ${loginStaticPieMarkup([
+              { name: "\u964d\u4f4e\u8bef\u62a5", value: 28, color: "#3bb7ff" },
+              { name: "\u8bc6\u522b\u626b\u63cf\u7206\u7834", value: 24, color: "#18d99a" },
+              { name: "\u8bc1\u636e\u94fe\u89e3\u91ca", value: 21, color: "#ffbf4d" },
+              { name: "\u8f85\u52a9\u5904\u7f6e", value: 16, color: "#ff6b8a" },
+              { name: "\u90e8\u7f72\u6f14\u793a", value: 11, color: "#8a7cff" },
+            ], "5", "\u7c7b\u4ef7\u503c")}
+          </div>
+        </div>
+      </section>
+    </div>
   `;
 
   let selectedRole = ROLE_NORMAL;
@@ -372,6 +611,154 @@ function renderLoginPage() {
       if (btn) btn.disabled = false;
     }
   });
+
+  initLoginIntro();
+}
+
+function initLoginIntro() {
+  requestAnimationFrame(() => {
+    const revealItems = Array.from(document.querySelectorAll(".intro-reveal"));
+    const revealNow = () => {
+      const bottomLine = window.innerHeight * 0.88;
+      revealItems.forEach((el) => {
+        if (el.classList.contains("is-visible")) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.top < bottomLine && rect.bottom > 0) {
+          el.classList.add("is-visible");
+        }
+      });
+    };
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("is-visible");
+              observer.unobserve(entry.target);
+            }
+          });
+        },
+        { threshold: 0.18, rootMargin: "0px 0px -8% 0px" }
+      );
+      revealItems.forEach((el) => observer.observe(el));
+    } else {
+      revealItems.forEach((el) => el.classList.add("is-visible"));
+    }
+    window.addEventListener("scroll", revealNow, { passive: true });
+    window.addEventListener("resize", revealNow, { passive: true });
+    revealNow();
+    setTimeout(revealNow, 180);
+    renderLoginIntroCharts();
+  });
+}
+
+function renderLoginIntroCharts() {
+  renderLoginPieChart("loginChartCapability", [
+    { name: "Payload检测", value: 35, color: "#3bb7ff" },
+    { name: "行为窗口", value: 25, color: "#18d99a" },
+    { name: "POC规则", value: 22, color: "#ffbf4d" },
+    { name: "LLM/RAG研判", value: 18, color: "#8a7cff" },
+  ]);
+  renderLoginPieChart("loginChartNoise", [
+    { name: "原始日志留存", value: 62, color: "#5fb4ff" },
+    { name: "候选复核", value: 24, color: "#ffbf4d" },
+    { name: "高置信告警", value: 14, color: "#ff5b73" },
+  ]);
+  renderLoginPieChart("loginChartValue", [
+    { name: "降低误报", value: 28, color: "#3bb7ff" },
+    { name: "识别扫描爆破", value: 24, color: "#18d99a" },
+    { name: "证据链解释", value: 21, color: "#ffbf4d" },
+    { name: "辅助处置", value: 16, color: "#ff6b8a" },
+    { name: "部署演示", value: 11, color: "#8a7cff" },
+  ]);
+}
+
+function renderLoginPieChart(containerId, rows) {
+  const chart = getEchartsInstance(containerId);
+  if (!chart) {
+    renderStaticLoginPieChart(containerId, rows);
+    return;
+  }
+  chart.setOption({
+    backgroundColor: "transparent",
+    animationDuration: 1000,
+    animationEasing: "cubicOut",
+    color: rows.map((x) => x.color),
+    tooltip: {
+      trigger: "item",
+      backgroundColor: "rgba(8, 22, 36, 0.94)",
+      borderColor: "rgba(146, 206, 255, 0.34)",
+      textStyle: { color: "#edf6ff", fontFamily: "Microsoft YaHei UI" },
+      formatter: "{b}<br/>占比：{d}%",
+    },
+    legend: {
+      bottom: 2,
+      left: "center",
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: "#c7dcf0", fontSize: 11 },
+    },
+    series: [
+      {
+        type: "pie",
+        radius: ["44%", "70%"],
+        center: ["50%", "43%"],
+        minAngle: 8,
+        avoidLabelOverlap: true,
+        itemStyle: {
+          borderColor: "rgba(6, 17, 30, 0.92)",
+          borderWidth: 3,
+          shadowBlur: 14,
+          shadowColor: "rgba(0, 0, 0, 0.22)",
+        },
+        label: {
+          color: "#f4fbff",
+          fontSize: 11,
+          formatter: "{b}\n{d}%",
+        },
+        labelLine: {
+          length: 13,
+          length2: 8,
+          lineStyle: { color: "rgba(232, 246, 255, 0.72)" },
+        },
+        emphasis: {
+          scale: true,
+          scaleSize: 8,
+          label: { fontSize: 13, fontWeight: 700 },
+        },
+        data: rows.map((x) => ({ name: x.name, value: x.value })),
+      },
+    ],
+  });
+}
+
+function renderStaticLoginPieChart(containerId, rows) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const total = rows.reduce((sum, x) => sum + Number(x.value || 0), 0) || 1;
+  let cursor = 0;
+  const stops = rows
+    .map((row) => {
+      const start = cursor;
+      const end = cursor + (Number(row.value || 0) / total) * 100;
+      cursor = end;
+      return `${row.color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    })
+    .join(", ");
+  const legend = rows
+    .map((row) => {
+      const pct = Math.round((Number(row.value || 0) / total) * 100);
+      return `<span><i style="background:${escapeHtml(row.color)}"></i>${escapeHtml(row.name)} <b>${pct}%</b></span>`;
+    })
+    .join("");
+  el.innerHTML = `
+    <div class="static-pie-wrap">
+      <div class="static-pie" style="--pie-stops:${stops};">
+        <div><strong>${rows.length}</strong><span>维能力</span></div>
+      </div>
+      <div class="static-pie-legend">${legend}</div>
+    </div>
+  `;
 }
 
 function fillLoginCredential(role) {
@@ -379,7 +766,73 @@ function fillLoginCredential(role) {
   const usernameEl = appEl.querySelector("#loginUsername");
   const passwordEl = appEl.querySelector("#loginPassword");
   if (usernameEl) usernameEl.value = row.username;
-  if (passwordEl) passwordEl.value = "";
+  if (passwordEl) passwordEl.value = row.password;
+}
+
+function getProfileName(profile = state.profile) {
+  return profile?.nickname || profile?.display_name || profile?.username || "-";
+}
+
+function getProfileInitial(profile = state.profile) {
+  const text = getProfileName(profile);
+  const chars = Array.from(String(text || "-").trim());
+  return chars[0] || "-";
+}
+
+function renderUserAvatar(profile = state.profile, extraClass = "") {
+  const avatarUrl = String(profile?.avatar_url || "").trim();
+  const initial = escapeHtml(getProfileInitial(profile));
+  const cls = `user-avatar ${extraClass || ""}`.trim();
+  if (avatarUrl) {
+    return `<span class="${cls}"><img src="${escapeHtml(avatarUrl)}" alt="用户头像" loading="lazy" /><span class="avatar-initial">${initial}</span></span>`;
+  }
+  return `<span class="${cls}"><span class="avatar-initial">${initial}</span></span>`;
+}
+
+function bindProfileMenu() {
+  const menu = document.getElementById("profileMenu");
+  const btn = document.getElementById("profileAvatarBtn");
+  const dropdown = document.getElementById("profileDropdown");
+  if (!menu || !btn || !dropdown) return;
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const willOpen = dropdown.classList.contains("hidden");
+    dropdown.classList.toggle("hidden", !willOpen);
+    btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  });
+  dropdown.querySelectorAll("[data-profile-action]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const action = el.getAttribute("data-profile-action");
+      dropdown.classList.add("hidden");
+      btn.setAttribute("aria-expanded", "false");
+      if (action === "center") switchView("user-center");
+      if (action === "admin-users") switchView("admin-users");
+      if (action === "logout") logout();
+    });
+  });
+  document.addEventListener("click", (ev) => {
+    if (!menu.contains(ev.target)) {
+      dropdown.classList.add("hidden");
+      btn.setAttribute("aria-expanded", "false");
+    }
+  });
+}
+
+function refreshHeaderProfile() {
+  const headerName = document.getElementById("headerProfileName");
+  const dropdownName = document.getElementById("dropdownProfileName");
+  if (headerName) headerName.textContent = getProfileName(state.profile);
+  if (dropdownName) dropdownName.textContent = getProfileName(state.profile);
+  const btn = document.getElementById("profileAvatarBtn");
+  const head = document.querySelector(".profile-dropdown-head");
+  if (btn) {
+    const avatar = btn.querySelector(".user-avatar");
+    if (avatar) avatar.outerHTML = renderUserAvatar(state.profile, "avatar-sm");
+  }
+  if (head) {
+    const avatar = head.querySelector(".user-avatar");
+    if (avatar) avatar.outerHTML = renderUserAvatar(state.profile, "avatar-md");
+  }
 }
 
 function renderMainLayout() {
@@ -389,7 +842,6 @@ function renderMainLayout() {
         <div class="status-main">
           <span class="brand">AI攻击态势感知平台</span>
           <span class="pill">身份：${ROLE_LABEL[state.profile?.role] || "-"}</span>
-          <span class="pill">用户：${escapeHtml(state.profile?.display_name || state.profile?.username || "-")}</span>
           <span class="pill">实时时钟：<strong id="statusClock">-</strong></span>
           <span class="pill">数据更新时间：<strong id="statusDataTime">-</strong></span>
           <span class="pill">
@@ -400,7 +852,31 @@ function renderMainLayout() {
         <div class="status-actions">
           <button id="btnFullscreen" class="btn btn-ghost">全屏</button>
           <button id="btnSound" class="btn btn-ghost">${state.soundEnabled ? "声音：开" : "声音：关"}</button>
-          <button id="btnLogout" class="btn btn-danger">退出登录</button>
+          <div class="profile-menu" id="profileMenu">
+            <button id="profileAvatarBtn" class="avatar-button" type="button" aria-haspopup="true" aria-expanded="false">
+              ${renderUserAvatar(state.profile, "avatar-sm")}
+              <span class="avatar-button-text">
+                <strong id="headerProfileName">${escapeHtml(getProfileName(state.profile))}</strong>
+                <small>${escapeHtml(ROLE_LABEL[state.profile?.role] || "-")}</small>
+              </span>
+            </button>
+            <div id="profileDropdown" class="profile-dropdown hidden">
+              <div class="profile-dropdown-head">
+                ${renderUserAvatar(state.profile, "avatar-md")}
+                <div>
+                  <strong id="dropdownProfileName">${escapeHtml(getProfileName(state.profile))}</strong>
+                  <span>${escapeHtml(state.profile?.username || "-")} · ${escapeHtml(ROLE_LABEL[state.profile?.role] || "-")}</span>
+                </div>
+              </div>
+              <button class="profile-menu-item" type="button" data-profile-action="center">用户中心</button>
+              ${
+                state.profile?.role === ROLE_ADMIN
+                  ? `<button class="profile-menu-item" type="button" data-profile-action="admin-users">管理用户</button>`
+                  : ""
+              }
+              <button class="profile-menu-item danger" type="button" data-profile-action="logout">退出登录</button>
+            </div>
+          </div>
         </div>
       </header>
       <nav id="navTabs" class="nav-tabs"></nav>
@@ -422,7 +898,7 @@ function renderMainLayout() {
     }
     showToast(state.soundEnabled ? "声音告警已开启" : "声音告警已关闭");
   });
-  document.getElementById("btnLogout")?.addEventListener("click", logout);
+  bindProfileMenu();
 
   renderTabs();
   startGlobalTimers();
@@ -451,18 +927,15 @@ function getTabsByRole(role) {
       { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
       { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
       { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
-      { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
-      { id: "rag-settings", label: "\u77e5\u8bc6\u5e93\u8bbe\u7f6e\uff08RAG\uff09" },
+      { id: "rag-settings", label: "\u5927\u6a21\u578b\u8bbe\u7f6e" },
       { id: "admin-logs", label: "\u64cd\u4f5c\u65e5\u5fd7" },
       { id: "admin-config", label: "\u7cfb\u7edf\u914d\u7f6e" },
-      { id: "admin-users", label: "\u7ba1\u7406\u7528\u6237" },
     ];
   }
   return [
     { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
     { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
     { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
-    { id: "user-center", label: "\u7528\u6237\u4e2d\u5fc3" },
   ];
 }
 
@@ -714,7 +1187,13 @@ function renderScreenView() {
 
     <section class="grid-3 dashboard-sub-grid">
       <article class="panel">
-        <div class="panel-head"><h3 class="panel-title">攻击来源地区分布</h3></div>
+        <div class="panel-head">
+          <div>
+            <h3 class="panel-title">攻击来源地区 TOP7</h3>
+            <span class="panel-sub">按占比最多展示</span>
+          </div>
+          <button id="btnAttackMapShow" class="btn btn-ghost btn-mini" type="button">动态展示</button>
+        </div>
         <div id="chartSourcePie" class="chart-box short"></div>
       </article>
       <article class="panel">
@@ -731,6 +1210,7 @@ function renderScreenView() {
       <div id="tickerTrack" class="ticker-track"></div>
     </section>
   `;
+  document.getElementById("btnAttackMapShow")?.addEventListener("click", () => openAttackMapModal());
   refreshScreenData().catch((err) => showToast(`加载大屏失败：${err.message}`));
 }
 
@@ -764,11 +1244,396 @@ async function refreshScreenData() {
 
   renderTrendChart("chartTrend7d", Array.isArray(trend7d.items) ? trend7d.items : []);
   renderTopTypeBarChart("chartTopTypes", Array.isArray(topTypes.items) ? topTypes.items : []);
+  state.screenData = { kpis, trend7d, topTypes, sourceDist, heatmap, methodShare, ticker };
   renderPieChart("chartSourcePie", Array.isArray(sourceDist.items) ? sourceDist.items : [], "source_region", "total");
   renderHeatmapChart("chartHeatmap", Array.isArray(heatmap.items) ? heatmap.items : []);
   renderDonutChart("chartMethodDonut", Array.isArray(methodShare.items) ? methodShare.items : [], "attack_type", "ratio_percent");
 
   renderTicker(Array.isArray(ticker.items) ? ticker.items : []);
+}
+
+function normalizeRegionLookupKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/ Province$/i, "")
+    .replace(/ province$/i, "")
+    .replace(/ City$/i, "")
+    .replace(/ city$/i, "")
+    .replace(/省|市|自治区|特别行政区/g, "")
+    .toLowerCase();
+}
+
+function getRegionInfo(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "-" || raw === "未知" || raw === "内网") {
+    return { label: raw || "未知", coord: null };
+  }
+  const candidates = [raw];
+  raw
+    .split(/[\/|,，]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .forEach((x) => candidates.push(x));
+
+  for (const item of candidates) {
+    const direct = REGION_COORDS[item] || REGION_COORDS[normalizeRegionLookupKey(item)];
+    if (direct) return direct;
+  }
+  return { label: raw, coord: null };
+}
+
+function formatSourceRegionLabel(value) {
+  return getRegionInfo(value).label || String(value || "-");
+}
+
+function loadScriptOnce(src) {
+  if (!loadedScriptPromises[src]) {
+    loadedScriptPromises[src] = new Promise((resolve, reject) => {
+      const existing = document.querySelector(`script[src="${src}"]`);
+      if (existing) {
+        existing.addEventListener("load", () => resolve(true), { once: true });
+        existing.addEventListener("error", reject, { once: true });
+        if (existing.dataset.loaded === "1") resolve(true);
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => {
+        script.dataset.loaded = "1";
+        resolve(true);
+      };
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }
+  return loadedScriptPromises[src];
+}
+
+function getLoadedWorldMapName() {
+  if (!window.echarts || typeof echarts.getMap !== "function") return "";
+  if (echarts.getMap(WORLD_MAP_NAME)) return WORLD_MAP_NAME;
+  return "";
+}
+
+async function ensureWorldMapReady() {
+  if (!window.echarts || typeof echarts.getMap !== "function") return "";
+  let mapName = getLoadedWorldMapName();
+  if (mapName) return mapName;
+  for (const src of WORLD_MAP_SCRIPT_URLS) {
+    try {
+      await loadScriptOnce(src);
+      mapName = getLoadedWorldMapName();
+      if (mapName) return mapName;
+    } catch (err) {
+      console.warn("world map load failed", src, err);
+    }
+  }
+  return "";
+}
+
+function buildAttackMapItems(rows) {
+  const bucket = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const info = getRegionInfo(row.source_region || row.region || row.name);
+    if (!info.coord) return;
+    const total = Math.max(0, Number(row.total || row.count || row.value || 0));
+    if (!total) return;
+    const key = info.label;
+    const old = bucket.get(key) || { label: info.label, coord: info.coord, total: 0 };
+    old.total += total;
+    bucket.set(key, old);
+  });
+  return Array.from(bucket.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10);
+}
+
+function getAttackMapPreviewRows() {
+  return [
+    { source_region: "United States", total: 46 },
+    { source_region: "Turkey", total: 37 },
+    { source_region: "Bulgaria", total: 28 },
+    { source_region: "United Kingdom", total: 22 },
+    { source_region: "India", total: 18 },
+    { source_region: "Anhui", total: 16 },
+    { source_region: "Hong Kong", total: 13 },
+    { source_region: "Singapore", total: 11 },
+    { source_region: "Germany", total: 9 },
+    { source_region: "Slovenia", total: 7 },
+  ];
+}
+
+async function loadAttackMapPayload() {
+  try {
+    return await api("/api/v2/user/dashboard/source-map?days=30&limit=10");
+  } catch (err) {
+    const items = state.screenData?.sourceDist?.items || [];
+    return {
+      items,
+      fallback_client: true,
+      fallback_reason: err.message,
+      period_days: 30,
+      limit: 10,
+    };
+  }
+}
+
+async function openAttackMapModal() {
+  document.querySelector(".attack-map-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "attack-map-overlay";
+  overlay.innerHTML = `
+    <div class="attack-map-modal">
+      <div class="attack-map-topbar">
+        <div>
+          <div class="panel-sub">动态攻击态势</div>
+          <h2>近 30 天 TOP10 攻击来源飞线图</h2>
+          <p id="attackMapSummary">正在加载攻击来源数据...</p>
+        </div>
+        <button id="attackMapClose" class="btn btn-ghost" type="button">关闭</button>
+      </div>
+      <div class="attack-map-body">
+        <div class="attack-map-stage">
+          <div id="attackMapChart" class="attack-map-chart"></div>
+          <div id="attackMapEmpty" class="attack-map-empty hidden">暂无可定位的攻击来源数据</div>
+        </div>
+        <aside class="attack-map-side">
+          <div class="attack-map-server">
+            <span class="server-pulse"></span>
+            <div><strong>防护节点</strong><small>北京 · 本机服务器</small></div>
+          </div>
+          <div id="attackMapList" class="attack-map-list"></div>
+        </aside>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.body.classList.add("modal-open");
+  requestAnimationFrame(() => overlay.classList.add("is-open"));
+
+  let chart = null;
+  const close = () => {
+    if (chart) {
+      chart.dispose();
+      chart = null;
+    }
+    document.body.classList.remove("modal-open");
+    overlay.classList.remove("is-open");
+    setTimeout(() => overlay.remove(), 180);
+    document.removeEventListener("keydown", onKeyDown);
+  };
+  const onKeyDown = (ev) => {
+    if (ev.key === "Escape") close();
+  };
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay) close();
+  });
+  overlay.querySelector("#attackMapClose")?.addEventListener("click", close);
+  document.addEventListener("keydown", onKeyDown);
+
+  try {
+    const payload = await loadAttackMapPayload();
+    let items = buildAttackMapItems(payload.items);
+    let mode = "真实数据";
+    if (items.length < 2) {
+      items = buildAttackMapItems(getAttackMapPreviewRows());
+      mode = "动画预览数据";
+    } else if (payload.fallback_all_time) {
+      mode = "历史数据";
+    } else if (payload.fallback_client) {
+      mode = "当前大屏数据";
+    }
+
+    const total = items.reduce((sum, item) => sum + item.total, 0);
+    const summary = overlay.querySelector("#attackMapSummary");
+    if (summary) {
+      summary.textContent = `${mode} · ${items.length} 个来源 · 共 ${total.toLocaleString("zh-CN")} 次攻击，线条频率随攻击次数增强`;
+    }
+    renderAttackMapList(overlay.querySelector("#attackMapList"), items);
+
+    const chartEl = overlay.querySelector("#attackMapChart");
+    const emptyEl = overlay.querySelector("#attackMapEmpty");
+    if (!items.length || !chartEl) {
+      emptyEl?.classList.remove("hidden");
+      return;
+    }
+
+    const worldMapName = await ensureWorldMapReady();
+    if (worldMapName) {
+      chart = renderAttackMapEcharts(chartEl, items, worldMapName);
+    } else {
+      renderAttackMapSvg(chartEl, items);
+    }
+  } catch (err) {
+    const summary = overlay.querySelector("#attackMapSummary");
+    if (summary) summary.textContent = `加载失败：${err.message}`;
+    overlay.querySelector("#attackMapEmpty")?.classList.remove("hidden");
+  }
+}
+
+function renderAttackMapList(container, items) {
+  if (!container) return;
+  const max = Math.max(1, ...items.map((x) => x.total));
+  container.innerHTML = items
+    .map((item, idx) => {
+      const width = Math.max(8, Math.round((item.total / max) * 100));
+      return `
+        <div class="attack-map-rank" style="--bar-width:${width}%">
+          <b>${String(idx + 1).padStart(2, "0")}</b>
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${Number(item.total || 0).toLocaleString("zh-CN")}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderAttackMapEcharts(container, items, mapName) {
+  const chart = echarts.init(container);
+  const colors = ["#ff5d7a", "#ffb84d", "#35d9ff", "#55f0b2", "#8d7cff", "#f56bdc"];
+  const max = Math.max(1, ...items.map((x) => x.total));
+  const lineSeries = items.map((item, idx) => ({
+    name: item.label,
+    type: "lines",
+    coordinateSystem: "geo",
+    zlevel: 3,
+    effect: {
+      show: true,
+      period: Math.max(2.4, 8 - (item.total / max) * 4.8),
+      trailLength: 0.28,
+      color: "#ffffff",
+      symbol: "arrow",
+      symbolSize: 8 + (item.total / max) * 5,
+    },
+    lineStyle: {
+      color: colors[idx % colors.length],
+      width: 1.2 + (item.total / max) * 2.6,
+      opacity: 0.78,
+      curveness: 0.28,
+      shadowColor: colors[idx % colors.length],
+      shadowBlur: 8,
+    },
+    data: [{ fromName: item.label, toName: "北京", coords: [item.coord, BEIJING_COORD], value: item.total }],
+  }));
+
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      tooltip: {
+        trigger: "item",
+        formatter: (params) => {
+          const data = params.data || {};
+          if (params.seriesType === "lines") return `${escapeHtml(params.seriesName)} → 北京<br/>攻击次数：${data.value || 0}`;
+          const value = Array.isArray(data.value) ? data.value[2] : data.value;
+          return `${escapeHtml(data.name || params.name || "-")}<br/>攻击次数：${value || 0}`;
+        },
+      },
+      geo: {
+        map: mapName,
+        roam: false,
+        zoom: 1.18,
+        center: [45, 25],
+        silent: true,
+        label: { show: false },
+        itemStyle: {
+          areaColor: "rgba(22, 66, 103, 0.72)",
+          borderColor: "rgba(144, 213, 255, 0.45)",
+          borderWidth: 0.7,
+          shadowColor: "rgba(36, 194, 255, 0.22)",
+          shadowBlur: 16,
+        },
+        emphasis: { itemStyle: { areaColor: "rgba(48, 119, 169, 0.9)" } },
+      },
+      series: [
+        ...lineSeries,
+        {
+          name: "攻击来源",
+          type: "effectScatter",
+          coordinateSystem: "geo",
+          zlevel: 4,
+          rippleEffect: { brushType: "stroke", scale: 4 },
+          symbolSize: (val) => 8 + (Number(val[2] || 0) / max) * 16,
+          itemStyle: { color: "#ffbf4d", shadowBlur: 14, shadowColor: "#ffbf4d" },
+          data: items.map((item) => ({ name: item.label, value: [...item.coord, item.total] })),
+        },
+        {
+          name: "北京防护节点",
+          type: "effectScatter",
+          coordinateSystem: "geo",
+          zlevel: 5,
+          rippleEffect: { brushType: "stroke", scale: 5 },
+          symbolSize: 18,
+          itemStyle: { color: "#ffffff", shadowBlur: 24, shadowColor: "#35d9ff" },
+          label: { show: true, formatter: "北京", position: "right", color: "#fff", fontWeight: 800 },
+          data: [{ name: "北京", value: [...BEIJING_COORD, max] }],
+        },
+      ],
+    },
+    true
+  );
+  setTimeout(() => chart.resize(), 60);
+  return chart;
+}
+
+function projectMapCoord(coord, width = 1000, height = 520) {
+  const lon = Number(coord[0] || 0);
+  const lat = Number(coord[1] || 0);
+  return {
+    x: ((lon + 180) / 360) * width,
+    y: ((90 - lat) / 180) * height,
+  };
+}
+
+function renderAttackMapSvg(container, items) {
+  const width = 1000;
+  const height = 520;
+  const target = projectMapCoord(BEIJING_COORD, width, height);
+  const max = Math.max(1, ...items.map((x) => x.total));
+  const paths = items
+    .map((item, idx) => {
+      const from = projectMapCoord(item.coord, width, height);
+      const lift = 54 + idx * 8 + Math.min(90, (item.total / max) * 120);
+      const cx = (from.x + target.x) / 2;
+      const cy = Math.min(from.y, target.y) - lift;
+      const d = `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${target.x.toFixed(1)} ${target.y.toFixed(1)}`;
+      const dur = Math.max(2.4, 8 - (item.total / max) * 4.8).toFixed(2);
+      return `
+        <path class="attack-svg-line line-${idx % 6}" d="${d}" />
+        <circle class="attack-svg-source" cx="${from.x.toFixed(1)}" cy="${from.y.toFixed(1)}" r="${(5 + (item.total / max) * 8).toFixed(1)}" />
+        <text class="attack-svg-label" x="${(from.x + 10).toFixed(1)}" y="${(from.y - 8).toFixed(1)}">${escapeHtml(item.label)}</text>
+        <circle class="attack-svg-missile" r="${(3.5 + (item.total / max) * 2).toFixed(1)}">
+          <animateMotion dur="${dur}s" repeatCount="indefinite" path="${d}" />
+        </circle>
+      `;
+    })
+    .join("");
+
+  container.innerHTML = `
+    <svg class="attack-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="攻击来源飞线地图">
+      <defs>
+        <radialGradient id="mapGlow" cx="50%" cy="50%" r="65%">
+          <stop offset="0%" stop-color="rgba(53,217,255,.26)" />
+          <stop offset="70%" stop-color="rgba(53,217,255,.08)" />
+          <stop offset="100%" stop-color="rgba(53,217,255,0)" />
+        </radialGradient>
+      </defs>
+      <rect width="${width}" height="${height}" rx="28" fill="url(#mapGlow)" />
+      ${[-120, -60, 0, 60, 120].map((lon) => {
+        const x = projectMapCoord([lon, 0], width, height).x;
+        return `<line class="attack-svg-grid" x1="${x}" y1="34" x2="${x}" y2="${height - 34}" />`;
+      }).join("")}
+      ${[-45, 0, 45].map((lat) => {
+        const y = projectMapCoord([0, lat], width, height).y;
+        return `<line class="attack-svg-grid" x1="36" y1="${y}" x2="${width - 36}" y2="${y}" />`;
+      }).join("")}
+      <path class="attack-svg-land" d="M142 158c58-56 129-72 217-42 60 20 96 15 147-8 77-34 155-23 231 25 56 36 101 37 154 18 30-11 56-12 84 7v205c-61-19-119-20-174-3-66 20-131 25-199-3-70-29-138-32-214-5-82 30-163 24-246-19z" />
+      ${paths}
+      <circle class="attack-svg-target-halo" cx="${target.x.toFixed(1)}" cy="${target.y.toFixed(1)}" r="24" />
+      <circle class="attack-svg-target" cx="${target.x.toFixed(1)}" cy="${target.y.toFixed(1)}" r="8" />
+      <text class="attack-svg-target-label" x="${(target.x + 15).toFixed(1)}" y="${(target.y + 4).toFixed(1)}">北京</text>
+    </svg>
+  `;
 }
 
 function renderTicker(items) {
@@ -1671,11 +2536,72 @@ function renderRagSettingsView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
   const canRebuild = state.profile?.role === ROLE_ADMIN;
+  const activePanel = state.llmSettings.activePanel || "prompt";
 
   root.innerHTML = `
+    <section class="panel llm-settings-hero">
+      <div>
+        <h3 class="panel-title">大模型设置</h3>
+        <div class="panel-sub">统一管理 LLM 系统提示词与 RAG 知识库。提示词保存后，后续新进入的大模型研判任务会自动使用最新版本。</div>
+      </div>
+      <div class="llm-settings-badges">
+        <span>提示词可编辑</span>
+        <span>RAG 可维护</span>
+        <span>管理员专属</span>
+      </div>
+    </section>
+
+    <section class="llm-settings-card-grid">
+      <button class="llm-setting-card ${activePanel === "prompt" ? "is-active" : ""}" data-llm-setting-card="prompt">
+        <span class="llm-card-kicker">Prompt</span>
+        <strong>提示词设置</strong>
+        <em>配置发给大模型的系统提示词，控制研判口径、输出字段和建议风格。</em>
+        <small id="llm_card_prompt_meta">${state.llmSettings.prompt ? `${state.llmSettings.prompt.length} 字符` : "点击进入编辑"}</small>
+      </button>
+      <button class="llm-setting-card ${activePanel === "rag" ? "is-active" : ""}" data-llm-setting-card="rag">
+        <span class="llm-card-kicker">RAG</span>
+        <strong>RAG 知识库</strong>
+        <em>维护攻击知识、判定依据和处置建议，增强大模型解释能力。</em>
+        <small id="llm_card_rag_meta">${state.rag.total ? `${state.rag.total} 条知识` : "点击查看知识库"}</small>
+      </button>
+    </section>
+
+    <section class="panel llm-prompt-panel llm-setting-panel ${activePanel === "prompt" ? "" : "hidden"}" data-llm-panel="prompt">
+      <div class="panel-head">
+        <div>
+          <h3 class="panel-title">提示词设置</h3>
+          <div class="panel-sub">这里编辑的是发给大模型的系统提示词，会影响攻击类型、证据链、风险等级和处置建议的输出风格。</div>
+        </div>
+        <div class="ops-group">
+          <button id="llm_prompt_reload" class="btn btn-ghost">重新读取</button>
+          <button id="llm_prompt_save" class="btn btn-primary">保存提示词</button>
+        </div>
+      </div>
+      <div class="prompt-meta-grid">
+        <div class="prompt-meta-card">
+          <span>提示词文件</span>
+          <strong id="llm_prompt_path">-</strong>
+        </div>
+        <div class="prompt-meta-card">
+          <span>最后更新</span>
+          <strong id="llm_prompt_updated">-</strong>
+        </div>
+        <div class="prompt-meta-card">
+          <span>字符数</span>
+          <strong id="llm_prompt_chars">0</strong>
+        </div>
+      </div>
+      <textarea id="llm_prompt_editor" class="prompt-editor" rows="14" placeholder="正在读取提示词..."></textarea>
+      <div class="panel-sub top-gap-xs">建议保留 JSON 输出要求、字段约束和安全研判口径；如果要改实验风格，可以优先调整判定依据、风险等级解释和处置建议部分。</div>
+    </section>
+
+    <div class="llm-setting-panel ${activePanel === "rag" ? "" : "hidden"}" data-llm-panel="rag">
     <section class="panel">
       <div class="panel-head">
-        <h3 class="panel-title">知识库设置（RAG）</h3>
+        <div>
+          <h3 class="panel-title">RAG 知识库设置</h3>
+          <div class="panel-sub">维护可被大模型检索的攻防知识、证据模板和处置建议。</div>
+        </div>
         <div class="ops-group">
           <button id="rag_refresh" class="btn btn-success">刷新</button>
           <button id="rag_rebuild" class="btn btn-danger" ${canRebuild ? "" : "disabled"}>按种子重建</button>
@@ -1788,10 +2714,25 @@ function renderRagSettingsView() {
         <textarea id="rag_edit_mitigation" rows="4" disabled></textarea>
       </div>
     </section>
+    </div>
   `;
 
+  document.querySelectorAll("[data-llm-setting-card]").forEach((card) => {
+    card.addEventListener("click", () => switchLlmSettingPanel(String(card.getAttribute("data-llm-setting-card") || "prompt")));
+  });
   document.getElementById("rag_refresh")?.addEventListener("click", () => loadRagDocs(true));
   document.getElementById("rag_rebuild")?.addEventListener("click", rebuildRagFromSeed);
+  document.getElementById("llm_prompt_reload")?.addEventListener("click", () =>
+    loadLlmPrompt().catch((err) => showToast(`读取提示词失败：${err.message}`))
+  );
+  document.getElementById("llm_prompt_save")?.addEventListener("click", () =>
+    saveLlmPrompt().catch((err) => showToast(`保存提示词失败：${err.message}`))
+  );
+  document.getElementById("llm_prompt_editor")?.addEventListener("input", () => {
+    const text = String(document.getElementById("llm_prompt_editor")?.value || "");
+    const chars = document.getElementById("llm_prompt_chars");
+    if (chars) chars.textContent = `${text.length}${state.llmSettings.promptMaxChars ? ` / ${state.llmSettings.promptMaxChars}` : ""}`;
+  });
   document.getElementById("rag_add_doc")?.addEventListener("click", addRagDoc);
   document.getElementById("rag_edit_reload")?.addEventListener("click", () => {
     if (state.rag.selectedDocId) loadRagDocDetail(state.rag.selectedDocId).catch((err) => showToast(err.message));
@@ -1813,7 +2754,79 @@ function renderRagSettingsView() {
     if (ev.key === "Enter") loadRagDocs(true).catch((err) => showToast(err.message));
   });
 
+  loadLlmPrompt().catch((err) => showToast(`读取提示词失败：${err.message}`));
   loadRagDocs(true).catch((err) => showToast(`加载RAG列表失败：${err.message}`));
+}
+
+function switchLlmSettingPanel(panel) {
+  const nextPanel = panel === "rag" ? "rag" : "prompt";
+  if (state.llmSettings.activePanel === nextPanel) return;
+  state.llmSettings.activePanel = nextPanel;
+  document.querySelectorAll("[data-llm-setting-card]").forEach((card) => {
+    card.classList.toggle("is-active", card.getAttribute("data-llm-setting-card") === nextPanel);
+  });
+  document.querySelectorAll("[data-llm-panel]").forEach((pane) => {
+    const isActive = pane.getAttribute("data-llm-panel") === nextPanel;
+    pane.classList.toggle("hidden", !isActive);
+    if (isActive) {
+      pane.classList.remove("llm-panel-pop");
+      void pane.offsetWidth;
+      pane.classList.add("llm-panel-pop");
+    }
+  });
+  if (nextPanel === "prompt") {
+    loadLlmPrompt().catch((err) => showToast(`读取提示词失败：${err.message}`));
+  } else {
+    loadRagDocs().catch((err) => showToast(`加载RAG列表失败：${err.message}`));
+  }
+}
+
+async function loadLlmPrompt() {
+  const data = await api("/api/v2/llm/prompt");
+  const prompt = String(data.prompt || "");
+  state.llmSettings.prompt = prompt;
+  state.llmSettings.promptPath = String(data.path || "-");
+  state.llmSettings.promptUpdatedAt = String(data.updated_at || "-");
+  state.llmSettings.promptMaxChars = Number(data.max_chars || 0);
+  const editor = document.getElementById("llm_prompt_editor");
+  if (editor) editor.value = prompt;
+  const pathEl = document.getElementById("llm_prompt_path");
+  const updatedEl = document.getElementById("llm_prompt_updated");
+  const charsEl = document.getElementById("llm_prompt_chars");
+  if (pathEl) pathEl.textContent = state.llmSettings.promptPath || "-";
+  if (updatedEl) updatedEl.textContent = state.llmSettings.promptUpdatedAt || "-";
+  if (charsEl) charsEl.textContent = `${prompt.length}${state.llmSettings.promptMaxChars ? ` / ${state.llmSettings.promptMaxChars}` : ""}`;
+  const cardMeta = document.getElementById("llm_card_prompt_meta");
+  if (cardMeta) cardMeta.textContent = `${prompt.length} 字符`;
+}
+
+async function saveLlmPrompt() {
+  const editor = document.getElementById("llm_prompt_editor");
+  const prompt = String(editor?.value || "");
+  if (!prompt.trim()) {
+    showToast("提示词不能为空");
+    return;
+  }
+  const saveBtn = document.getElementById("llm_prompt_save");
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const data = await api("/api/v2/llm/prompt", { method: "PUT", body: { prompt } });
+    state.llmSettings.prompt = String(data.prompt || prompt);
+    state.llmSettings.promptPath = String(data.path || state.llmSettings.promptPath || "-");
+    state.llmSettings.promptUpdatedAt = String(data.updated_at || "-");
+    state.llmSettings.promptMaxChars = Number(data.max_chars || state.llmSettings.promptMaxChars || 0);
+    const pathEl = document.getElementById("llm_prompt_path");
+    const updatedEl = document.getElementById("llm_prompt_updated");
+    const charsEl = document.getElementById("llm_prompt_chars");
+    if (pathEl) pathEl.textContent = state.llmSettings.promptPath;
+    if (updatedEl) updatedEl.textContent = state.llmSettings.promptUpdatedAt;
+    if (charsEl) charsEl.textContent = `${state.llmSettings.prompt.length}${state.llmSettings.promptMaxChars ? ` / ${state.llmSettings.promptMaxChars}` : ""}`;
+    const cardMeta = document.getElementById("llm_card_prompt_meta");
+    if (cardMeta) cardMeta.textContent = `${state.llmSettings.prompt.length} 字符`;
+    showToast("提示词已保存，后续新研判会使用最新版本");
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 async function loadRagDocs(forcePageOne = false) {
@@ -1835,6 +2848,8 @@ function renderRagTable() {
   const body = document.getElementById("rag_table_body");
   const total = document.getElementById("rag_total");
   if (total) total.textContent = String(state.rag.total || 0);
+  const ragCardMeta = document.getElementById("llm_card_rag_meta");
+  if (ragCardMeta) ragCardMeta.textContent = `${state.rag.total || 0} 条知识`;
   if (!body) return;
   if (!state.rag.items.length) {
     body.innerHTML = `<tr><td colspan="6" class="panel-sub">暂无RAG知识</td></tr>`;
@@ -2781,21 +3796,100 @@ function renderUserCenterView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
   root.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h3 class="panel-title">\u7528\u6237\u4e2d\u5fc3</h3></div>
-      <div class="detail-grid">
-        <div><label class="panel-sub">\u5f53\u524d\u8d26\u53f7</label><input value="${escapeHtml(state.profile?.username || "-")}" disabled /></div>
-        <div><label class="panel-sub">\u5f53\u524d\u89d2\u8272</label><input value="${escapeHtml(ROLE_LABEL[state.profile?.role] || state.profile?.role || "-")}" disabled /></div>
-        <div><label class="panel-sub">\u65e7\u5bc6\u7801</label><input id="uc_old_password" type="password" autocomplete="current-password" /></div>
-        <div><label class="panel-sub">\u65b0\u5bc6\u7801</label><input id="uc_new_password" type="password" autocomplete="new-password" /></div>
-        <div><label class="panel-sub">\u786e\u8ba4\u65b0\u5bc6\u7801</label><input id="uc_confirm_password" type="password" autocomplete="new-password" /></div>
+    <section class="user-center-shell">
+      <div class="panel user-profile-card">
+        <div class="user-profile-hero">
+          ${renderUserAvatar(state.profile, "avatar-xl")}
+          <div>
+            <p class="panel-sub">个人中心</p>
+            <h3>${escapeHtml(getProfileName(state.profile))}</h3>
+            <span class="role-chip">${escapeHtml(ROLE_LABEL[state.profile?.role] || state.profile?.role || "-")}</span>
+          </div>
+        </div>
+        <div class="profile-meta-grid">
+          <div>
+            <span>登录账号</span>
+            <strong>${escapeHtml(state.profile?.username || "-")}</strong>
+          </div>
+          <div>
+            <span>会话有效期</span>
+            <strong>${escapeHtml(state.profile?.expires_at || "-")}</strong>
+          </div>
+        </div>
+        <div class="detail-grid profile-form-grid">
+          <div><label class="panel-sub">显示名称</label><input id="uc_display_name" value="${escapeHtml(state.profile?.display_name || "")}" maxlength="64" /></div>
+          <div><label class="panel-sub">昵称</label><input id="uc_nickname" value="${escapeHtml(state.profile?.nickname || state.profile?.display_name || "")}" maxlength="64" /></div>
+          <div class="grid-wide"><label class="panel-sub">头像链接</label><input id="uc_avatar_url" value="${escapeHtml(state.profile?.avatar_url || "")}" placeholder="/uploads/avatars/xxx.png 或 https://..." /></div>
+          <div class="grid-wide avatar-upload-row">
+            <input id="uc_avatar_file" type="file" accept="image/png,image/jpeg,image/webp" />
+            <button id="uc_upload_avatar" class="btn btn-ghost">上传头像</button>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button id="uc_save_profile" class="btn btn-primary">保存个人资料</button>
+        </div>
       </div>
-      <div class="row-actions">
-        <button id="uc_save_password" class="btn btn-primary">\u4fee\u6539\u5bc6\u7801</button>
+
+      <div class="panel user-security-card">
+        <div class="panel-head">
+          <div>
+            <h3 class="panel-title">账号安全</h3>
+            <p class="panel-sub">定期更新密码，避免测试账号长期裸奔。</p>
+          </div>
+        </div>
+        <div class="detail-grid">
+          <div class="grid-wide"><label class="panel-sub">旧密码</label><input id="uc_old_password" type="password" autocomplete="current-password" /></div>
+          <div><label class="panel-sub">新密码</label><input id="uc_new_password" type="password" autocomplete="new-password" /></div>
+          <div><label class="panel-sub">确认新密码</label><input id="uc_confirm_password" type="password" autocomplete="new-password" /></div>
+        </div>
+        <div class="row-actions">
+          <button id="uc_save_password" class="btn btn-warning">修改密码</button>
+        </div>
       </div>
     </section>
   `;
+  document.getElementById("uc_save_profile")?.addEventListener("click", () => updateSelfProfile());
+  document.getElementById("uc_upload_avatar")?.addEventListener("click", () => uploadSelfAvatar());
   document.getElementById("uc_save_password")?.addEventListener("click", () => updateSelfPassword());
+}
+
+async function updateSelfProfile() {
+  const displayName = String(document.getElementById("uc_display_name")?.value || "").trim();
+  const nickname = String(document.getElementById("uc_nickname")?.value || "").trim();
+  const avatarUrl = String(document.getElementById("uc_avatar_url")?.value || "").trim();
+  if (!displayName || !nickname) {
+    showToast("显示名称和昵称不能为空");
+    return;
+  }
+  await api("/api/v2/auth/profile", {
+    method: "PUT",
+    body: { display_name: displayName, nickname, avatar_url: avatarUrl },
+  });
+  state.profile = await api("/api/v2/auth/profile");
+  refreshHeaderProfile();
+  renderUserCenterView();
+  showToast("个人资料已保存");
+}
+
+async function uploadSelfAvatar() {
+  const input = document.getElementById("uc_avatar_file");
+  const file = input?.files?.[0];
+  if (!file) {
+    showToast("请先选择头像图片");
+    return;
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    showToast("头像图片不能超过 2MB");
+    return;
+  }
+  const form = new FormData();
+  form.append("avatar", file);
+  const resp = await apiForm("/api/v2/auth/avatar", form);
+  setInputValue("uc_avatar_url", resp.avatar_url || "");
+  state.profile = await api("/api/v2/auth/profile");
+  refreshHeaderProfile();
+  renderUserCenterView();
+  showToast("头像上传成功");
 }
 
 async function updateSelfPassword() {
@@ -2828,30 +3922,58 @@ function renderAdminUsersView() {
   const root = document.getElementById("viewRoot");
   if (!root) return;
   root.innerHTML = `
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">\u7ba1\u7406\u5458 - \u7528\u6237\u7ba1\u7406</h3>
-        <button id="adm_users_refresh" class="btn btn-success">\u5237\u65b0\u7528\u6237</button>
+    <section class="panel admin-users-hero admin-users-console">
+      <div>
+        <p class="panel-sub">账号与权限</p>
+        <h3 class="panel-title">用户管理</h3>
+        <p class="panel-sub">集中维护用户资料、头像、角色和密码。管理员可以设置其他用户的角色。</p>
       </div>
-      <div class="table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>\u7528\u6237\u540d</th>
-              <th>\u89d2\u8272</th>
-              <th>\u663e\u793a\u540d</th>
-              <th>\u66f4\u65b0\u65f6\u95f4</th>
-              <th>\u91cd\u7f6e\u5bc6\u7801</th>
-            </tr>
-          </thead>
-          <tbody id="adm_users_body"></tbody>
-        </table>
-      </div>
+      <button id="adm_users_refresh" class="btn btn-success">刷新用户</button>
     </section>
+    <section class="admin-user-list" id="adm_users_body"></section>
   `;
   document.getElementById("adm_users_refresh")?.addEventListener("click", () => loadAdminUsers());
   loadAdminUsers().catch((err) => showToast(`\u52a0\u8f7d\u7528\u6237\u5931\u8d25\uff1a${err.message}`));
+}
+
+function renderAdminUserCard(user) {
+  const username = String(user.username || "");
+  const isSelf = username === state.profile?.username;
+  return `
+    <article class="panel admin-user-card admin-user-row" data-admin-user="${escapeHtml(username)}">
+      <div class="admin-user-top">
+        ${renderUserAvatar(user, "avatar-lg")}
+        <div class="admin-user-title">
+          <strong>${escapeHtml(user.nickname || user.display_name || username || "-")}</strong>
+          <span>@${escapeHtml(username || "-")}</span>
+        </div>
+        <div class="admin-user-role-cell">
+          <label class="panel-sub">角色</label>
+          <select data-field="role" ${isSelf ? "disabled" : ""}>
+            <option value="${ROLE_NORMAL}" ${user.role === ROLE_NORMAL ? "selected" : ""}>普通用户</option>
+            <option value="${ROLE_ADMIN}" ${user.role === ROLE_ADMIN ? "selected" : ""}>管理员</option>
+          </select>
+          ${isSelf ? `<span class="panel-sub">当前账号不可自降权</span>` : ""}
+        </div>
+      </div>
+      <div class="profile-meta-grid compact">
+        <div><span>用户ID</span><strong>${escapeHtml(String(user.id || "-"))}</strong></div>
+        <div><span>更新时间</span><strong>${escapeHtml(user.updated_at || "-")}</strong></div>
+      </div>
+      <div class="detail-grid profile-form-grid">
+        <div><label class="panel-sub">显示名称</label><input data-field="display_name" value="${escapeHtml(user.display_name || "")}" maxlength="64" /></div>
+        <div><label class="panel-sub">昵称</label><input data-field="nickname" value="${escapeHtml(user.nickname || user.display_name || "")}" maxlength="64" /></div>
+        <div class="grid-wide"><label class="panel-sub">头像链接</label><input data-field="avatar_url" value="${escapeHtml(user.avatar_url || "")}" placeholder="/uploads/avatars/xxx.png 或 https://..." /></div>
+        <div class="grid-wide inline-pass-reset">
+          <input type="password" data-field="new_password" placeholder="输入新密码后可重置" class="input-sm" />
+          <button class="btn btn-danger" data-adm-user-pass-save>重置密码</button>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" data-adm-user-profile-save>保存资料</button>
+      </div>
+    </article>
+  `;
 }
 
 async function loadAdminUsers() {
@@ -2860,33 +3982,20 @@ async function loadAdminUsers() {
   const body = document.getElementById("adm_users_body");
   if (!body) return;
   if (!state.admin.users.length) {
-    body.innerHTML = `<tr><td colspan="6" class="panel-sub">\u6682\u65e0\u7528\u6237</td></tr>`;
+    body.innerHTML = `<section class="panel empty-state">暂无用户</section>`;
     return;
   }
-  body.innerHTML = state.admin.users
-    .map(
-      (x) => `
-      <tr>
-        <td>${escapeHtml(String(x.id || ""))}</td>
-        <td>${escapeHtml(x.username || "-")}</td>
-        <td>${escapeHtml(ROLE_LABEL[x.role] || x.role || "-")}</td>
-        <td>${escapeHtml(x.display_name || "-")}</td>
-        <td>${escapeHtml(x.updated_at || "-")}</td>
-        <td>
-          <div class="inline-pass-reset">
-            <input type="password" data-adm-user-pass="${escapeHtml(x.username || "")}" placeholder="\u65b0\u5bc6\u7801" class="input-sm" />
-            <button class="btn btn-danger" data-adm-user-save="${escapeHtml(x.username || "")}">\u66f4\u65b0</button>
-          </div>
-        </td>
-      </tr>
-    `
-    )
-    .join("");
-  body.querySelectorAll("[data-adm-user-save]").forEach((el) => {
+  body.innerHTML = state.admin.users.map((x) => renderAdminUserCard(x)).join("");
+  body.querySelectorAll("[data-adm-user-profile-save]").forEach((el) => {
     el.addEventListener("click", async () => {
-      const username = String(el.getAttribute("data-adm-user-save") || "");
-      if (!username) return;
-      const input = el.closest("tr")?.querySelector("[data-adm-user-pass]");
+      await updateAdminUserProfile(el.closest(".admin-user-card"));
+    });
+  });
+  body.querySelectorAll("[data-adm-user-pass-save]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const card = el.closest(".admin-user-card");
+      const username = String(card?.getAttribute("data-admin-user") || "");
+      const input = card?.querySelector('[data-field="new_password"]');
       const newPassword = String(input?.value || "").trim();
       if (!newPassword) {
         showToast("\u8bf7\u8f93\u5165\u65b0\u5bc6\u7801");
@@ -2904,6 +4013,29 @@ async function loadAdminUsers() {
       showToast(`\u5df2\u66f4\u65b0 ${username} \u5bc6\u7801`);
     });
   });
+}
+
+async function updateAdminUserProfile(card) {
+  const username = String(card?.getAttribute("data-admin-user") || "");
+  if (!username) return;
+  const displayName = String(card?.querySelector('[data-field="display_name"]')?.value || "").trim();
+  const nickname = String(card?.querySelector('[data-field="nickname"]')?.value || "").trim();
+  const avatarUrl = String(card?.querySelector('[data-field="avatar_url"]')?.value || "").trim();
+  const role = String(card?.querySelector('[data-field="role"]')?.value || "").trim();
+  if (!displayName || !nickname) {
+    showToast("显示名称和昵称不能为空");
+    return;
+  }
+  await api(`/api/v2/admin/users/${encodeURIComponent(username)}/profile`, {
+    method: "PUT",
+    body: { display_name: displayName, nickname, avatar_url: avatarUrl, role },
+  });
+  if (username === state.profile?.username) {
+    state.profile = await api("/api/v2/auth/profile");
+    refreshHeaderProfile();
+  }
+  await loadAdminUsers();
+  showToast(`已保存 ${username} 的资料`);
 }
 
 function renderTrendChart(containerId, rows) {
@@ -3029,30 +4161,52 @@ function renderTopTypeBarChart(containerId, rows) {
 function renderPieChart(containerId, rows, labelKey, valueKey) {
   const chart = getEchartsInstance(containerId);
   if (!chart) return;
-  const data = (Array.isArray(rows) ? rows : []).slice(0, 10).map((x) => ({
-    name: String(x[labelKey] || "-"),
-    value: Number(x[valueKey] || 0),
-  }));
+  const data = (Array.isArray(rows) ? rows : [])
+    .slice()
+    .sort((a, b) => Number(b[valueKey] || 0) - Number(a[valueKey] || 0))
+    .slice(0, 7)
+    .map((x) => ({
+      name: labelKey === "source_region" ? formatSourceRegionLabel(x[labelKey]) : String(x[labelKey] || "-"),
+      value: Number(x[valueKey] || 0),
+    }));
   chart.setOption(
     {
       backgroundColor: "transparent",
       animationDuration: 650,
       tooltip: { trigger: "item" },
-      legend: {
-        type: "scroll",
-        orient: "vertical",
-        right: 8,
-        top: 12,
-        bottom: 12,
-        textStyle: { color: "#cce6ff" },
-      },
+      legend: { show: false },
       series: [
         {
           type: "pie",
-          radius: ["0%", "66%"],
-          center: ["32%", "52%"],
+          radius: ["38%", "66%"],
+          center: ["50%", "52%"],
           data,
-          label: { color: "#dff1ff" },
+          avoidLabelOverlap: true,
+          label: {
+            show: true,
+            position: "outside",
+            color: "#f4fbff",
+            fontSize: 12,
+            fontWeight: 600,
+            formatter: "{b}",
+          },
+          emphasis: {
+            scale: true,
+            scaleSize: 8,
+            label: {
+              show: true,
+              color: "#eaf7ff",
+              fontSize: 12,
+              formatter: "{b}\n{d}%",
+            },
+          },
+          labelLine: {
+            show: true,
+            length: 16,
+            length2: 10,
+            lineStyle: { color: "rgba(244, 251, 255, 0.88)", width: 1.2 },
+          },
+          labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
           itemStyle: { borderColor: "#081c2e", borderWidth: 1 },
         },
       ],

@@ -48,6 +48,8 @@ llm/rag/rag_knowledge.db
 
 # Local deploy env
 deploy/.env
+config/jwt_secret.txt
+frontend_dashboard/public/uploads/
 
 # Build artifacts
 dist/*.exe

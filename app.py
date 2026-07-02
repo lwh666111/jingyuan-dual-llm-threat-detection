@@ -77,6 +77,73 @@ def terminate_process(proc: Optional[subprocess.Popen], name: str, log_path: Pat
             pass
 
 
+def cleanup_stale_project_processes(project_root: Path, log_path: Path) -> None:
+    """Stop orphaned child services from an earlier app.py run in the same project."""
+    if os.name != "nt":
+        return
+
+    root_text = str(project_root.resolve()).replace("'", "''").lower()
+    markers = [
+        "app.py",
+        "capture_http_request_batches.py",
+        "run_demo_daemon.py",
+        "llm_analyzer_daemon.py",
+        "result_db_daemon.py",
+        "ssh_bruteforce_monitor.py",
+        "dashboard_api_server.py",
+        "frontend_dashboard\\server.js",
+    ]
+    markers_ps = "@(" + ",".join("'" + m.replace("'", "''").lower() + "'" for m in markers) + ")"
+    script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$root = '{root_text}'
+$current = {os.getpid()}
+$markers = {markers_ps}
+$targets = Get-CimInstance Win32_Process | Where-Object {{
+  $ok = $false
+  if ($_.ProcessId -ne $current -and $_.CommandLine -and $_.Name -in @('python.exe','pythonw.exe','node.exe')) {{
+    $cmd = $_.CommandLine.ToLowerInvariant()
+    $isAppParent = ($_.Name -in @('python.exe','pythonw.exe') -and $cmd.Contains('app.py'))
+    if ($isAppParent) {{
+      $ok = $true
+    }} elseif ($cmd.Contains($root)) {{
+      foreach ($m in $markers) {{
+        if ($cmd.Contains($m)) {{
+          $ok = $true
+          break
+        }}
+      }}
+    }}
+  }}
+  $ok
+}}
+foreach ($p in $targets) {{
+  Write-Output "$($p.ProcessId)`t$($p.Name)`t$($p.CommandLine)"
+  Stop-Process -Id $p.ProcessId -Force
+}}
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"stale process cleanup skipped: {exc}", log_path)
+        return
+
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    for line in lines:
+        log(f"cleaned stale process {line}", log_path)
+    if proc.returncode != 0 and proc.stderr:
+        log(f"stale process cleanup warning: {proc.stderr.strip()}", log_path)
+    if lines:
+        time.sleep(2)
+
+
 def write_runtime_state(path: Path, state: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -514,6 +581,8 @@ def build_ssh_monitor_cmd(args, script_dir: Path) -> List[str]:
         str(args.ssh_monitor_bucket_minutes),
         "--threshold",
         str(args.ssh_bruteforce_threshold),
+        "--group-mode",
+        args.ssh_monitor_group_mode,
         "--poll-seconds",
         str(args.ssh_monitor_poll_seconds),
         "--log-file",
@@ -543,6 +612,8 @@ def build_api_cmd(args, script_dir: Path) -> List[str]:
         args.rag_db_path,
         "--rag-seed-file",
         args.rag_seed_file,
+        "--llm-prompt",
+        args.llm_prompt,
         "--ollama-url",
         args.ollama_url,
     ]
@@ -583,6 +654,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Disable auto elevation on Windows",
     )
     parser.set_defaults(auto_elevate=True)
+    parser.add_argument(
+        "--cleanup-stale-processes",
+        dest="cleanup_stale_processes",
+        action="store_true",
+        help="Clean orphaned child services from a previous app.py run before startup",
+    )
+    parser.add_argument(
+        "--no-cleanup-stale-processes",
+        dest="cleanup_stale_processes",
+        action="store_false",
+        help="Do not clean orphaned child services before startup",
+    )
+    parser.set_defaults(cleanup_stale_processes=True)
 
     mode_group = parser.add_argument_group("Run mode")
     mode_group.add_argument(
@@ -773,6 +857,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     ssh_group.add_argument("--ssh-monitor-window-minutes", type=int, default=10, help="SSH failure lookback window")
     ssh_group.add_argument("--ssh-monitor-bucket-minutes", type=int, default=10, help="SSH aggregation bucket size")
     ssh_group.add_argument("--ssh-bruteforce-threshold", type=int, default=5, help="Failed SSH logins per bucket before reporting")
+    ssh_group.add_argument(
+        "--ssh-monitor-group-mode",
+        choices=["global", "source_ip"],
+        default="global",
+        help="SSH brute-force aggregation mode: global window or per source IP",
+    )
     ssh_group.add_argument("--ssh-monitor-poll-seconds", type=int, default=20, help="SSH monitor polling interval")
     ssh_group.add_argument("--ssh-monitor-log-file", default="output/ssh_bruteforce_monitor.log", help="SSH monitor log file")
 
@@ -990,6 +1080,9 @@ def main() -> None:
     api_stderr = runtime_dir / "api_stderr.log"
     dashboard_stdout = runtime_dir / "dashboard_stdout.log"
     dashboard_stderr = runtime_dir / "dashboard_stderr.log"
+
+    if args.cleanup_stale_processes:
+        cleanup_stale_project_processes(project_root, app_log)
 
     capture_cmd = (
         build_capture_cmd(

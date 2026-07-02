@@ -1,17 +1,33 @@
 import argparse
+import ipaddress
+import os
 from html import escape
 import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Set
 from urllib.parse import unquote
 
 from flask import Flask, jsonify, make_response, request
 
+import pymysql
+from pymysql.cursors import DictCursor
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "output" / "target_lab" / "target_multivuln_lab.db"
+BLOCK_CACHE_TTL_SECONDS = 2.0
+
+MYSQL_CONF: Dict[str, Any] = {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "123456",
+    "database": "traffic_pipeline",
+}
+_BLOCK_CACHE: Dict[str, Any] = {"ts": 0.0, "ips": set()}
+_WARNED_DB_ERR = False
 
 
 def get_conn() -> sqlite3.Connection:
@@ -19,6 +35,77 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_mysql_conn():
+    return pymysql.connect(
+        host=MYSQL_CONF["host"],
+        port=int(MYSQL_CONF["port"]),
+        user=MYSQL_CONF["user"],
+        password=MYSQL_CONF["password"],
+        database=MYSQL_CONF["database"],
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+        autocommit=True,
+        connect_timeout=2,
+        read_timeout=2,
+        write_timeout=2,
+    )
+
+
+def normalize_ip(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text))
+    except Exception:
+        return ""
+
+
+def read_client_ip() -> str:
+    xff = str(request.headers.get("X-Forwarded-For", "")).strip()
+    if xff:
+        first = xff.split(",", 1)[0].strip()
+        ip = normalize_ip(first)
+        if ip:
+            return ip
+    real_ip = str(request.headers.get("X-Real-IP", "")).strip()
+    ip = normalize_ip(real_ip)
+    if ip:
+        return ip
+    return normalize_ip(request.remote_addr)
+
+
+def refresh_blocked_ips() -> Set[str]:
+    global _WARNED_DB_ERR
+    ips: Set[str] = set()
+    try:
+        with get_mysql_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT ip_address FROM demo_blocked_ips")
+                rows = cur.fetchall() or []
+        for row in rows:
+            ip_text = normalize_ip(row.get("ip_address"))
+            if ip_text:
+                ips.add(ip_text)
+        _WARNED_DB_ERR = False
+    except Exception as exc:
+        if not _WARNED_DB_ERR:
+            print(f"[target-multivuln-lab] warn: cannot load blocked ip list from mysql: {exc}", flush=True)
+            _WARNED_DB_ERR = True
+    return ips
+
+
+def is_client_ip_blocked(ip_text: str) -> bool:
+    if not ip_text:
+        return False
+    now_ts = time.time()
+    last_ts = float(_BLOCK_CACHE.get("ts") or 0.0)
+    if now_ts - last_ts >= BLOCK_CACHE_TTL_SECONDS:
+        _BLOCK_CACHE["ips"] = refresh_blocked_ips()
+        _BLOCK_CACHE["ts"] = now_ts
+    return ip_text in (_BLOCK_CACHE.get("ips") or set())
 
 
 def init_db() -> None:
@@ -81,6 +168,23 @@ def has_any(text: str, patterns: list[str]) -> bool:
 
 
 app = Flask(__name__)
+
+
+@app.before_request
+def deny_blocked_clients():
+    client_ip = read_client_ip()
+    if client_ip and is_client_ip_blocked(client_ip):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "ip_blocked",
+                    "message": "该IP已被防护系统封禁，访问被拒绝",
+                    "client_ip": client_ip,
+                }
+            ),
+            403,
+        )
 
 
 MOCK_FILES: Dict[str, str] = {
@@ -710,11 +814,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-vulnerability Flask lab for traffic pipeline testing")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--mysql-host", default=os.environ.get("TP_MYSQL_HOST", "127.0.0.1"))
+    parser.add_argument("--mysql-port", type=int, default=int(os.environ.get("TP_MYSQL_PORT", "3306")))
+    parser.add_argument("--mysql-user", default=os.environ.get("TP_MYSQL_USER", "root"))
+    parser.add_argument("--mysql-password", default=os.environ.get("TP_MYSQL_PASSWORD", "123456"))
+    parser.add_argument("--mysql-database", default=os.environ.get("TP_MYSQL_DATABASE", "traffic_pipeline"))
     args = parser.parse_args()
+
+    MYSQL_CONF["host"] = args.mysql_host
+    MYSQL_CONF["port"] = args.mysql_port
+    MYSQL_CONF["user"] = args.mysql_user
+    MYSQL_CONF["password"] = args.mysql_password
+    MYSQL_CONF["database"] = args.mysql_database
 
     init_db()
     print(f"[target-multivuln-lab] running on http://{args.host}:{args.port}")
     print(f"[target-multivuln-lab] sqlite db: {DB_PATH}")
+    print(
+        f"[target-multivuln-lab] mysql blocked-ip source: {MYSQL_CONF['host']}:{MYSQL_CONF['port']}/{MYSQL_CONF['database']}"
+    )
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 

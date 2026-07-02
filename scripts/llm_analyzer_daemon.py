@@ -41,6 +41,14 @@ def read_text(path: Path, default: str = "") -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def load_system_prompt(prompt_path: Path) -> Tuple[str, float]:
+    system_prompt = read_text(prompt_path)
+    if not system_prompt.strip():
+        raise RuntimeError(f"prompt 为空: {prompt_path}")
+    prompt_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else 0.0
+    return system_prompt, prompt_mtime
+
+
 def find_case_dirs(result_dir: Path) -> List[Path]:
     dirs = []
     for p in result_dir.glob("b.*"):
@@ -548,6 +556,14 @@ def main() -> None:
 
     while True:
         processed = 0
+        try:
+            current_prompt_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else 0.0
+            if current_prompt_mtime != prompt_mtime:
+                system_prompt, prompt_mtime = load_system_prompt(prompt_path)
+                log(f"prompt reloaded: {prompt_path}")
+        except Exception as exc:
+            log(f"prompt reload skipped: {exc}")
+
         case_dirs = find_case_dirs(result_dir)
 
         for case_dir in case_dirs:

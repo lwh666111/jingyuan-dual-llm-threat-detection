@@ -142,17 +142,32 @@ def bucket_start(dt: datetime, minutes: int) -> datetime:
     return dt.replace(minute=minute, second=0, microsecond=0)
 
 
-def event_id_for(ip: str, bucket: datetime) -> str:
-    digest = hashlib.sha1(f"ssh|{ip}|{bucket.isoformat()}".encode("utf-8")).hexdigest()[:22].upper()
-    return f"SSH{digest}"
+def event_id_for(group_key: str, bucket: datetime, aggregate: bool = False) -> str:
+    prefix = "SSHAGG" if aggregate else "SSH"
+    digest = hashlib.sha1(f"ssh|{group_key}|{bucket.isoformat()}".encode("utf-8")).hexdigest()[:18].upper()
+    return f"{prefix}{digest}"
 
 
-def write_ssh_event(conn: Any, ip: str, bucket: datetime, count: int, samples: Iterable[str]) -> None:
-    event_id = event_id_for(ip, bucket)
-    case_id = f"ssh:{ip}:{bucket.strftime('%Y%m%d%H%M')}"
+def write_ssh_event(
+    conn: Any,
+    ip: str,
+    bucket: datetime,
+    count: int,
+    samples: Iterable[str],
+    *,
+    aggregate: bool = False,
+    unique_ips: int = 1,
+    top_sources: List[Tuple[str, int]] | None = None,
+) -> None:
+    group_key = "all" if aggregate else ip
+    event_id = event_id_for(group_key, bucket, aggregate=aggregate)
+    case_id = f"ssh:{group_key}:{bucket.strftime('%Y%m%d%H%M')}"
+    top_sources = top_sources or [(ip, count)]
+    top_source_text = "，".join([f"{src_ip}({src_count}次)" for src_ip, src_count in top_sources[:5]])
     evidence = [
         f"聚合窗口：{bucket.strftime('%Y-%m-%d %H:%M:%S')} ~ {(bucket + timedelta(minutes=10)).strftime('%H:%M:%S')}",
-        f"来源IP：{ip}",
+        f"来源IP数量：{unique_ips}",
+        f"主要来源：{top_source_text}",
         f"SSH登录失败次数：{count}",
     ]
     evidence.extend([x for x in samples if x][:3])
@@ -204,7 +219,16 @@ def write_ssh_event(conn: Any, ip: str, bucket: datetime, count: int, samples: I
                 ip,
                 "SSH爆破",
                 confidence,
-                json.dumps({"ssh_fail_count": count, "window_minutes": 10}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "ssh_fail_count": count,
+                        "unique_source_ips": unique_ips,
+                        "top_sources": top_sources[:10],
+                        "window_minutes": 10,
+                        "aggregate": aggregate,
+                    },
+                    ensure_ascii=False,
+                ),
                 evidence_json,
             ),
         )
@@ -237,34 +261,60 @@ def write_ssh_event(conn: Any, ip: str, bucket: datetime, count: int, samples: I
                 "ssh:22",
                 "已拦截",
                 "unprocessed",
-                f"SSH failed login x{count}",
+                f"SSH failed login x{count}; unique_ips={unique_ips}; top_sources={top_source_text}",
                 "\n".join(evidence),
                 "SSH行为窗口检测",
-                "检测到同一来源IP短时间内多次SSH登录失败，建议封禁来源IP并检查弱口令。",
+                "检测到短时间内SSH登录失败次数异常，建议限制SSH暴露面、启用密钥登录并封禁高频来源IP。",
                 0,
                 1,
             ),
         )
 
 
-def sync_once(conn: Any, window_minutes: int, threshold: int, bucket_minutes: int) -> Dict[str, int]:
+def sync_once(conn: Any, window_minutes: int, threshold: int, bucket_minutes: int, group_mode: str = "global") -> Dict[str, int]:
     rows = collect_ssh_failures(window_minutes)
     grouped: Dict[Tuple[str, datetime], List[str]] = defaultdict(list)
     counter: Counter[Tuple[str, datetime]] = Counter()
+    bucket_ip_counter: Dict[datetime, Counter[str]] = defaultdict(Counter)
+    bucket_samples: Dict[datetime, List[str]] = defaultdict(list)
     for t, ip, message in rows:
         bucket = bucket_start(t, bucket_minutes)
-        key = (ip, bucket)
-        counter[key] += 1
-        if len(grouped[key]) < 3:
-            grouped[key].append(message)
+        if group_mode == "source_ip":
+            key = (ip, bucket)
+            counter[key] += 1
+            if len(grouped[key]) < 3:
+                grouped[key].append(message)
+        else:
+            bucket_ip_counter[bucket][ip] += 1
+            if len(bucket_samples[bucket]) < 3:
+                bucket_samples[bucket].append(message)
 
     written = 0
-    for (ip, bucket), count in counter.items():
-        if count < threshold:
-            continue
-        write_ssh_event(conn, ip, bucket, count, grouped[(ip, bucket)])
-        written += 1
-    return {"observed": len(rows), "written": written}
+    if group_mode == "source_ip":
+        for (ip, bucket), count in counter.items():
+            if count < threshold:
+                continue
+            write_ssh_event(conn, ip, bucket, count, grouped[(ip, bucket)])
+            written += 1
+    else:
+        for bucket, ip_counts in bucket_ip_counter.items():
+            count = sum(ip_counts.values())
+            if count < threshold:
+                continue
+            top_sources = ip_counts.most_common(10)
+            top_ip = top_sources[0][0] if top_sources else ""
+            write_ssh_event(
+                conn,
+                top_ip,
+                bucket,
+                count,
+                bucket_samples[bucket],
+                aggregate=True,
+                unique_ips=len(ip_counts),
+                top_sources=top_sources,
+            )
+            written += 1
+    return {"observed": len(rows), "written": written, "unique_ips": len({ip for _, ip, _ in rows})}
 
 
 def main() -> None:
@@ -279,6 +329,12 @@ def main() -> None:
     parser.add_argument("--threshold", type=int, default=5)
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--log-file", default="output/ssh_bruteforce_monitor.log")
+    parser.add_argument(
+        "--group-mode",
+        choices=["global", "source_ip"],
+        default="global",
+        help="Aggregate SSH brute-force alerts globally per time bucket or per source IP",
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
@@ -297,9 +353,13 @@ def main() -> None:
             conn = mysql_connect(cfg)
             ensure_mysql(conn)
             ensure_demo_attack_events(conn)
-            stats = sync_once(conn, args.window_minutes, args.threshold, args.bucket_minutes)
+            stats = sync_once(conn, args.window_minutes, args.threshold, args.bucket_minutes, args.group_mode)
             conn.close()
-            log(f"ssh monitor sync observed={stats['observed']} written={stats['written']}", log_file)
+            log(
+                f"ssh monitor sync observed={stats['observed']} unique_ips={stats.get('unique_ips', 0)} "
+                f"written={stats['written']} group_mode={args.group_mode}",
+                log_file,
+            )
         except Exception as exc:  # noqa: BLE001
             log(f"ssh monitor failed: {exc}", log_file)
             if args.once:

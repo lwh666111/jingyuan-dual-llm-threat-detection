@@ -50,9 +50,15 @@ AUTH_COOKIE_NAME = "tp_auth_token"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_PUBLIC_DIR = PROJECT_ROOT / "frontend_dashboard" / "public"
 DASHBOARD_UPLOAD_DIR = DASHBOARD_PUBLIC_DIR / "uploads"
+AVATAR_UPLOAD_DIR = DASHBOARD_UPLOAD_DIR / "avatars"
 DEFAULT_HOMEPAGE_BACKGROUND = "/assets/bg-main.jpg"
 ALLOWED_BACKGROUND_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_BACKGROUND_BYTES = 10 * 1024 * 1024
+ALLOWED_AVATAR_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+DEFAULT_JWT_SECRET_PATH = PROJECT_ROOT / "config" / "jwt_secret.txt"
+DEFAULT_LLM_PROMPT_PATH = PROJECT_ROOT / "llm" / "prompts" / "system_prompt.txt"
+MAX_LLM_PROMPT_CHARS = 30000
 
 DEMO_ACCOUNTS = [
     {"username": "user", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
@@ -70,7 +76,7 @@ def find_demo_account(conn: Any, username: str, password: str, role_hint: str = 
         if role_hint:
             cur.execute(
                 """
-                SELECT id, username, password, role, display_name
+                SELECT id, username, password, role, display_name, nickname, avatar_url
                 FROM demo_users
                 WHERE username=%s AND password=%s AND role=%s
                 LIMIT 1
@@ -80,7 +86,7 @@ def find_demo_account(conn: Any, username: str, password: str, role_hint: str = 
             return cur.fetchone()
         cur.execute(
             """
-            SELECT id, username, password, role, display_name
+            SELECT id, username, password, role, display_name, nickname, avatar_url
             FROM demo_users
             WHERE username=%s AND password=%s
               AND role IN (%s, %s)
@@ -167,6 +173,65 @@ def dt_to_str(dt: Optional[datetime], ms: bool = True) -> Optional[str]:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def resolve_project_path(path_text: str, default_path: Path) -> Path:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return default_path.resolve()
+    path = Path(raw)
+    if path.is_absolute():
+        return path.resolve()
+    return (PROJECT_ROOT / path).resolve()
+
+
+def display_project_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT))
+    except Exception:
+        return str(path.resolve())
+
+
+def load_or_create_jwt_secret(path: Path = DEFAULT_JWT_SECRET_PATH) -> str:
+    path = path.resolve()
+    if path.exists():
+        secret = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+        if secret:
+            return secret
+    path.parent.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_urlsafe(48)
+    path.write_text(secret, encoding="utf-8")
+    return secret
+
+
+def read_llm_prompt_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def write_llm_prompt_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def build_llm_prompt_payload(path: Path) -> Dict[str, Any]:
+    content = read_llm_prompt_file(path)
+    updated_at = None
+    exists = path.exists()
+    if exists:
+        try:
+            updated_at = dt_to_str(datetime.fromtimestamp(path.stat().st_mtime), ms=False)
+        except Exception:
+            updated_at = None
+    return {
+        "prompt": content,
+        "path": display_project_path(path),
+        "exists": exists,
+        "updated_at": updated_at,
+        "max_chars": MAX_LLM_PROMPT_CHARS,
+        "chars": len(content),
+    }
+
+
 def normalize_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return dt_to_str(value)
@@ -200,6 +265,14 @@ def safe_json_loads(text: Any, default: Any = None) -> Any:
 def db_table_exists(cur: Any, table_name: str) -> bool:
     try:
         cur.execute("SHOW TABLES LIKE %s", (table_name,))
+        return bool(cur.fetchone())
+    except Exception:
+        return False
+
+
+def db_column_exists(cur: Any, table_name: str, column_name: str) -> bool:
+    try:
+        cur.execute(f"SHOW COLUMNS FROM `{table_name}` LIKE %s", (column_name,))
         return bool(cur.fetchone())
     except Exception:
         return False
@@ -459,6 +532,65 @@ def normalize_source_region_label(value: Any) -> str:
     return raw
 
 
+CHINA_REGION_ALIASES = {
+    "beijing",
+    "tianjin",
+    "shanghai",
+    "chongqing",
+    "hebei",
+    "shanxi",
+    "liaoning",
+    "jilin",
+    "heilongjiang",
+    "jiangsu",
+    "zhejiang",
+    "anhui",
+    "fujian",
+    "jiangxi",
+    "shandong",
+    "henan",
+    "hubei",
+    "hunan",
+    "guangdong",
+    "hainan",
+    "sichuan",
+    "guizhou",
+    "yunnan",
+    "shaanxi",
+    "gansu",
+    "qinghai",
+    "taiwan",
+    "inner mongolia",
+    "guangxi",
+    "tibet",
+    "ningxia",
+    "xinjiang",
+    "hong kong",
+    "macau",
+}
+
+
+def simplify_source_region_for_dashboard(value: Any) -> str:
+    region = normalize_source_region_label(value)
+    if region in {"未知", "内网"}:
+        return region
+    parts = [x.strip() for x in re.split(r"[/|,，]+", region) if x.strip()]
+    if not parts:
+        return "未知"
+    first = parts[0]
+    first_low = first.lower()
+    if first in {"中国", "中华人民共和国"} or first_low in {"china", "cn", "prc", "people's republic of china"}:
+        return normalize_source_region_label(parts[1]) if len(parts) > 1 else "中国"
+    if (
+        first_low in CHINA_REGION_ALIASES
+        or first.endswith(("省", "市", "自治区", "特别行政区"))
+        or " province" in first_low
+        or " autonomous" in first_low
+    ):
+        return first.replace(" Province", "").replace(" province", "").strip()
+    return first
+
+
 def aggregate_counts_by_label(rows: List[Dict[str, Any]], label_key: str, total_key: str = "total") -> List[Dict[str, Any]]:
     bucket: Dict[str, int] = {}
     for row in rows:
@@ -489,6 +621,14 @@ def attack_type_aliases(label: str) -> List[str]:
         "可疑流量": ["可疑流量", "鍙枒娴侀噺", "suspicious"],
     }
     return aliases.get(canonical, [canonical])
+
+
+def visible_attack_event_clause(alias: str = "") -> str:
+    prefix = f"{alias}." if alias else ""
+    # Older SSH monitor versions wrote one high-risk row per source IP. Keep those
+    # records in MySQL, but hide them from default dashboards so web attacks are
+    # not drowned out. New SSH aggregate events use the SSHAGG prefix and remain visible.
+    return f"NOT ({prefix}event_id LIKE 'SSH%%' AND {prefix}event_id NOT LIKE 'SSHAGG%%')"
 
 
 def is_public_ip(ip_text: str) -> bool:
@@ -760,16 +900,40 @@ def run_netsh(args: List[str]) -> Tuple[bool, str, str]:
     return ok, result.stdout or "", result.stderr or ""
 
 
-def firewall_block_ip(ip_text: str) -> Tuple[bool, str]:
-    if os.name != "nt":
-        return False, "firewall_block_supported_only_on_windows"
-    ip_val = str(ip_text or "").strip()
-    if not ip_val:
-        return False, "empty_ip"
-    in_rule, out_rule = firewall_rule_names(ip_val)
-    # make command idempotent
-    run_netsh(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={in_rule}"])
-    run_netsh(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={out_rule}"])
+def ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def run_powershell(command: str) -> Tuple[bool, str, str]:
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except Exception as exc:
+        return False, "", str(exc)
+    return result.returncode == 0, result.stdout or "", result.stderr or ""
+
+
+def firewall_delete_rule(rule_name: str) -> Tuple[bool, str]:
+    ok1, out1, err1 = run_netsh(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"])
+    ps_cmd = (
+        f"$r = Get-NetFirewallRule -Name {ps_quote(rule_name)} -ErrorAction SilentlyContinue; "
+        "if ($r) { $r | Remove-NetFirewallRule -ErrorAction Stop }; "
+        "Write-Output 'deleted_or_missing'"
+    )
+    ok2, out2, err2 = run_powershell(ps_cmd)
+    text = f"{out1}\n{err1}\n{out2}\n{err2}"
+    return ok1 or ok2 or "no rules match" in text.lower() or "deleted_or_missing" in text, text.strip()
+
+
+def firewall_create_rule(rule_name: str, direction: str, ip_val: str) -> Tuple[bool, str]:
+    dir_arg = "in" if direction == "in" else "out"
+    ps_direction = "Inbound" if direction == "in" else "Outbound"
     ok1, out1, err1 = run_netsh(
         [
             "netsh",
@@ -777,53 +941,57 @@ def firewall_block_ip(ip_text: str) -> Tuple[bool, str]:
             "firewall",
             "add",
             "rule",
-            f"name={in_rule}",
-            "dir=in",
+            f"name={rule_name}",
+            f"dir={dir_arg}",
             "action=block",
             f"remoteip={ip_val}",
             "enable=yes",
             "profile=any",
         ]
     )
-    ok2, out2, err2 = run_netsh(
-        [
-            "netsh",
-            "advfirewall",
-            "firewall",
-            "add",
-            "rule",
-            f"name={out_rule}",
-            "dir=out",
-            "action=block",
-            f"remoteip={ip_val}",
-            "enable=yes",
-            "profile=any",
-        ]
+    if ok1:
+        return True, out1 or err1
+    ps_cmd = (
+        f"New-NetFirewallRule -Name {ps_quote(rule_name)} "
+        f"-DisplayName {ps_quote(rule_name)} "
+        f"-Direction {ps_direction} -Action Block "
+        f"-RemoteAddress {ps_quote(ip_val)} -Profile Any -Enabled True "
+        "-ErrorAction Stop | Out-Null; Write-Output 'created'"
     )
+    ok2, out2, err2 = run_powershell(ps_cmd)
+    return ok2, f"netsh: {out1 or err1}; powershell: {out2 or err2}".strip()
+
+
+def firewall_block_ip(ip_text: str) -> Tuple[bool, str]:
+    if os.name != "nt":
+        return False, "firewall_block_supported_only_on_windows"
+    ip_val = normalize_ip_literal(ip_text)
+    if not ip_val:
+        return False, "invalid_or_empty_ip"
+    in_rule, out_rule = firewall_rule_names(ip_val)
+    # make command idempotent
+    firewall_delete_rule(in_rule)
+    firewall_delete_rule(out_rule)
+    ok1, detail1 = firewall_create_rule(in_rule, "in", ip_val)
+    ok2, detail2 = firewall_create_rule(out_rule, "out", ip_val)
     if ok1 and ok2:
         return True, ""
-    detail = f"in: {out1 or err1}; out: {out2 or err2}"
+    detail = f"in: {detail1}; out: {detail2}"
     return False, detail.strip()
 
 
 def firewall_unblock_ip(ip_text: str) -> Tuple[bool, str]:
     if os.name != "nt":
         return False, "firewall_unblock_supported_only_on_windows"
-    ip_val = str(ip_text or "").strip()
+    ip_val = normalize_ip_literal(ip_text)
     if not ip_val:
-        return False, "empty_ip"
+        return False, "invalid_or_empty_ip"
     in_rule, out_rule = firewall_rule_names(ip_val)
-    # delete rule no matter exists or not; if both return non-zero we still regard as success if "No rules match"
-    ok1, out1, err1 = run_netsh(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={in_rule}"])
-    ok2, out2, err2 = run_netsh(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={out_rule}"])
-
-    text1 = f"{out1}\n{err1}".lower()
-    text2 = f"{out2}\n{err2}".lower()
-    no_match1 = "no rules match" in text1
-    no_match2 = "no rules match" in text2
-    if (ok1 or no_match1) and (ok2 or no_match2):
+    ok1, detail1 = firewall_delete_rule(in_rule)
+    ok2, detail2 = firewall_delete_rule(out_rule)
+    if ok1 and ok2:
         return True, ""
-    detail = f"in: {out1 or err1}; out: {out2 or err2}"
+    detail = f"in: {detail1}; out: {detail2}"
     return False, detail.strip()
 
 
@@ -1337,6 +1505,8 @@ def ensure_schema(conn: Any) -> None:
           password VARCHAR(128) NOT NULL,
           role VARCHAR(16) NOT NULL,
           display_name VARCHAR(64) NOT NULL,
+          nickname VARCHAR(64) NOT NULL DEFAULT '',
+          avatar_url VARCHAR(512) NOT NULL DEFAULT '',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -1446,6 +1616,17 @@ def ensure_schema(conn: Any) -> None:
     with conn.cursor() as cur:
         for ddl in ddl_list:
             cur.execute(ddl)
+        if not db_column_exists(cur, "demo_users", "nickname"):
+            cur.execute("ALTER TABLE demo_users ADD COLUMN nickname VARCHAR(64) NOT NULL DEFAULT '' AFTER display_name")
+        if not db_column_exists(cur, "demo_users", "avatar_url"):
+            cur.execute("ALTER TABLE demo_users ADD COLUMN avatar_url VARCHAR(512) NOT NULL DEFAULT '' AFTER nickname")
+        cur.execute(
+            """
+            UPDATE demo_users
+            SET nickname=display_name
+            WHERE (nickname IS NULL OR nickname='')
+            """
+        )
 
 
 def log_action(conn: Any, username: str, role: str, action: str, target: str, detail: str) -> None:
@@ -1465,25 +1646,27 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             if force_seed:
                 cur.execute(
                     """
-                    INSERT INTO demo_users(username, password, role, display_name)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO demo_users(username, password, role, display_name, nickname)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                       password=VALUES(password),
                       role=VALUES(role),
-                      display_name=VALUES(display_name)
+                      display_name=VALUES(display_name),
+                      nickname=CASE WHEN nickname='' THEN VALUES(nickname) ELSE nickname END
                     """,
-                    (row["username"], row["password"], row["role"], row["display_name"]),
+                    (row["username"], row["password"], row["role"], row["display_name"], row["display_name"]),
                 )
             else:
                 cur.execute(
                     """
-                    INSERT INTO demo_users(username, password, role, display_name)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO demo_users(username, password, role, display_name, nickname)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                       role=VALUES(role),
-                      display_name=VALUES(display_name)
+                      display_name=VALUES(display_name),
+                      nickname=CASE WHEN nickname='' THEN VALUES(nickname) ELSE nickname END
                     """,
-                    (row["username"], row["password"], row["role"], row["display_name"]),
+                    (row["username"], row["password"], row["role"], row["display_name"], row["display_name"]),
                 )
         cur.execute(
             """
@@ -1647,14 +1830,15 @@ def ensure_builtin_admin(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO demo_users(username, password, role, display_name)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO demo_users(username, password, role, display_name, nickname)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               password=VALUES(password),
               role=VALUES(role),
-              display_name=VALUES(display_name)
+              display_name=VALUES(display_name),
+              nickname=CASE WHEN nickname='' THEN VALUES(nickname) ELSE nickname END
             """,
-            ("admin", "admin", ROLE_ADMIN, "管理员"),
+            ("admin", "admin", ROLE_ADMIN, "管理员", "管理员"),
         )
 
 
@@ -1676,9 +1860,10 @@ def demo_payload_by_type(attack_type: str) -> str:
 
 
 def refresh_machine_stats(conn: Any) -> None:
+    visible_sql = visible_attack_event_clause()
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE demo_machines m
             LEFT JOIN (
               SELECT
@@ -1687,6 +1872,7 @@ def refresh_machine_stats(conn: Any) -> None:
                 SUM(CASE WHEN DATE(occurred_at)=CURDATE() AND risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing') THEN 1 ELSE 0 END) AS alert_cnt,
                 MAX(occurred_at) AS last_attack_time
               FROM demo_attack_events
+              WHERE {visible_sql}
               GROUP BY target_node
             ) s ON m.machine_name = s.target_node
             SET
@@ -1730,6 +1916,8 @@ def create_jwt_token(user_row: Dict[str, Any], secret: str, ttl_seconds: int = T
         "sub": str(user_row.get("username") or ""),
         "role": str(user_row.get("role") or ""),
         "display_name": str(user_row.get("display_name") or ""),
+        "nickname": str(user_row.get("nickname") or user_row.get("display_name") or ""),
+        "avatar_url": str(user_row.get("avatar_url") or ""),
         "iat": now_ts,
         "exp": exp_ts,
         "jti": uuid.uuid4().hex,
@@ -1819,12 +2007,48 @@ def build_session_from_claims(payload: Dict[str, Any]) -> Dict[str, Any]:
         "username": str(payload.get("sub") or ""),
         "role": str(payload.get("role") or ""),
         "display_name": str(payload.get("display_name") or ""),
+        "nickname": str(payload.get("nickname") or payload.get("display_name") or ""),
+        "avatar_url": normalize_avatar_url(payload.get("avatar_url") or ""),
         "expires_at": expires_at,
     }
 
 
 def is_valid_username(username: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_]{3,32}", username))
+
+
+def normalize_profile_text(value: Any, fallback: str = "", max_len: int = 64) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        text = fallback
+    return text[:max_len]
+
+
+def normalize_avatar_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) > 512 or any(x in text for x in ['"', "'", "\\", "\r", "\n"]):
+        return ""
+    if text.startswith("/uploads/avatars/"):
+        return text
+    if text.startswith("https://") or text.startswith("http://"):
+        return text
+    return ""
+
+
+def profile_public_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    display_name = str(row.get("display_name") or row.get("username") or "")
+    nickname = str(row.get("nickname") or display_name)
+    avatar_url = normalize_avatar_url(row.get("avatar_url") or "")
+    return {
+        "id": row.get("id"),
+        "username": str(row.get("username") or ""),
+        "role": str(row.get("role") or ""),
+        "display_name": display_name,
+        "nickname": nickname,
+        "avatar_url": avatar_url,
+    }
 
 
 def get_auth_token_from_request() -> str:
@@ -1940,6 +2164,7 @@ def create_app(
     jwt_secret: str = "",
     jwt_ttl_seconds: int = TOKEN_TTL_SECONDS,
     ollama_url: str = "http://127.0.0.1:11434",
+    llm_prompt_path: str = "llm/prompts/system_prompt.txt",
 ) -> Flask:
     app = Flask(__name__)
     app.url_map.strict_slashes = False
@@ -1947,6 +2172,7 @@ def create_app(
     app.config["RAG_DB_PATH"] = str(Path(rag_db_path).resolve())
     app.config["RAG_SEED_PATH"] = str(Path(rag_seed_path).resolve())
     app.config["OLLAMA_URL"] = normalize_ollama_url(ollama_url)
+    app.config["LLM_PROMPT_PATH"] = str(resolve_project_path(llm_prompt_path, DEFAULT_LLM_PROMPT_PATH))
     app.config["AUTH_COOKIE_NAME"] = os.environ.get("TP_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
     app.config["AUTH_COOKIE_SECURE"] = str(os.environ.get("TP_AUTH_COOKIE_SECURE", "0")).strip().lower() in {
         "1",
@@ -1957,8 +2183,8 @@ def create_app(
     app.config["AUTH_COOKIE_DOMAIN"] = os.environ.get("TP_AUTH_COOKIE_DOMAIN", "")
     final_jwt_secret = (jwt_secret or os.environ.get("TP_JWT_SECRET", "")).strip()
     if not final_jwt_secret:
-        final_jwt_secret = secrets.token_urlsafe(48)
-        print("[warn] JWT secret not set, generated ephemeral secret for this runtime.")
+        final_jwt_secret = load_or_create_jwt_secret()
+        print(f"[info] JWT secret loaded from {display_project_path(DEFAULT_JWT_SECRET_PATH)}")
     app.config["JWT_SECRET"] = final_jwt_secret
     app.config["JWT_TTL_SECONDS"] = max(300, int(jwt_ttl_seconds))
 
@@ -2025,14 +2251,14 @@ def create_app(
                     return jsonify({"error": "username_already_exists"}), 409
                 cur.execute(
                     """
-                    INSERT INTO demo_users(username, password, role, display_name)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO demo_users(username, password, role, display_name, nickname)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (username, password, ROLE_NORMAL, display_name),
+                    (username, password, ROLE_NORMAL, display_name, display_name),
                 )
                 cur.execute(
                     """
-                    SELECT id, username, role, display_name
+                    SELECT id, username, role, display_name, nickname, avatar_url
                     FROM demo_users
                     WHERE username=%s
                     LIMIT 1
@@ -2052,6 +2278,8 @@ def create_app(
                 "expires_in": int(app.config["JWT_TTL_SECONDS"]),
                 "role": account["role"],
                 "display_name": account["display_name"],
+                "nickname": account.get("nickname") or account["display_name"],
+                "avatar_url": normalize_avatar_url(account.get("avatar_url") or ""),
                 "username": account["username"],
             }
         )
@@ -2078,6 +2306,8 @@ def create_app(
                 "expires_in": int(app.config["JWT_TTL_SECONDS"]),
                 "role": account["role"],
                 "display_name": account["display_name"],
+                "nickname": account.get("nickname") or account["display_name"],
+                "avatar_url": normalize_avatar_url(account.get("avatar_url") or ""),
                 "username": account["username"],
             }
         )
@@ -2095,8 +2325,85 @@ def create_app(
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def profile():
         session = dict(g.session)
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, username, role, display_name, nickname, avatar_url
+                    FROM demo_users
+                    WHERE username=%s
+                    LIMIT 1
+                    """,
+                    (g.session["username"],),
+                )
+                row = cur.fetchone()
+        if row:
+            session.update(profile_public_fields(row))
         session["expires_at"] = dt_to_str(session["expires_at"])
         return jsonify(session)
+
+    @app.route("/api/v2/auth/profile", methods=["PUT"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def update_profile():
+        body = request.get_json(silent=True) or {}
+        display_name = normalize_profile_text(body.get("display_name"), g.session["display_name"], 64)
+        nickname = normalize_profile_text(body.get("nickname"), display_name, 64)
+        avatar_url = normalize_avatar_url(body.get("avatar_url") or "")
+        if not display_name:
+            display_name = g.session["username"]
+        if not nickname:
+            nickname = display_name
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE demo_users
+                    SET display_name=%s, nickname=%s, avatar_url=%s
+                    WHERE username=%s
+                    """,
+                    (display_name, nickname, avatar_url, g.session["username"]),
+                )
+                cur.execute(
+                    """
+                    SELECT id, username, role, display_name, nickname, avatar_url
+                    FROM demo_users
+                    WHERE username=%s
+                    LIMIT 1
+                    """,
+                    (g.session["username"],),
+                )
+                row = cur.fetchone()
+                log_action(conn, g.session["username"], g.session["role"], "update_profile", "self", "profile_updated")
+            conn.commit()
+        if not row:
+            return jsonify({"error": "user_not_found"}), 404
+        payload = profile_public_fields(row)
+        payload["ok"] = True
+        return jsonify(payload)
+
+    @app.route("/api/v2/auth/avatar", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def upload_avatar():
+        file_obj = request.files.get("avatar")
+        if not file_obj or not file_obj.filename:
+            return jsonify({"error": "avatar_required", "message": "请选择头像图片"}), 400
+        ext = file_obj.filename.rsplit(".", 1)[-1].lower() if "." in file_obj.filename else ""
+        if ext not in ALLOWED_AVATAR_EXTENSIONS:
+            return jsonify({"error": "invalid_avatar_type", "message": "头像仅支持 jpg、png、webp"}), 400
+        raw = file_obj.read(MAX_AVATAR_BYTES + 1)
+        if len(raw) > MAX_AVATAR_BYTES:
+            return jsonify({"error": "avatar_too_large", "message": "头像图片不能超过 2MB"}), 400
+        AVATAR_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = f"{g.session['username']}_{uuid.uuid4().hex[:12]}.{ext}"
+        target = AVATAR_UPLOAD_DIR / safe_name
+        target.write_bytes(raw)
+        url = f"/uploads/avatars/{safe_name}"
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE demo_users SET avatar_url=%s WHERE username=%s", (url, g.session["username"]))
+                log_action(conn, g.session["username"], g.session["role"], "upload_avatar", "self", url)
+            conn.commit()
+        return jsonify({"ok": True, "avatar_url": url})
 
     @app.route("/api/v2/auth/change-password", methods=["POST"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
@@ -2124,15 +2431,17 @@ def create_app(
     @app.route("/api/v2/common/system-status", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def system_status():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             refresh_machine_stats(conn)
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       MAX(occurred_at) AS latest_event_time,
                       SUM(CASE WHEN risk_level IN ('critical','high') AND occurred_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END) AS high_10m
                     FROM demo_attack_events
+                    WHERE {visible_sql}
                     """
                 )
                 base = cur.fetchone() or {}
@@ -2166,13 +2475,14 @@ def create_app(
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def alerts_ticker():
         limit = max(1, min(int(request.args.get("limit", "3")), 10))
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT event_id, occurred_at, risk_level, attack_type, source_ip, target_node, target_interface
                     FROM demo_attack_events
-                    WHERE risk_level IN ('critical','high')
+                    WHERE risk_level IN ('critical','high') AND {visible_sql}
                     ORDER BY occurred_at DESC
                     LIMIT %s
                     """,
@@ -2185,13 +2495,14 @@ def create_app(
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def alerts_popup():
         limit = max(1, min(int(request.args.get("limit", "5")), 20))
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT event_id, occurred_at, attack_type, source_ip, target_node, target_interface
                     FROM demo_attack_events
-                    WHERE risk_level IN ('critical','high') AND acked=0
+                    WHERE risk_level IN ('critical','high') AND acked=0 AND {visible_sql}
                     ORDER BY occurred_at DESC
                     LIMIT %s
                     """,
@@ -2221,6 +2532,46 @@ def create_app(
         if changed == 0:
             return jsonify({"error": "event_not_found"}), 404
         return jsonify({"ok": True, "event_id": event_id})
+
+    @app.route("/api/v2/llm/prompt", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def llm_prompt_get():
+        prompt_path = Path(app.config["LLM_PROMPT_PATH"])
+        return jsonify(build_llm_prompt_payload(prompt_path))
+
+    @app.route("/api/v2/llm/prompt", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def llm_prompt_update():
+        body = request.get_json(silent=True) or {}
+        prompt = str(body.get("prompt", ""))
+        if not prompt.strip():
+            return jsonify({"error": "prompt_required", "message": "提示词不能为空"}), 400
+        if len(prompt) > MAX_LLM_PROMPT_CHARS:
+            return (
+                jsonify(
+                    {
+                        "error": "prompt_too_long",
+                        "message": f"提示词不能超过 {MAX_LLM_PROMPT_CHARS} 个字符",
+                        "max_chars": MAX_LLM_PROMPT_CHARS,
+                    }
+                ),
+                400,
+            )
+
+        prompt_path = Path(app.config["LLM_PROMPT_PATH"])
+        write_llm_prompt_file(prompt_path, prompt)
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(
+                conn,
+                g.session["username"],
+                g.session["role"],
+                "llm_prompt_update",
+                display_project_path(prompt_path),
+                f"chars={len(prompt)}",
+            )
+        payload = build_llm_prompt_payload(prompt_path)
+        payload["ok"] = True
+        return jsonify(payload)
 
     @app.route("/api/v2/rag/docs", methods=["GET"])
     @require_roles(ROLE_ADMIN)
@@ -2484,36 +2835,51 @@ def create_app(
     @app.route("/api/v2/user/dashboard/kpis", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def user_kpis():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             refresh_machine_stats(conn)
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE()")
+                cur.execute(f"SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}")
                 today_total = int((cur.fetchone() or {}).get("c", 0))
-                cur.execute("SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=DATE_SUB(CURDATE(), INTERVAL 1 DAY)")
-                yesterday_total = int((cur.fetchone() or {}).get("c", 0))
                 cur.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS c
                     FROM demo_attack_events
-                    WHERE risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing')
+                    WHERE DATE(occurred_at)=DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND {visible_sql}
+                    """
+                )
+                yesterday_total = int((cur.fetchone() or {}).get("c", 0))
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS c
+                    FROM demo_attack_events
+                    WHERE risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing') AND {visible_sql}
                     """
                 )
                 high_active = int((cur.fetchone() or {}).get("c", 0))
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked_cnt,
                       COUNT(*) AS total_cnt
                     FROM demo_attack_events
-                    WHERE DATE(occurred_at)=CURDATE()
+                    WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}
                     """
                 )
                 rate_obj = cur.fetchone() or {}
                 blocked_cnt = int(rate_obj.get("blocked_cnt") or 0)
                 total_cnt = int(rate_obj.get("total_cnt") or 0)
-                cur.execute("SELECT AVG(response_ms) AS avg_ms FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE()")
+                cur.execute(
+                    f"SELECT AVG(response_ms) AS avg_ms FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}"
+                )
                 avg_response_ms = float((cur.fetchone() or {}).get("avg_ms") or 0)
-                cur.execute("SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND anomaly_detected=1")
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS c
+                    FROM demo_attack_events
+                    WHERE DATE(occurred_at)=CURDATE() AND anomaly_detected=1 AND {visible_sql}
+                    """
+                )
                 anomaly_cnt = int((cur.fetchone() or {}).get("c", 0))
                 cur.execute("SELECT COUNT(*) AS c FROM demo_machines WHERE online_status='online'")
                 online_nodes = int((cur.fetchone() or {}).get("c", 0))
@@ -2536,16 +2902,17 @@ def create_app(
     @app.route("/api/v2/user/dashboard/trend7d", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def trend7d():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       DATE(occurred_at) AS d,
                       COUNT(*) AS total,
                       SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+                    WHERE occurred_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND {visible_sql}
                     GROUP BY DATE(occurred_at)
                     ORDER BY d
                     """
@@ -2569,13 +2936,14 @@ def create_app(
     @app.route("/api/v2/user/dashboard/top-attack-types", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def top_attack_types():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT attack_type, COUNT(*) AS total
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND {visible_sql}
                     GROUP BY attack_type
                     ORDER BY total DESC
                     """
@@ -2587,13 +2955,14 @@ def create_app(
     @app.route("/api/v2/user/dashboard/source-distribution", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def source_distribution():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT source_ip, source_region, COUNT(*) AS total
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND {visible_sql}
                     GROUP BY source_ip, source_region
                     """
                 )
@@ -2606,24 +2975,83 @@ def create_app(
                     str(row.get("source_ip") or ""),
                     str(row.get("source_region") or ""),
                 )
+                region = simplify_source_region_for_dashboard(region)
                 region_bucket[region] = region_bucket.get(region, 0) + count
         items = [{"source_region": k, "total": v} for k, v in region_bucket.items()]
         items.sort(key=lambda x: int(x.get("total") or 0), reverse=True)
+        items = items[:7]
         return jsonify({"items": normalize_rows(items)})
+
+    @app.route("/api/v2/user/dashboard/source-map", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def source_map():
+        visible_sql = visible_attack_event_clause()
+        try:
+            days = max(1, min(90, int(request.args.get("days", 30))))
+        except ValueError:
+            days = 30
+        try:
+            limit = max(1, min(20, int(request.args.get("limit", 10))))
+        except ValueError:
+            limit = 10
+
+        def collect_rows(time_filter_sql: str) -> List[Dict[str, Any]]:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT source_ip, source_region, COUNT(*) AS total
+                        FROM demo_attack_events
+                        WHERE {time_filter_sql} AND {visible_sql}
+                        GROUP BY source_ip, source_region
+                        """
+                    )
+                    rows = cur.fetchall()
+                region_bucket: Dict[str, int] = {}
+                for row in rows:
+                    count = int(row.get("total") or 0)
+                    region = resolve_region_for_event(
+                        conn,
+                        str(row.get("source_ip") or ""),
+                        str(row.get("source_region") or ""),
+                    )
+                    region = simplify_source_region_for_dashboard(region)
+                    region_bucket[region] = region_bucket.get(region, 0) + count
+            items = [{"source_region": k, "total": v} for k, v in region_bucket.items()]
+            items.sort(key=lambda x: int(x.get("total") or 0), reverse=True)
+            return items
+
+        items = collect_rows(f"occurred_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)")
+        fallback_all_time = False
+        if not items:
+            # Local demos may not have traffic in the current month; use historical data so the animation still works.
+            items = collect_rows("1=1")
+            fallback_all_time = bool(items)
+        return jsonify(
+            {
+                "items": normalize_rows(items[:limit]),
+                "period_days": days,
+                "limit": limit,
+                "fallback_all_time": fallback_all_time,
+                "server_region": "北京",
+                "server_coord": [116.4074, 39.9042],
+            }
+        )
 
     @app.route("/api/v2/user/dashboard/heatmap", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def heatmap():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       WEEKDAY(occurred_at) AS weekday_idx,
                       HOUR(occurred_at) AS hour_idx,
                       COUNT(*) AS total
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) AND {visible_sql}
                     GROUP BY WEEKDAY(occurred_at), HOUR(occurred_at)
                     ORDER BY weekday_idx, hour_idx
                     """
@@ -2634,13 +3062,14 @@ def create_app(
     @app.route("/api/v2/user/dashboard/method-share", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def method_share():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT attack_type, COUNT(*) AS total
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND {visible_sql}
                     GROUP BY attack_type
                     ORDER BY total DESC
                     """
@@ -2672,7 +3101,7 @@ def create_app(
         page_size = max(1, min(int(request.args.get("page_size", "20")), 200))
         offset = (page - 1) * page_size
 
-        where = ["e.occurred_at BETWEEN %s AND %s"]
+        where = ["e.occurred_at BETWEEN %s AND %s", visible_attack_event_clause("e")]
         params: List[Any] = [start_dt, end_dt]
         if risk_level != "all":
             where.append("e.risk_level=%s")
@@ -3222,6 +3651,7 @@ def create_app(
     @app.route("/api/v2/pro/model/performance", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def pro_model_performance():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -3240,14 +3670,14 @@ def create_app(
                 )
                 trend = cur.fetchall()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       SUM(CASE WHEN response_ms < 100 THEN 1 ELSE 0 END) AS lt_100,
                       SUM(CASE WHEN response_ms >= 100 AND response_ms < 300 THEN 1 ELSE 0 END) AS b100_300,
                       SUM(CASE WHEN response_ms >= 300 AND response_ms < 800 THEN 1 ELSE 0 END) AS b300_800,
                       SUM(CASE WHEN response_ms >= 800 THEN 1 ELSE 0 END) AS ge_800
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                    WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) AND {visible_sql}
                     """
                 )
                 dist = cur.fetchone() or {}
@@ -3266,6 +3696,7 @@ def create_app(
     @app.route("/api/v2/pro/nodes/<node_name>/detail", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def pro_node_detail(node_name: str):
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM demo_machines WHERE machine_name=%s LIMIT 1", (node_name,))
@@ -3273,21 +3704,21 @@ def create_app(
                 if not machine:
                     return jsonify({"error": "node_not_found"}), 404
                 cur.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS total_7d,
                            SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked_7d,
                            SUM(CASE WHEN risk_level IN ('critical','high') THEN 1 ELSE 0 END) AS high_7d
                     FROM demo_attack_events
-                    WHERE target_node=%s AND occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    WHERE target_node=%s AND occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND {visible_sql}
                     """,
                     (node_name,),
                 )
                 stats = cur.fetchone() or {}
                 cur.execute(
-                    """
+                    f"""
                     SELECT event_id, occurred_at, risk_level, attack_type, source_ip, attack_result, process_status
                     FROM demo_attack_events
-                    WHERE target_node=%s
+                    WHERE target_node=%s AND {visible_sql}
                     ORDER BY occurred_at DESC
                     LIMIT 50
                     """,
@@ -3303,7 +3734,7 @@ def create_app(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, username, role, display_name, created_at, updated_at
+                    SELECT id, username, role, display_name, nickname, avatar_url, created_at, updated_at
                     FROM demo_users
                     WHERE role IN (%s, %s)
                     ORDER BY CASE role
@@ -3317,6 +3748,47 @@ def create_app(
                 rows = cur.fetchall()
         return jsonify({"items": normalize_rows(rows)})
 
+    @app.route("/api/v2/admin/users/<username>/profile", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def admin_user_update_profile(username: str):
+        body = request.get_json(silent=True) or {}
+        display_name = normalize_profile_text(body.get("display_name"), username, 64)
+        nickname = normalize_profile_text(body.get("nickname"), display_name, 64)
+        avatar_url = normalize_avatar_url(body.get("avatar_url") or "")
+        role = str(body.get("role", "")).strip().lower()
+        if role and role not in {ROLE_NORMAL, ROLE_ADMIN}:
+            return jsonify({"error": "invalid_role", "message": "角色只能设置为普通用户或管理员"}), 400
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, role FROM demo_users WHERE username=%s AND role IN (%s, %s) LIMIT 1",
+                    (username, ROLE_NORMAL, ROLE_ADMIN),
+                )
+                exists = cur.fetchone()
+                if not exists:
+                    return jsonify({"error": "user_not_found"}), 404
+                next_role = role or str(exists.get("role") or ROLE_NORMAL)
+                if username == g.session["username"] and next_role != g.session["role"]:
+                    return jsonify({"error": "self_role_change_not_allowed", "message": "不能修改当前登录账号自己的角色"}), 400
+                cur.execute(
+                    """
+                    UPDATE demo_users
+                    SET display_name=%s, nickname=%s, avatar_url=%s, role=%s
+                    WHERE username=%s AND role IN (%s, %s)
+                    """,
+                    (display_name, nickname, avatar_url, next_role, username, ROLE_NORMAL, ROLE_ADMIN),
+                )
+                log_action(
+                    conn,
+                    g.session["username"],
+                    g.session["role"],
+                    "admin_update_user_profile",
+                    username,
+                    f"profile_updated role={next_role}",
+                )
+            conn.commit()
+        return jsonify({"ok": True, "username": username})
+
     @app.route("/api/v2/admin/users/<username>/password", methods=["PUT"])
     @require_roles(ROLE_ADMIN)
     def admin_user_change_password(username: str):
@@ -3328,31 +3800,35 @@ def create_app(
             return jsonify({"error": "new_password_too_short"}), 400
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM demo_users WHERE username=%s AND role IN (%s, %s) LIMIT 1",
+                    (username, ROLE_NORMAL, ROLE_ADMIN),
+                )
+                exists = cur.fetchone()
+                if not exists:
+                    return jsonify({"error": "user_not_found"}), 404
                 cur.execute("UPDATE demo_users SET password=%s WHERE username=%s", (new_password, username))
-                changed = int(cur.rowcount)
-                if changed:
-                    log_action(
-                        conn,
-                        g.session["username"],
-                        g.session["role"],
-                        "admin_change_user_password",
-                        username,
-                        "updated",
-                    )
+                log_action(
+                    conn,
+                    g.session["username"],
+                    g.session["role"],
+                    "admin_change_user_password",
+                    username,
+                    "updated",
+                )
             conn.commit()
-        if changed == 0:
-            return jsonify({"error": "user_not_found"}), 404
         return jsonify({"ok": True, "username": username})
 
     @app.route("/api/v2/admin/summary", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def admin_summary():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
             refresh_machine_stats(conn)
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) AS c FROM demo_machines WHERE online_status='online'")
                 online_count = int((cur.fetchone() or {}).get("c", 0))
-                cur.execute("SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE()")
+                cur.execute(f"SELECT COUNT(*) AS c FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}")
                 today_attacks = int((cur.fetchone() or {}).get("c", 0))
                 cur.execute("SELECT COUNT(*) AS c FROM demo_machines WHERE current_alert_count > 0")
                 alert_machine_count = int((cur.fetchone() or {}).get("c", 0))
@@ -3371,13 +3847,14 @@ def create_app(
     @app.route("/api/v2/admin/machines/ranking", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def admin_machine_ranking():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT target_node AS machine_name, COUNT(*) AS attack_total
                     FROM demo_attack_events
-                    WHERE DATE(occurred_at)=CURDATE()
+                    WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}
                     GROUP BY target_node
                     ORDER BY attack_total DESC
                     """
@@ -3388,13 +3865,14 @@ def create_app(
     @app.route("/api/v2/admin/trend7d", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def admin_trend7d():
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT DATE(occurred_at) AS d, COUNT(*) AS total
                     FROM demo_attack_events
-                    WHERE occurred_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+                    WHERE occurred_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND {visible_sql}
                     GROUP BY DATE(occurred_at)
                     ORDER BY d
                     """
@@ -3424,6 +3902,7 @@ def create_app(
     @app.route("/api/v2/admin/machines/<int:machine_id>", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def admin_machine_detail(machine_id: int):
+        visible_sql = visible_attack_event_clause()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM demo_machines WHERE id=%s LIMIT 1", (machine_id,))
@@ -3431,10 +3910,10 @@ def create_app(
                 if not machine:
                     return jsonify({"error": "machine_not_found"}), 404
                 cur.execute(
-                    """
+                    f"""
                     SELECT event_id, occurred_at, risk_level, attack_type, source_ip, target_interface, attack_result, process_status
                     FROM demo_attack_events
-                    WHERE machine_id=%s
+                    WHERE machine_id=%s AND {visible_sql}
                     ORDER BY occurred_at DESC
                     LIMIT 100
                     """,
@@ -4012,6 +4491,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db path")
     parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed json path")
     parser.add_argument("--rag-force-seed", action="store_true", help="Force rebuild RAG db from seed on startup")
+    parser.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="LLM system prompt file path")
     parser.add_argument("--jwt-secret", default="", help="JWT secret, fallback to env TP_JWT_SECRET")
     parser.add_argument("--jwt-ttl-seconds", type=int, default=TOKEN_TTL_SECONDS, help="JWT token TTL seconds")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama base URL")
@@ -4039,6 +4519,7 @@ def main() -> None:
         jwt_secret=args.jwt_secret,
         jwt_ttl_seconds=args.jwt_ttl_seconds,
         ollama_url=args.ollama_url,
+        llm_prompt_path=args.llm_prompt,
     )
     app.run(host=args.host, port=args.port, debug=False)
 
