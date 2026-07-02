@@ -375,55 +375,108 @@ function renderLoginPage() {
       <section class="login-shell">
         <div class="login-orb orb-a"></div>
         <div class="login-orb orb-b"></div>
-        <div class="login-card">
-          <h1 class="login-title">AI\u653b\u51fb\u6001\u52bf\u611f\u77e5\u5e73\u53f0</h1>
-          <p class="login-subtitle">\u8bf7\u9009\u62e9\u8eab\u4efd\u540e\u81ea\u52a8\u586b\u5145\u8d26\u53f7\uff0c\u70b9\u51fb\u767b\u5f55\u8fdb\u5165\u5bf9\u5e94\u9875\u9762</p>
-
-          <div class="form-row">
-            <label for="loginUsername">\u7528\u6237\u540d</label>
-            <input id="loginUsername" type="text" autocomplete="username" />
-          </div>
-          <div class="form-row">
-            <label for="loginPassword">\u5bc6\u7801</label>
-            <input id="loginPassword" type="password" autocomplete="current-password" />
-          </div>
-
-          <div class="form-row">
-            <label>\u8eab\u4efd\u5feb\u6377\u5207\u6362</label>
-            <div class="role-switch">
-              <button class="btn active" data-login-role="${ROLE_NORMAL}">\u666e\u901a\u7528\u6237</button>
-              <button class="btn" data-login-role="${ROLE_ADMIN}">\u7ba1\u7406\u5458</button>
+        <div class="login-topline">
+          <div class="login-brand">
+            <span class="brand-mark">智</span>
+            <div>
+              <strong>智御态势</strong>
+              <small>AI Security Situation Center</small>
             </div>
           </div>
+          <div class="login-top-actions">
+            <span>本地模型研判</span>
+            <span>RAG 知识增强</span>
+            <span>自动化处置</span>
+          </div>
+        </div>
 
-          <button id="loginBtn" class="btn btn-primary" style="width:100%;">\u767b\u5f55\u7cfb\u7edf</button>
-          <button id="toggleRegisterBtn" class="btn btn-ghost" style="width:100%;margin-top:8px;">\u6ce8\u518c\u65b0\u8d26\u53f7</button>
-          <div id="loginError" class="login-error"></div>
-
-          <div id="registerPanel" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(95,152,206,0.25);">
-            <div class="form-row">
-              <label for="registerDisplayName">\u663e\u793a\u540d\u79f0</label>
-              <input id="registerDisplayName" type="text" autocomplete="nickname" />
+        <div class="login-stage">
+          <div class="login-hero-copy">
+            <div class="hero-kicker"><i></i> AI-Powered Security Console</div>
+            <h1 class="login-title">AI攻击态势感知平台</h1>
+            <p class="login-subtitle">
+              面向 Web 服务与靶场验证的轻量级态势感知系统，融合抓包、分层检测、LLM/RAG 研判、数据大屏与封禁处置。
+            </p>
+            <div class="login-hero-stats">
+              <article><strong>4 层</strong><span>Payload / POC / 行为 / LLM</span></article>
+              <article><strong>3 类</strong><span>raw_only / candidate / attack</span></article>
+              <article><strong>1 键</strong><span>启动检测链路与前端大屏</span></article>
             </div>
-            <div class="form-row">
-              <label for="registerUsername">\u6ce8\u518c\u7528\u6237\u540d\uff08\u5b57\u6bcd/\u6570\u5b57/\u4e0b\u5212\u7ebf\uff09</label>
-              <input id="registerUsername" type="text" autocomplete="username" />
+            <div class="login-flow-card">
+              <span>Capture</span>
+              <b></b>
+              <span>AI Gate</span>
+              <b></b>
+              <span>LLM/RAG</span>
+              <b></b>
+              <span>Response</span>
             </div>
-            <div class="form-row">
-              <label for="registerPassword">\u6ce8\u518c\u5bc6\u7801\uff08\u81f3\u5c116\u4f4d\uff09</label>
-              <input id="registerPassword" type="password" autocomplete="new-password" />
-            </div>
-            <div class="form-row">
-              <label for="registerPassword2">\u786e\u8ba4\u5bc6\u7801</label>
-              <input id="registerPassword2" type="password" autocomplete="new-password" />
-            </div>
-            <button id="registerBtn" class="btn btn-success" style="width:100%;">\u63d0\u4ea4\u6ce8\u518c</button>
-            <div id="registerError" class="login-error"></div>
           </div>
 
-          <div class="scroll-cue" aria-hidden="true">
-            <span>\u5411\u4e0b\u6ed1\u52a8\u4e86\u89e3\u5e73\u53f0\u80fd\u529b</span>
-            <b></b>
+          <div class="login-card auth-card">
+            <div class="auth-card-head">
+              <div>
+                <p class="panel-sub">安全登录</p>
+                <h2>进入控制台</h2>
+              </div>
+              <span class="auth-live-dot">在线</span>
+            </div>
+            <p class="auth-hint">选择身份后会自动填充测试账号；普通用户仅查看大屏与详情，管理员可维护模型、用户和系统配置。</p>
+
+            <div class="form-row">
+              <label for="loginUsername">用户名</label>
+              <input id="loginUsername" type="text" autocomplete="username" />
+            </div>
+            <div class="form-row">
+              <label for="loginPassword">密码</label>
+              <input id="loginPassword" type="password" autocomplete="current-password" />
+            </div>
+
+            <div class="form-row">
+              <label>身份快捷切换</label>
+              <div class="role-switch">
+                <button class="btn active" data-login-role="${ROLE_NORMAL}">普通用户</button>
+                <button class="btn" data-login-role="${ROLE_ADMIN}">管理员</button>
+              </div>
+            </div>
+
+            <div class="auth-action-row">
+              <button id="loginBtn" class="btn btn-primary">登录系统</button>
+              <button id="toggleRegisterBtn" class="btn btn-ghost">注册新账号</button>
+            </div>
+            <div id="loginError" class="login-error"></div>
+
+            <div id="registerPanel" class="register-panel hidden">
+              <div class="register-panel-head">
+                <strong>创建普通用户</strong>
+                <span>注册账号默认普通用户，管理员可在用户管理中调整角色。</span>
+              </div>
+              <div class="form-row">
+                <label for="registerDisplayName">显示名称</label>
+                <input id="registerDisplayName" type="text" autocomplete="nickname" />
+              </div>
+              <div class="form-row">
+                <label for="registerUsername">注册用户名（字母/数字/下划线）</label>
+                <input id="registerUsername" type="text" autocomplete="username" />
+              </div>
+              <div class="register-grid">
+                <div class="form-row">
+                  <label for="registerPassword">注册密码（至少6位）</label>
+                  <input id="registerPassword" type="password" autocomplete="new-password" />
+                </div>
+                <div class="form-row">
+                  <label for="registerPassword2">确认密码</label>
+                  <input id="registerPassword2" type="password" autocomplete="new-password" />
+                </div>
+              </div>
+              <button id="registerBtn" class="btn btn-success">提交注册</button>
+              <div id="registerError" class="login-error"></div>
+            </div>
+
+            <div class="scroll-cue" aria-hidden="true">
+              <span>向下滑动了解平台能力</span>
+              <b></b>
+            </div>
           </div>
         </div>
       </section>
@@ -840,7 +893,13 @@ function renderMainLayout() {
     <div class="layout">
       <header class="status-bar">
         <div class="status-main">
-          <span class="brand">AI攻击态势感知平台</span>
+          <span class="brand">
+            <span class="brand-icon">智</span>
+            <span>
+              <strong>AI攻击态势感知平台</strong>
+              <small>Jingyuan Threat Intelligence</small>
+            </span>
+          </span>
           <span class="pill">身份：${ROLE_LABEL[state.profile?.role] || "-"}</span>
           <span class="pill">实时时钟：<strong id="statusClock">-</strong></span>
           <span class="pill">数据更新时间：<strong id="statusDataTime">-</strong></span>
@@ -868,13 +927,13 @@ function renderMainLayout() {
                   <span>${escapeHtml(state.profile?.username || "-")} · ${escapeHtml(ROLE_LABEL[state.profile?.role] || "-")}</span>
                 </div>
               </div>
-              <button class="profile-menu-item" type="button" data-profile-action="center">用户中心</button>
+              <button class="profile-menu-item" type="button" data-profile-action="center"><span>个人资料</span><small>头像、昵称与密码</small></button>
               ${
                 state.profile?.role === ROLE_ADMIN
-                  ? `<button class="profile-menu-item" type="button" data-profile-action="admin-users">管理用户</button>`
+                  ? `<button class="profile-menu-item" type="button" data-profile-action="admin-users"><span>管理用户</span><small>角色、密码与账号资料</small></button>`
                   : ""
               }
-              <button class="profile-menu-item danger" type="button" data-profile-action="logout">退出登录</button>
+              <button class="profile-menu-item danger" type="button" data-profile-action="logout"><span>退出登录</span><small>返回登录页</small></button>
             </div>
           </div>
         </div>
@@ -3797,11 +3856,12 @@ function renderUserCenterView() {
   if (!root) return;
   root.innerHTML = `
     <section class="user-center-shell">
-      <div class="panel user-profile-card">
+      <div class="panel user-profile-card account-identity-card">
+        <div class="account-cover"></div>
         <div class="user-profile-hero">
-          ${renderUserAvatar(state.profile, "avatar-xl")}
+          ${renderUserAvatar(state.profile, "avatar-xl account-avatar")}
           <div>
-            <p class="panel-sub">个人中心</p>
+            <p class="panel-sub">当前账号</p>
             <h3>${escapeHtml(getProfileName(state.profile))}</h3>
             <span class="role-chip">${escapeHtml(ROLE_LABEL[state.profile?.role] || state.profile?.role || "-")}</span>
           </div>
@@ -3815,6 +3875,21 @@ function renderUserCenterView() {
             <span>会话有效期</span>
             <strong>${escapeHtml(state.profile?.expires_at || "-")}</strong>
           </div>
+        </div>
+        <div class="account-mini-metrics">
+          <article><b>JWT</b><span>Cookie 持久会话</span></article>
+          <article><b>RBAC</b><span>普通用户 / 管理员</span></article>
+          <article><b>Avatar</b><span>支持头像与昵称</span></article>
+        </div>
+      </div>
+
+      <div class="panel user-profile-card account-edit-card">
+        <div class="panel-head">
+          <div>
+            <p class="panel-sub">Profile</p>
+            <h3 class="panel-title">个人资料</h3>
+          </div>
+          <span class="role-chip">实时保存</span>
         </div>
         <div class="detail-grid profile-form-grid">
           <div><label class="panel-sub">显示名称</label><input id="uc_display_name" value="${escapeHtml(state.profile?.display_name || "")}" maxlength="64" /></div>
@@ -3834,8 +3909,9 @@ function renderUserCenterView() {
         <div class="panel-head">
           <div>
             <h3 class="panel-title">账号安全</h3>
-            <p class="panel-sub">定期更新密码，避免测试账号长期裸奔。</p>
+            <p class="panel-sub">建议定期更新密码，避免测试账号长期暴露。</p>
           </div>
+          <span class="security-chip">Protected</span>
         </div>
         <div class="detail-grid">
           <div class="grid-wide"><label class="panel-sub">旧密码</label><input id="uc_old_password" type="password" autocomplete="current-password" /></div>
@@ -3928,7 +4004,10 @@ function renderAdminUsersView() {
         <h3 class="panel-title">用户管理</h3>
         <p class="panel-sub">集中维护用户资料、头像、角色和密码。管理员可以设置其他用户的角色。</p>
       </div>
-      <button id="adm_users_refresh" class="btn btn-success">刷新用户</button>
+      <div class="admin-users-actions">
+        <span id="adm_users_summary" class="admin-users-summary">正在同步用户状态...</span>
+        <button id="adm_users_refresh" class="btn btn-success">刷新用户</button>
+      </div>
     </section>
     <section class="admin-user-list" id="adm_users_body"></section>
   `;
@@ -3939,6 +4018,7 @@ function renderAdminUsersView() {
 function renderAdminUserCard(user) {
   const username = String(user.username || "");
   const isSelf = username === state.profile?.username;
+  const roleLabel = ROLE_LABEL[user.role] || user.role || "-";
   return `
     <article class="panel admin-user-card admin-user-row" data-admin-user="${escapeHtml(username)}">
       <div class="admin-user-top">
@@ -3946,6 +4026,7 @@ function renderAdminUserCard(user) {
         <div class="admin-user-title">
           <strong>${escapeHtml(user.nickname || user.display_name || username || "-")}</strong>
           <span>@${escapeHtml(username || "-")}</span>
+          <em>${escapeHtml(roleLabel)}</em>
         </div>
         <div class="admin-user-role-cell">
           <label class="panel-sub">角色</label>
@@ -3980,6 +4061,12 @@ async function loadAdminUsers() {
   const data = await api("/api/v2/admin/users");
   state.admin.users = Array.isArray(data.items) ? data.items : [];
   const body = document.getElementById("adm_users_body");
+  const summary = document.getElementById("adm_users_summary");
+  if (summary) {
+    const adminCount = state.admin.users.filter((x) => x.role === ROLE_ADMIN).length;
+    const normalCount = state.admin.users.filter((x) => x.role !== ROLE_ADMIN).length;
+    summary.textContent = `共 ${state.admin.users.length} 个账号 · 管理员 ${adminCount} · 普通用户 ${normalCount}`;
+  }
   if (!body) return;
   if (!state.admin.users.length) {
     body.innerHTML = `<section class="panel empty-state">暂无用户</section>`;
