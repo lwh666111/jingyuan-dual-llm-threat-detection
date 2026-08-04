@@ -1,6 +1,6 @@
 ﻿# 使用文档（部署与运行）
 
-## 0. 最新版本快速使用（2026-07-01）
+## 0. 最新版本快速使用（2026-08-04）
 
 ### 0.1 直接安装（推荐）
 
@@ -17,6 +17,8 @@ python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_multivuln_lab_4000.ps1 -PythonExe C:\python\python312\python.exe -BindHost 0.0.0.0 -Port 4000
 ```
+
+进入靶场后可按“信息收集、经典漏洞、N-day 特征模拟、未知威胁模拟”逐项测试，也可点击“一键全链路模拟”顺序发送 7 个阶段化动作。N-day 与未知威胁页面都是安全检测样本生成器，不会执行利用代码。
 
 4. 访问：
 
@@ -39,6 +41,16 @@ powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_m
 - 行为窗口模型可辅助识别暴力破解、扫描、目录探测、高频请求。
 - 管理员“详情信息”页面支持候选事件查看、提升、忽略。
 - 安装包仍位于 `dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`。
+
+### 0.4 连续攻击态势
+
+- 启动 `python app.py` 后，态势关联、AI 报告和端口扫描传感器默认随主程序启动。
+- 登录后点击顶部“态势感知展示”，可按攻击者查看扫描、爆破和漏洞利用的连续链路。
+- 管理员可在“系统配置”调整动作种类阈值、关联窗口、静默切段和扫描阈值；保存后守护进程会自动应用。
+- 默认至少需要同一来源、同一目标在窗口内出现 3 类不同动作，不足阈值时页面没有正式态势属于正常情况。
+- 可选 Neo4j 仅用于图镜像，不安装也不影响 MySQL、API 和前端。启用方式见 `docs/SITUATION_INTELLIGENCE.md`。
+- 链路默认使用“聚合视图”，连续同类动作和过长序列会合并，避免几十个节点互相遮挡；需要逐条核查时切换到“证据视图”。
+- 新生成的 AI 报告会详细覆盖时间线、技术路径、证据强度、影响与失陷判断、调查和处置建议；旧报告仍可兼容展示，管理员点击“重新研判”即可按新结构生成。
 ## 1. 项目说明
 
 本项目提供完整的攻击检测与态势感知链路，包含：

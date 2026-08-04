@@ -64,13 +64,13 @@ def write_csv(records, path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="杩愯鏃фā鍨?compatibility mode 鎺ㄧ悊")
+    parser = argparse.ArgumentParser(description="运行旧版 MLP 模型的兼容模式推理")
     parser.add_argument("--input", required=True, help="compat_old_input.csv")
     parser.add_argument("--preprocessor", required=True, help="preprocessor.joblib")
     parser.add_argument("--model", required=True, help="best_mlp.pth")
-    parser.add_argument("--output-jsonl", required=True, help="杈撳嚭 model_result.jsonl")
-    parser.add_argument("--output-csv", required=True, help="杈撳嚭 model_result.csv")
-    parser.add_argument("--label-threshold", type=float, default=0.46, help="compat mode 鏍囩闃堝€?)
+    parser.add_argument("--output-jsonl", required=True, help="输出 model_result.jsonl")
+    parser.add_argument("--output-csv", required=True, help="输出 model_result.csv")
+    parser.add_argument("--label-threshold", type=float, default=0.46, help="兼容模式标签阈值")
     args = parser.parse_args()
 
     df = pd.read_csv(args.input)

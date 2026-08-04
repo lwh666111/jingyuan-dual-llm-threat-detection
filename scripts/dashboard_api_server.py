@@ -29,6 +29,10 @@ from flask import Flask, Response, current_app, g, jsonify, request
 import pymysql
 from pymysql.cursors import DictCursor
 
+from situation_ai import analyze_situation
+from situation_core import ACTION_CATALOG, STAGE_LABELS, STAGE_ORDER
+from situation_store import MySQLSettings, MySQLSituationStore
+
 try:
     import psutil  # type: ignore
 except Exception:
@@ -244,6 +248,16 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def normalize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [normalize_row(r) for r in rows]
+
+
+def normalize_situation_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="milliseconds") + ("Z" if value.tzinfo is None else "")
+    if isinstance(value, dict):
+        return {key: normalize_situation_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_situation_value(item) for item in value]
+    return value
 
 
 def safe_json_loads(text: Any, default: Any = None) -> Any:
@@ -1685,6 +1699,11 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "monitor_ports": "80,443,8080",
             "capture_interface": "auto",
             "llm_model": "qwen3:8b",
+            "situation_minimum_actions": "3",
+            "situation_window_minutes": "30",
+            "situation_inactivity_minutes": "15",
+            "scan_port_threshold": "10",
+            "scan_window_seconds": "60",
             "homepage_background_url": DEFAULT_HOMEPAGE_BACKGROUND,
         }
         for k, v in defaults.items():
@@ -2190,6 +2209,7 @@ def create_app(
 
     with closing(get_conn(mysql_conf, autocommit=False)) as conn:
         ensure_schema(conn)
+        MySQLSituationStore(MySQLSettings(**mysql_conf), connection=conn).ensure_schema()
         ensure_builtin_admin(conn)
         if seed_demo:
             seed_demo_data(conn, force_seed=force_seed)
@@ -3083,6 +3103,188 @@ def create_app(
             ratio = 0.0 if total == 0 else (count / total) * 100.0
             items.append({"attack_type": r["attack_type"], "total": count, "ratio_percent": round(ratio, 2)})
         return jsonify({"items": items})
+
+    def open_situation_store() -> MySQLSituationStore:
+        return MySQLSituationStore(MySQLSettings(**app.config["MYSQL_CONF"]))
+
+    @app.route("/api/v2/situations", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_list():
+        source_ip = request.args.get("source_ip", "").strip()
+        status = request.args.get("status", "").strip().lower()
+        limit = max(1, min(200, int(request.args.get("limit", "50"))))
+        offset = max(0, int(request.args.get("offset", "0")))
+        minimum_risk = max(0.0, min(1.0, float(request.args.get("minimum_risk", "0"))))
+        store = open_situation_store()
+        try:
+            items = store.list_situations(
+                limit=limit,
+                offset=offset,
+                source_ip=source_ip,
+                status=status,
+                minimum_risk=minimum_risk,
+            )
+        finally:
+            store.close()
+        return jsonify({"items": normalize_situation_value(items), "limit": limit, "offset": offset})
+
+    @app.route("/api/v2/situations/by-ip/<source_ip>", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situations_by_ip(source_ip: str):
+        try:
+            ipaddress.ip_address(source_ip)
+        except ValueError:
+            return jsonify({"error": "invalid_source_ip", "message": "来源 IP 格式不正确"}), 400
+        store = open_situation_store()
+        try:
+            items = store.list_situations(limit=200, source_ip=source_ip)
+        finally:
+            store.close()
+        return jsonify({"source_ip": source_ip, "items": normalize_situation_value(items)})
+
+    @app.route("/api/v2/situations/<situation_id>", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_detail(situation_id: str):
+        store = open_situation_store()
+        try:
+            item = store.get_situation(situation_id)
+        finally:
+            store.close()
+        if not item:
+            return jsonify({"error": "situation_not_found"}), 404
+        return jsonify({"item": normalize_situation_value(item)})
+
+    @app.route("/api/v2/situations/<situation_id>/graph", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_graph(situation_id: str):
+        store = open_situation_store()
+        try:
+            item = store.get_situation(situation_id)
+        finally:
+            store.close()
+        if not item:
+            return jsonify({"error": "situation_not_found"}), 404
+        nodes = []
+        edges = []
+        for index, action in enumerate(item.get("actions") or []):
+            action_type = str(action.get("action_type") or "UNKNOWN")
+            catalog = ACTION_CATALOG.get(action_type, ACTION_CATALOG["UNKNOWN"])
+            node_id = str(action.get("action_id") or f"node-{index + 1}")
+            nodes.append(
+                {
+                    "id": node_id,
+                    "sequence": int(action.get("sequence_no") or index + 1),
+                    "name": catalog["label"],
+                    "action_type": action_type,
+                    "stage": action.get("stage") or catalog["stage"],
+                    "stage_label": STAGE_LABELS.get(str(action.get("stage") or catalog["stage"]), "其他行为"),
+                    "occurred_at": action.get("occurred_at"),
+                    "last_seen_at": action.get("last_seen_at"),
+                    "count": int(action.get("action_count") or 1),
+                    "confidence": float(action.get("confidence") or 0),
+                    "gap_seconds": int(action.get("gap_seconds") or 0),
+                    "target_interface": action.get("target_interface") or "",
+                }
+            )
+            if index:
+                edges.append(
+                    {
+                        "source": nodes[index - 1]["id"],
+                        "target": node_id,
+                        "gap_seconds": nodes[index]["gap_seconds"],
+                    }
+                )
+        stages = [
+            {"id": key, "name": STAGE_LABELS[key], "order": STAGE_ORDER[key]}
+            for key in sorted(STAGE_LABELS, key=lambda value: STAGE_ORDER.get(value, 0))
+        ]
+        return jsonify(
+            normalize_situation_value(
+                {
+                    "situation_id": situation_id,
+                    "source_ip": item.get("source_ip"),
+                    "risk_score": item.get("risk_score"),
+                    "risk_level": item.get("risk_level"),
+                    "nodes": nodes,
+                    "edges": edges,
+                    "stages": stages,
+                }
+            )
+        )
+
+    @app.route("/api/v2/situations/<situation_id>/evidence", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_evidence(situation_id: str):
+        store = open_situation_store()
+        try:
+            item = store.get_situation(situation_id)
+        finally:
+            store.close()
+        if not item:
+            return jsonify({"error": "situation_not_found"}), 404
+        evidence = [
+            {
+                "sequence": action.get("sequence_no"),
+                "action_id": action.get("action_id"),
+                "action_type": action.get("action_type"),
+                "sensor": action.get("sensor"),
+                "evidence_refs": action.get("evidence_refs") or [],
+                "metadata": action.get("metadata") or {},
+            }
+            for action in item.get("actions") or []
+        ]
+        return jsonify(normalize_situation_value({"situation_id": situation_id, "items": evidence}))
+
+    @app.route("/api/v2/situations/<situation_id>/reanalyze", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def situation_reanalyze(situation_id: str):
+        store = open_situation_store()
+        try:
+            item = store.get_situation(situation_id)
+            if not item:
+                return jsonify({"error": "situation_not_found"}), 404
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+                config_map = load_system_config_map(conn)
+            model = str(config_map.get("llm_model", "qwen2.5:3b")).strip() or "qwen2.5:3b"
+            report, ai_status = analyze_situation(
+                item,
+                ollama_url=app.config["OLLAMA_URL"],
+                model=model,
+                rag_db_path=Path(app.config["RAG_DB_PATH"]),
+                rag_top_k=4,
+                timeout_sec=120,
+            )
+            store.update_ai_report(situation_id, report, ai_status)
+        finally:
+            store.close()
+        return jsonify({"ok": True, "ai_status": ai_status, "report": report})
+
+    @app.route("/api/v2/situations/<situation_id>/status", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def situation_update_status(situation_id: str):
+        body = request.get_json(silent=True) or {}
+        status = str(body.get("status") or "").strip().lower()
+        store = open_situation_store()
+        try:
+            changed = store.update_status(situation_id, status)
+        except ValueError as exc:
+            return jsonify({"error": "invalid_status", "message": str(exc)}), 400
+        finally:
+            store.close()
+        if not changed:
+            return jsonify({"error": "situation_not_found"}), 404
+        return jsonify({"ok": True, "situation_id": situation_id, "status": status})
+
+    @app.route("/api/v2/situations/stream", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_stream():
+        store = open_situation_store()
+        try:
+            latest = store.list_situations(limit=1)
+        finally:
+            store.close()
+        payload = json.dumps(normalize_situation_value({"items": latest}), ensure_ascii=False)
+        return Response(f"retry: 5000\nevent: situations\ndata: {payload}\n\n", mimetype="text/event-stream")
 
     @app.route("/api/v2/pro/events", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
@@ -4231,7 +4433,12 @@ def create_app(
                 "name": "系统配置",
                 "status": "ok",
                 "message": "读取成功",
-                "detail": f"监测端口={monitor_ports}，分组数量={batch_size}，网卡={configured_interface}，模型={selected_model}",
+                "detail": (
+                    f"监测端口={monitor_ports}，分组数量={batch_size}，网卡={configured_interface}，模型={selected_model}；"
+                    f"态势动作阈值={config_map.get('situation_minimum_actions', '3')}，"
+                    f"关联窗口={config_map.get('situation_window_minutes', '30')}分钟，"
+                    f"扫描端口阈值={config_map.get('scan_port_threshold', '10')}"
+                ),
             }
         )
 
@@ -4319,6 +4526,38 @@ def create_app(
                     cfg_val = "auto"
                 if len(cfg_val) > 128:
                     return jsonify({"error": "invalid_capture_interface"}), 400
+            elif cfg_key == "situation_minimum_actions":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_situation_minimum_actions"}), 400
+                if v < 3 or v > 12:
+                    return jsonify({"error": "invalid_situation_minimum_actions"}), 400
+                cfg_val = str(v)
+            elif cfg_key in {"situation_window_minutes", "situation_inactivity_minutes"}:
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": f"invalid_{cfg_key}"}), 400
+                if v < 1 or v > 1440:
+                    return jsonify({"error": f"invalid_{cfg_key}"}), 400
+                cfg_val = str(v)
+            elif cfg_key == "scan_port_threshold":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_scan_port_threshold"}), 400
+                if v < 3 or v > 65535:
+                    return jsonify({"error": "invalid_scan_port_threshold"}), 400
+                cfg_val = str(v)
+            elif cfg_key == "scan_window_seconds":
+                try:
+                    v = int(cfg_val)
+                except ValueError:
+                    return jsonify({"error": "invalid_scan_window_seconds"}), 400
+                if v < 10 or v > 3600:
+                    return jsonify({"error": "invalid_scan_window_seconds"}), 400
+                cfg_val = str(v)
             elif cfg_key == "homepage_background_url":
                 cfg_val = normalize_homepage_background_url(cfg_val)
                 if not (cfg_val == DEFAULT_HOMEPAGE_BACKGROUND or cfg_val.startswith("/uploads/homepage_background_")):

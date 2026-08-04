@@ -120,6 +120,90 @@
     "request": {
       "text_regex": ["(?i)__schema", "(?i)IntrospectionQuery", "(?i)__type\\s*\\("]
     }
+  },
+  {
+    "id": "recon-directory-simulation-001",
+    "name": "目录枚举行为特征",
+    "attack_type": "目录扫描",
+    "severity": "medium",
+    "score": 0.76,
+    "tags": ["recon", "directory-scan", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/recon/directory"],
+      "text_regex": ["(?i)(?:admin|backup|\\.git|config|actuator|swagger|phpmyadmin)"]
+    }
+  },
+  {
+    "id": "recon-port-simulation-001",
+    "name": "端口扫描特征模拟",
+    "attack_type": "端口扫描",
+    "severity": "medium",
+    "score": 0.78,
+    "tags": ["recon", "port-scan", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/recon/ports"],
+      "text_regex": ["(?i)scan_mode", "(?i)ports.*(?:22|80|443|3306|6379|8080)"]
+    }
+  },
+  {
+    "id": "nday-fastjson-autotype-sim-001",
+    "name": "Fastjson AutoType 风险特征模拟",
+    "attack_type": "Fastjson反序列化探测",
+    "severity": "high",
+    "score": 0.91,
+    "tags": ["nday", "fastjson", "deserialization", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/nday/fastjson/parse"],
+      "text_regex": ["(?i)\\\"@type\\\"\\s*:\\s*\\\"com\\.example\\.SafeProbe\\\"", "FASTJSON-CVE-SIM"]
+    }
+  },
+  {
+    "id": "nday-log4j-jndi-sim-001",
+    "name": "Log4j JNDI Lookup 风险特征模拟",
+    "attack_type": "Log4j JNDI探测",
+    "severity": "critical",
+    "score": 0.96,
+    "tags": ["nday", "log4j", "jndi", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/nday/log4j/search"],
+      "text_regex": ["(?i)\\$\\{jndi:(?:ldap|dns)://[^}]*\\.invalid", "LOG4J-CVE-SIM"]
+    }
+  },
+  {
+    "id": "nday-spring-binding-sim-001",
+    "name": "Spring 数据绑定风险特征模拟",
+    "attack_type": "Spring数据绑定探测",
+    "severity": "high",
+    "score": 0.9,
+    "tags": ["nday", "spring", "data-binding", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/nday/spring/bind"],
+      "text_regex": ["(?i)class\\.module\\.classLoader", "SPRING-CVE-SIM"]
+    }
+  },
+  {
+    "id": "nday-shiro-session-sim-001",
+    "name": "Apache Shiro 会话风险特征模拟",
+    "attack_type": "Shiro认证探测",
+    "severity": "high",
+    "score": 0.87,
+    "tags": ["nday", "shiro", "authentication", "simulation"],
+    "request": {
+      "path_regex": ["(?i)/api/nday/shiro/session"],
+      "text_regex": ["SAFE_SHIRO_PROBE"]
+    }
+  },
+  {
+    "id": "unknown-threat-structure-sim-001",
+    "name": "未知威胁异常结构模拟",
+    "attack_type": "未知威胁探测",
+    "severity": "high",
+    "score": 0.84,
+    "tags": ["unknown-threat", "zero-day-simulation", "anomaly"],
+    "request": {
+      "path_regex": ["(?i)/api/unknown/probe"],
+      "text_regex": ["ZERO_DAY_BEHAVIOR_SIM", "UNKNOWN-THREAT-SIM", "(?i)nested_depth"]
+    }
   }
 ]
 

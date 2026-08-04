@@ -10,13 +10,16 @@
 - Ollama 大模型研判 + SQLite FTS5 RAG 检索增强
 - MySQL 持久化（兼容旧三表，并新增 raw/candidate/event/model/rule/behavior 分层表）
 - Flask API（3049）+ Node 前端大屏（1145）
+- 跨传感器攻击态势关联：端口扫描、SSH 爆破、HTTP 漏洞利用按来源 IP 与时间窗串联
+- AI 态势报告：对完整攻击链给出时间线、技术路径、证据强度、影响、失陷判断、结论、调查步骤和分阶段处置建议
 
-## 最新发布（2026-07-01）
+## 最新发布（2026-08-04）
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
 - 最新使用教程：`docs/USAGE.md`
 - Detection V2 实验与落地记录：`docs/DETECTION_V2_PROGRESS_2026-07-01.md`
+- 连续攻击态势设计与使用说明：`docs/SITUATION_INTELLIGENCE.md`
 - 最新安装包：`dist/JingyuanTrafficPipeline_Setup_ManualDeps.exe`
 - 安装包校验：安装后可在发布机器执行 `Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256` 查看
 
@@ -39,6 +42,39 @@
 - 内置新训练的 Web 攻击检测模型，降低普通登录误报，增强 SQL/XSS/命令注入/路径遍历/危险上传识别
 - 行为型攻击聚合上报：目录扫描、路径探测、高频请求、HTTP 爆破不会按每条请求刷屏，而是按来源 IP、攻击类型和时间窗口汇总成少量告警
 - SSH 爆破监控：自动读取 Windows `Security 4625` 与 `OpenSSH/Operational` 失败登录日志，达到阈值后写入大屏攻击事件
+- 连续态势关联：同一来源、同一目标在短时间内出现至少 3 类不同动作后形成攻击者态势；重复单类请求只累计次数，不增加动作多样性
+- 端口扫描传感器：基于 TCP SYN 唯一目标端口数量聚合，避免把同端口高频请求误判为端口扫描
+- 态势可视化：攻击者列表、阶段链路、动作间隔、风险指数、证据序列与 AI/RAG 报告同屏展示
+- 态势链路聚合：默认合并连续同类动作并将超长链压缩到约 10 个阶段节点，仍可切换“证据视图”查看全部原始动作
+- 全链路验证靶场：按信息收集、经典漏洞、公开 N-day 特征和未知威胁结构四阶段组织，并提供一键顺序回放
+- 管理员可调参数：动作种类阈值、关联窗口、静默切段、扫描端口阈值和扫描窗口保存后由守护进程动态应用
+- 可选 Neo4j 图镜像：MySQL 保持权威主存储，Neo4j 仅用于图查询与后续溯源扩展；Neo4j 故障不阻断主流程
+
+## 连续攻击态势
+
+普通攻击事件回答“这一条请求像什么”，连续态势回答“同一个攻击者在一段时间内做了什么、动作如何推进、下一步风险是什么”。默认关联规则如下：
+
+```text
+同一来源 IP + 同一目标资产
+  -> 30 分钟关联窗口
+  -> 15 分钟无新动作则切分会话
+  -> 至少 3 类不同动作
+  -> observing / open / closed / handled / ignored
+```
+
+例如，端口扫描、SSH 爆破和 SQL 注入会按时间顺序形成一条链；同一来源连续发送 1 万条目录扫描请求仍只算一种动作，并聚合为一个证据节点。LLM 不负责决定是否形成态势，只对已经由确定性规则形成的证据链进行解释，因此不会因大模型波动改变基础告警结果。
+
+启动后，普通用户和管理员均可从顶部导航进入“态势感知展示”。管理员还可在“系统配置”调整关联阈值，并对态势执行重新研判、标记已处置或忽略。
+
+态势 AI 报告面向处置人员提供执行摘要、事件叙述、时间线分析、技术分析、证据强度、影响评估、失陷判断、综合结论、调查步骤、即时防护、检测优化、长期改进和证据边界。报告不能取代原始证据，也不得在缺少成功响应、主机执行或持久化证据时把“攻击尝试”写成“入侵成功”。
+
+可选 Neo4j 镜像启动示例：
+
+```powershell
+python app.py --neo4j-url http://127.0.0.1:7474 --neo4j-user neo4j --neo4j-password YOUR_PASSWORD
+```
+
+不传 `--neo4j-url` 和 `--neo4j-password` 时不会启动图镜像，不影响任何现有功能。完整架构、数据表和接口说明见 `docs/SITUATION_INTELLIGENCE.md`。
 
 ## Detection V2 检测架构
 
@@ -210,6 +246,8 @@ python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_multivuln_lab_4000.ps1 -PythonExe C:\python\python312\python.exe -BindHost 0.0.0.0 -Port 4000
 ```
+
+新版靶场首页提供“一键全链路模拟”，依次生成信息收集、凭据攻击、SQL 注入、XSS、Fastjson 公开风险特征和未知威胁结构等测试流量。Fastjson、Log4j、Spring、Shiro 模块只依据官方公开安全公告构造不可执行标记，不包含 Gadget、回连、文件写入或命令执行；未知威胁模块不宣称或复现任何未公开漏洞。
 
 ### 8. 验证是否可用
 

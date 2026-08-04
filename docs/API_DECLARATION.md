@@ -268,6 +268,42 @@
   - `--ssh-monitor-bucket-minutes`
   - `--ssh-bruteforce-threshold`
   - `--ssh-monitor-poll-seconds`
+
+### 4.4.3 攻击者连续态势（v2）
+
+- `GET /api/v2/situations?limit=80&status=&source_ip=&minimum_risk=0`
+  - 鉴权：`normal/admin`
+  - 说明：按最近动作时间倒序列出关联态势
+- `GET /api/v2/situations/by-ip/{source_ip}`
+  - 鉴权：`normal/admin`
+  - 说明：列出指定来源 IP 的历史态势
+- `GET /api/v2/situations/{situation_id}`
+  - 鉴权：`normal/admin`
+  - 说明：返回态势详情、动作序列、AI 报告和证据引用
+- `GET /api/v2/situations/{situation_id}/graph`
+  - 鉴权：`normal/admin`
+  - 说明：返回适合前端绘图的 `nodes` 与 `edges`
+- `GET /api/v2/situations/{situation_id}/evidence`
+  - 鉴权：`normal/admin`
+  - 说明：返回按时间排序的原始传感器证据摘要
+- `GET /api/v2/situations/stream`
+  - 鉴权：`normal/admin`
+  - 说明：SSE 增量推送最近态势摘要
+- `POST /api/v2/situations/{situation_id}/reanalyze`
+  - 鉴权：`admin`
+  - 说明：使用当前 Ollama 模型与 RAG 知识重新生成态势报告
+- `POST /api/v2/situations/{situation_id}/status`
+  - 鉴权：`admin`
+  - body：`status=handled|ignored|open|closed|observing`
+
+管理员配置接口 `PUT /api/v2/admin/config` 还支持：
+
+- `situation_minimum_actions`：形成态势所需不同动作种类，范围 `3-12`
+- `situation_window_minutes`：关联总窗口，范围 `1-1440`
+- `situation_inactivity_minutes`：静默切段时间，范围 `1-1440`
+- `scan_port_threshold`：扫描判定唯一端口数量，范围 `3-65535`
+- `scan_window_seconds`：扫描聚合窗口，范围 `10-3600`
+
 ### 4.5 管理员（v2）
 
 - `GET /api/v2/admin/summary`

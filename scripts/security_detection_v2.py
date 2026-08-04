@@ -241,7 +241,11 @@ class POCMatch:
 class POCRuleEngine:
     def __init__(self, rules_path: Path | str = DEFAULT_RULES_PATH):
         self.rules_path = Path(rules_path)
-        self.rules = json.loads(self.rules_path.read_text(encoding="utf-8-sig")) if self.rules_path.exists() else []
+        if not self.rules_path.is_file():
+            raise FileNotFoundError(f"POC rule file is missing: {self.rules_path}")
+        self.rules = json.loads(self.rules_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(self.rules, list) or not self.rules:
+            raise ValueError(f"POC rule file contains no rules: {self.rules_path}")
 
     def match(self, event: Dict[str, Any]) -> List[POCMatch]:
         text = normalize_text(request_detection_text(event))

@@ -18,6 +18,10 @@ except Exception:
     pass
 
 
+MAX_CAPTURE_PAYLOAD_CHARS = 16 * 1024
+MAX_TSHARK_FIELD_CHARS = MAX_CAPTURE_PAYLOAD_CHARS * 4
+
+
 def find_executable(name: str) -> str:
     candidates = []
     if not name.lower().endswith(".exe"):
@@ -206,6 +210,14 @@ def clean(v: str) -> str:
     return str(v).strip()
 
 
+def truncate_capture_text(value: str, limit: int = MAX_CAPTURE_PAYLOAD_CHARS) -> str:
+    text = clean(value)
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"{text[:limit]}\n...[截断 {omitted} 个字符]"
+
+
 def to_int(v: str) -> Optional[int]:
     v = clean(v)
     if not v:
@@ -302,6 +314,10 @@ def decode_http_file_data(value: str) -> str:
     if not raw:
         return ""
 
+    original_length = len(raw)
+    if original_length > MAX_TSHARK_FIELD_CHARS:
+        raw = raw[:MAX_TSHARK_FIELD_CHARS]
+
     # tshark 的 http.file_data 常见是连续 hex（或带分隔符）
     compact = raw
     if re.fullmatch(r"(?:[0-9A-Fa-f]{2}:)+[0-9A-Fa-f]{2}", compact):
@@ -310,14 +326,14 @@ def decode_http_file_data(value: str) -> str:
         compact = re.sub(r"\s+", "", compact)
 
     if not re.fullmatch(r"[0-9A-Fa-f]+", compact):
-        return raw
+        return truncate_capture_text(raw)
     if len(compact) < 8 or len(compact) % 2 != 0:
-        return raw
+        return truncate_capture_text(raw)
 
     try:
         data = bytes.fromhex(compact)
     except Exception:
-        return raw
+        return truncate_capture_text(raw)
 
     for enc in ("utf-8", "latin1"):
         try:
@@ -326,10 +342,16 @@ def decode_http_file_data(value: str) -> str:
             continue
         decoded = maybe_unquote_payload(decoded)
         if looks_like_text_payload(decoded):
-            return decoded
+            result = truncate_capture_text(decoded)
+            if original_length > MAX_TSHARK_FIELD_CHARS:
+                result += f"\n...[原始字段共 {original_length} 个字符]"
+            return result
 
     # 对不可读负载保留原始 hex，避免输出乱码误导检测。
-    return raw
+    result = truncate_capture_text(raw)
+    if original_length > MAX_TSHARK_FIELD_CHARS:
+        result += f"\n...[原始字段共 {original_length} 个字符]"
+    return result
 
 
 def request_text(req: Dict, resp: Optional[Dict]) -> str:
@@ -434,9 +456,9 @@ def build_request_from_fields(fields: Dict[str, str], response_in_field: str) ->
         "dst_port": to_int(fields.get("tcp.dstport")) or 0,
         "stream": to_int(fields.get("tcp.stream")) or -1,
         "method": clean(fields.get("http.request.method")),
-        "uri": clean(fields.get("http.request.uri")),
-        "host": clean(fields.get("http.host")),
-        "content_type": clean(fields.get("http.content_type")),
+        "uri": truncate_capture_text(fields.get("http.request.uri"), 8 * 1024),
+        "host": truncate_capture_text(fields.get("http.host"), 512),
+        "content_type": truncate_capture_text(fields.get("http.content_type"), 512),
         "request_body": decode_http_file_data(fields.get("http.file_data")),
         "response_in_frame": to_int(fields.get(response_in_field)),
     }

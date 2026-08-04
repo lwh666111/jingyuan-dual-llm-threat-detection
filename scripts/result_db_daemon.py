@@ -4,14 +4,19 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from build_result_db import MySQLConfig, sync_result_to_db
 from sync_detection_v2_db import ensure_mysql as ensure_v2_mysql
 from sync_detection_v2_db import iter_case_dirs as iter_v2_case_dirs
 from sync_detection_v2_db import mysql_connect as v2_mysql_connect
 from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
-from sync_raw_http_logs import sync_input_dir_mysql
+from security_detection_v2 import DetectionEngineV2
+from sync_raw_http_logs import (
+    ensure_demo_attack_events,
+    iter_input_files,
+    sync_input_file_mysql,
+)
 
 
 def now_iso() -> str:
@@ -82,6 +87,43 @@ def calc_signature(result_dir: Path, input_dir: Path | None = None) -> Dict[str,
     return {"signature": hasher.hexdigest(), "file_count": file_count}
 
 
+def collect_watch_index(result_dir: Path, input_dir: Path) -> Dict[str, str]:
+    """Return a compact, persistent fingerprint for incremental synchronization."""
+    root = result_dir.parent
+    index: Dict[str, str] = {}
+    for path in collect_watch_files(result_dir, input_dir):
+        try:
+            stat = path.stat()
+            key = path.relative_to(root).as_posix()
+            index[key] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        except Exception:
+            continue
+    return index
+
+
+def changed_work_items(
+    previous: Dict[str, str],
+    current: Dict[str, str],
+    project_root: Path,
+) -> tuple[Set[str] | None, List[Path]]:
+    changed = {key for key, value in current.items() if previous.get(key) != value}
+    case_names: Set[str] = set()
+    input_files: List[Path] = []
+    force_all_cases = False
+    for key in sorted(changed):
+        parts = Path(key).parts
+        if len(parts) >= 2 and parts[0] == "input" and parts[-1].startswith("1.1."):
+            input_files.append(project_root / Path(key))
+        elif len(parts) >= 3 and parts[0] == "result" and parts[1].startswith("b."):
+            case_names.add(parts[1])
+        elif key == "result/manifest.jsonl":
+            force_all_cases = True
+    # A normal export updates both manifest.jsonl and its b.N directory. In that
+    # case the changed directory is sufficient; only a manifest-only change
+    # requires a complete result rescan.
+    return (None if force_all_cases and not case_names else case_names), input_files
+
+
 def run_sync(
     result_dir: Path,
     input_dir: Path,
@@ -91,20 +133,37 @@ def run_sync(
     log_file: Path,
     state_file: Path,
     state: Dict,
+    case_names: Set[str] | None = None,
+    input_files: List[Path] | None = None,
+    raw_engine: DetectionEngineV2 | None = None,
 ) -> Dict[str, str | int]:
     stats = sync_result_to_db(
         result_dir=result_dir,
         backend=backend,
         db_path=db_path,
         mysql_config=mysql_config,
+        case_names=case_names,
     )
     if backend == "mysql":
         try:
             conn = v2_mysql_connect(mysql_config)
             ensure_v2_mysql(conn)
-            raw_totals = sync_input_dir_mysql(conn, input_dir)
+            ensure_demo_attack_events(conn)
+            engine = raw_engine or DetectionEngineV2()
+            raw_totals = {"files": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0, "errors": 0}
+            raw_paths = list(iter_input_files(input_dir)) if input_files is None else input_files
+            for input_file in raw_paths:
+                try:
+                    row_stats = sync_input_file_mysql(conn, input_file, engine)
+                    for key in ("files", "raw", "candidate", "attack", "model", "poc", "behavior"):
+                        raw_totals[key] += int(row_stats.get(key, 0))
+                except Exception as exc:  # noqa: BLE001
+                    raw_totals["errors"] += 1
+                    log(f"raw sync failed file={input_file}: {exc}", log_file)
             v2_totals = {"cases": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
             for case_dir in iter_v2_case_dirs(result_dir):
+                if case_names is not None and case_dir.name not in case_names:
+                    continue
                 row_stats = sync_v2_case_mysql(conn, case_dir)
                 if row_stats.get("raw"):
                     v2_totals["cases"] += 1
@@ -190,20 +249,42 @@ def main() -> None:
     log(f"raw input watch dir={input_dir}", log_file)
     log(f"backend={args.backend} target={state['db_target']}", log_file)
 
-    sig_obj = calc_signature(result_dir, input_dir)
-    state["last_signature"] = sig_obj["signature"]
-    state["last_file_count"] = sig_obj["file_count"]
-    write_state(state_file, state)
+    raw_engine = DetectionEngineV2()
+    current_index = collect_watch_index(result_dir, input_dir)
+    previous_index = state.get("watch_index")
+    initial_case_names: Set[str] | None = None
+    initial_input_files: List[Path] | None = None
+    if isinstance(previous_index, dict):
+        initial_case_names, initial_input_files = changed_work_items(previous_index, current_index, project_root)
 
-    try:
-        run_sync(result_dir, input_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
-    except Exception as exc:  # noqa: BLE001
-        state["last_error"] = str(exc)
-        state["last_error_at"] = now_iso()
-        write_state(state_file, state)
-        log(f"sync failed: {exc}", log_file)
-        if args.once:
-            return
+    if not isinstance(previous_index, dict) or initial_case_names is None or initial_case_names or initial_input_files:
+        try:
+            run_sync(
+                result_dir,
+                input_dir,
+                args.backend,
+                db_path,
+                mysql_config,
+                log_file,
+                state_file,
+                state,
+                case_names=initial_case_names,
+                input_files=initial_input_files,
+                raw_engine=raw_engine,
+            )
+            state["watch_index"] = current_index
+            state["last_signature"] = calc_signature(result_dir, input_dir)["signature"]
+            state["last_file_count"] = len(current_index)
+            write_state(state_file, state)
+        except Exception as exc:  # noqa: BLE001
+            state["last_error"] = str(exc)
+            state["last_error_at"] = now_iso()
+            write_state(state_file, state)
+            log(f"sync failed: {exc}", log_file)
+            if args.once:
+                return
+    else:
+        log("no changes since last successful sync", log_file)
 
     if args.once:
         log("once done", log_file)
@@ -211,18 +292,37 @@ def main() -> None:
 
     while True:
         time.sleep(max(args.poll_seconds, 1))
-        sig_obj = calc_signature(result_dir, input_dir)
-        current_sig = str(sig_obj["signature"])
-        if current_sig == str(state.get("last_signature", "")):
+        current_index = collect_watch_index(result_dir, input_dir)
+        previous_index = state.get("watch_index")
+        if isinstance(previous_index, dict) and current_index == previous_index:
             continue
 
-        state["last_signature"] = current_sig
-        state["last_file_count"] = int(sig_obj["file_count"])
-        write_state(state_file, state)
-        log(f"change detected files={sig_obj['file_count']}", log_file)
+        if isinstance(previous_index, dict):
+            case_names, input_files = changed_work_items(previous_index, current_index, project_root)
+        else:
+            case_names, input_files = None, None
+        changed_cases = "all" if case_names is None else str(len(case_names))
+        changed_inputs = "all" if input_files is None else str(len(input_files))
+        log(f"change detected files={len(current_index)} cases={changed_cases} inputs={changed_inputs}", log_file)
 
         try:
-            run_sync(result_dir, input_dir, args.backend, db_path, mysql_config, log_file, state_file, state)
+            run_sync(
+                result_dir,
+                input_dir,
+                args.backend,
+                db_path,
+                mysql_config,
+                log_file,
+                state_file,
+                state,
+                case_names=case_names,
+                input_files=input_files,
+                raw_engine=raw_engine,
+            )
+            state["watch_index"] = current_index
+            state["last_signature"] = calc_signature(result_dir, input_dir)["signature"]
+            state["last_file_count"] = len(current_index)
+            write_state(state_file, state)
         except Exception as exc:  # noqa: BLE001
             state["last_error"] = str(exc)
             state["last_error_at"] = now_iso()

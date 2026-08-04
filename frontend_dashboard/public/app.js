@@ -238,6 +238,14 @@ const state = {
       loading: false,
     },
   },
+  situations: {
+    items: [],
+    selectedId: "",
+    detail: null,
+    graph: null,
+    status: "",
+    chainMode: "aggregate",
+  },
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -421,15 +429,15 @@ function renderLoginPage() {
               </div>
               <span class="auth-live-dot">在线</span>
             </div>
-            <p class="auth-hint">选择身份后会自动填充测试账号；普通用户仅查看大屏与详情，管理员可维护模型、用户和系统配置。</p>
+            <p class="auth-hint">首次打开不会预填账号密码；需要演示账号时可主动点击身份按钮。普通用户仅查看大屏与详情，管理员可维护模型、用户和系统配置。</p>
 
             <div class="form-row">
               <label for="loginUsername">用户名</label>
-              <input id="loginUsername" type="text" autocomplete="username" />
+              <input id="loginUsername" type="text" autocomplete="off" data-form-type="other" readonly />
             </div>
             <div class="form-row">
               <label for="loginPassword">密码</label>
-              <input id="loginPassword" type="password" autocomplete="current-password" />
+              <input id="loginPassword" type="password" autocomplete="new-password" data-form-type="other" readonly />
             </div>
 
             <div class="form-row">
@@ -580,7 +588,17 @@ function renderLoginPage() {
   `;
 
   let selectedRole = ROLE_NORMAL;
-  fillLoginCredential(selectedRole);
+
+  ["#loginUsername", "#loginPassword"].forEach((selector) => {
+    const input = appEl.querySelector(selector);
+    if (!input) return;
+    const enableManualInput = () => {
+      input.readOnly = false;
+    };
+    input.addEventListener("pointerdown", enableManualInput, { once: true });
+    input.addEventListener("focus", enableManualInput, { once: true });
+    input.addEventListener("keydown", enableManualInput, { once: true });
+  });
 
   appEl.querySelectorAll("[data-login-role]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -818,8 +836,14 @@ function fillLoginCredential(role) {
   const row = DEMO_CREDENTIALS[role] || DEMO_CREDENTIALS.normal;
   const usernameEl = appEl.querySelector("#loginUsername");
   const passwordEl = appEl.querySelector("#loginPassword");
-  if (usernameEl) usernameEl.value = row.username;
-  if (passwordEl) passwordEl.value = row.password;
+  if (usernameEl) {
+    usernameEl.readOnly = false;
+    usernameEl.value = row.username;
+  }
+  if (passwordEl) {
+    passwordEl.readOnly = false;
+    passwordEl.value = row.password;
+  }
 }
 
 function getProfileName(profile = state.profile) {
@@ -984,6 +1008,7 @@ function getTabsByRole(role) {
   if (role === ROLE_ADMIN) {
     return [
       { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
+      { id: "situations", label: "态势感知展示" },
       { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
       { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
       { id: "rag-settings", label: "\u5927\u6a21\u578b\u8bbe\u7f6e" },
@@ -993,6 +1018,7 @@ function getTabsByRole(role) {
   }
   return [
     { id: "screen", label: "\u6570\u636e\u5927\u5c4f" },
+    { id: "situations", label: "态势感知展示" },
     { id: "pro-query", label: "\u8be6\u60c5\u4fe1\u606f" },
     { id: "plugins", label: "\u6269\u5c55\u63d2\u4ef6" },
   ];
@@ -1013,6 +1039,12 @@ function switchView(viewId) {
   if (viewId === "screen") {
     renderScreenView();
     setViewRefresh(5000, refreshScreenData);
+    animateViewRoot(direction);
+    return;
+  }
+  if (viewId === "situations") {
+    renderSituationView();
+    setViewRefresh(8000, () => refreshSituationData({ preserveSelection: true }));
     animateViewRoot(direction);
     return;
   }
@@ -1076,7 +1108,7 @@ function startGlobalTimers() {
 }
 
 async function pollAudioAlerts() {
-  if (!state.token || !state.soundEnabled) return;
+  if (!state.profile || !state.soundEnabled) return;
   const data = await api("/api/v2/common/alerts/ticker?limit=3");
   handleAudioAlertItems(Array.isArray(data.items) ? data.items : []);
 }
@@ -1096,7 +1128,6 @@ function handleAudioAlertItems(items) {
     state.alarmAudio.initialized = true;
     return;
   }
-
   const hasNewAlert = keys.some((key) => !state.alarmAudio.seenKeys.has(key));
   keys.forEach((key) => state.alarmAudio.seenKeys.add(key));
   if (hasNewAlert) {
@@ -1709,6 +1740,504 @@ function renderTicker(items) {
     )
     .join("  |  ");
   el.textContent = `${text}      ${text}`;
+}
+
+function renderSituationView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  root.innerHTML = `
+    <section class="situation-hero">
+      <div>
+        <span class="situation-eyebrow"><i></i> CROSS-SENSOR CORRELATION</span>
+        <h2>攻击者连续态势</h2>
+        <p>将同一来源在短时间内的扫描、凭据攻击与漏洞利用关联为一条可解释攻击链。</p>
+      </div>
+      <div class="situation-hero-actions">
+        <label class="situation-filter">状态
+          <select id="situationStatusFilter">
+            <option value="">全部</option>
+            <option value="open">进行中</option>
+            <option value="closed">已结束</option>
+            <option value="handled">已处置</option>
+            <option value="observing">观察中</option>
+          </select>
+        </label>
+        <button id="btnSituationRefresh" class="btn btn-primary" type="button">刷新态势</button>
+      </div>
+    </section>
+
+    <section class="situation-workspace">
+      <aside class="situation-list-panel">
+        <div class="situation-panel-title">
+          <div><span>最近攻击者</span><small id="situationCount">正在加载</small></div>
+          <span class="live-pulse" aria-label="实时更新"></span>
+        </div>
+        <div id="situationList" class="situation-list">
+          ${renderSituationSkeleton(4)}
+        </div>
+      </aside>
+
+      <article class="situation-chain-panel">
+        <div class="situation-panel-title">
+          <div><span id="situationChainTitle">攻击链路</span><small id="situationChainSubtitle">选择一个攻击者查看动作推进</small></div>
+          <div class="situation-chain-tools">
+            <div class="situation-view-switch" role="group" aria-label="链路视图">
+              <button type="button" data-chain-mode="aggregate">聚合视图</button>
+              <button type="button" data-chain-mode="evidence">证据视图</button>
+            </div>
+            <div id="situationStagePills" class="situation-stage-pills"></div>
+          </div>
+        </div>
+        <div id="situationChainChart" class="situation-chain-chart"></div>
+        <div id="situationChainEmpty" class="situation-empty hidden"></div>
+      </article>
+
+      <aside class="situation-risk-panel">
+        <div class="situation-panel-title"><div><span>态势研判</span><small>融合风险概览</small></div></div>
+        <div id="situationRiskSummary" class="situation-risk-summary">
+          <div class="situation-risk-orbit"><strong>-</strong><span>等待选择</span></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="situation-report-grid">
+      <article class="situation-report-panel">
+        <div class="situation-panel-title">
+          <div><span>AI 态势报告</span><small id="situationAiMeta">Ollama + RAG 可解释研判</small></div>
+          <button id="btnSituationReanalyze" class="btn btn-ghost btn-mini ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}" type="button">重新研判</button>
+        </div>
+        <div id="situationAiReport" class="situation-ai-report">
+          <div class="situation-report-placeholder">报告将在攻击链形成后自动生成</div>
+        </div>
+      </article>
+      <article class="situation-evidence-panel">
+        <div class="situation-panel-title"><div><span>证据序列</span><small>所有结论可回溯到原始传感器</small></div></div>
+        <div id="situationEvidence" class="situation-evidence-list"></div>
+      </article>
+    </section>
+  `;
+
+  const statusFilter = document.getElementById("situationStatusFilter");
+  if (statusFilter) statusFilter.value = state.situations.status;
+  statusFilter?.addEventListener("change", async (event) => {
+    state.situations.status = event.target.value;
+    state.situations.selectedId = "";
+    await refreshSituationData({ preserveSelection: false });
+  });
+  document.getElementById("btnSituationRefresh")?.addEventListener("click", () => refreshSituationData({ preserveSelection: true }));
+  document.getElementById("btnSituationReanalyze")?.addEventListener("click", reanalyzeSelectedSituation);
+  document.querySelectorAll("[data-chain-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.situations.chainMode = button.dataset.chainMode || "aggregate";
+      syncSituationChainMode();
+      if (state.situations.graph) drawSituationChain(state.situations.graph);
+    });
+  });
+  syncSituationChainMode();
+  refreshSituationData({ preserveSelection: true }).catch((err) => renderSituationFailure(err));
+}
+
+function syncSituationChainMode() {
+  document.querySelectorAll("[data-chain-mode]").forEach((button) => {
+    const active = button.dataset.chainMode === state.situations.chainMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function renderSituationSkeleton(count) {
+  return Array.from({ length: count }, () => `<div class="situation-list-skeleton"><i></i><span></span><b></b></div>`).join("");
+}
+
+async function refreshSituationData({ preserveSelection = true } = {}) {
+  const query = new URLSearchParams({ limit: "80" });
+  if (state.situations.status) query.set("status", state.situations.status);
+  const data = await api(`/api/v2/situations?${query.toString()}`);
+  if (state.currentView !== "situations") return;
+  state.situations.items = Array.isArray(data.items) ? data.items : [];
+  const selectedStillExists = state.situations.items.some((item) => item.situation_id === state.situations.selectedId);
+  if (!preserveSelection || !selectedStillExists) {
+    state.situations.selectedId = state.situations.items[0]?.situation_id || "";
+  }
+  renderSituationList();
+  if (state.situations.selectedId) {
+    await loadSituationDetail(state.situations.selectedId);
+  } else {
+    renderSituationEmptyState();
+  }
+}
+
+function renderSituationList() {
+  const container = document.getElementById("situationList");
+  const count = document.getElementById("situationCount");
+  if (count) count.textContent = `${state.situations.items.length} 条关联会话`;
+  if (!container) return;
+  if (!state.situations.items.length) {
+    container.innerHTML = `<div class="situation-list-empty"><b>暂无连续攻击态势</b><span>单一请求仍会保留在详情信息中；至少三种不同动作才会形成攻击链。</span></div>`;
+    return;
+  }
+  container.innerHTML = state.situations.items
+    .map((item, index) => {
+      const active = item.situation_id === state.situations.selectedId;
+      return `
+        <button class="situation-list-item ${active ? "active" : ""}" data-situation-id="${escapeHtml(item.situation_id)}" type="button" style="--delay:${Math.min(index, 8) * 38}ms">
+          <span class="situation-list-index">${String(index + 1).padStart(2, "0")}</span>
+          <span class="situation-list-copy">
+            <strong>${escapeHtml(item.source_ip || "未知来源")}</strong>
+            <small>${escapeHtml(formatSituationStage(item.current_stage))} · ${Number(item.distinct_action_types || 0)} 类动作 · ${Number(item.total_action_count || 0)} 次</small>
+            <time>${escapeHtml(formatDateTime(item.last_action_at, false))}</time>
+          </span>
+          <span class="situation-risk-tag ${escapeHtml(item.risk_level || "low")}">${escapeHtml(formatRiskLevel(item.risk_level))}</span>
+        </button>`;
+    })
+    .join("");
+  container.querySelectorAll("[data-situation-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.situations.selectedId = button.dataset.situationId || "";
+      renderSituationList();
+      await loadSituationDetail(state.situations.selectedId);
+    });
+  });
+}
+
+async function loadSituationDetail(situationId) {
+  const [detailData, graphData] = await Promise.all([
+    api(`/api/v2/situations/${encodeURIComponent(situationId)}`),
+    api(`/api/v2/situations/${encodeURIComponent(situationId)}/graph`),
+  ]);
+  if (state.currentView !== "situations" || situationId !== state.situations.selectedId) return;
+  state.situations.detail = detailData.item || null;
+  state.situations.graph = graphData || null;
+  renderSituationDetail();
+}
+
+function renderSituationDetail() {
+  const detail = state.situations.detail;
+  const graph = state.situations.graph;
+  if (!detail || !graph) return renderSituationEmptyState();
+  const title = document.getElementById("situationChainTitle");
+  const subtitle = document.getElementById("situationChainSubtitle");
+  if (title) title.textContent = `${detail.source_ip} 攻击链路`;
+  if (subtitle) subtitle.textContent = `${formatDateTime(detail.started_at, false)} 至 ${formatDateTime(detail.last_action_at, false)}`;
+  renderSituationStagePills(graph.nodes || []);
+  renderSituationRisk(detail);
+  renderSituationAiReport(detail);
+  renderSituationEvidence(detail.actions || []);
+  drawSituationChain(graph);
+}
+
+function renderSituationStagePills(nodes) {
+  const container = document.getElementById("situationStagePills");
+  if (!container) return;
+  const stages = [...new Set(nodes.map((node) => node.stage))];
+  container.innerHTML = stages.map((stage) => `<span class="stage-${escapeHtml(stage)}">${escapeHtml(formatSituationStage(stage))}</span>`).join("");
+}
+
+function renderSituationRisk(detail) {
+  const container = document.getElementById("situationRiskSummary");
+  if (!container) return;
+  const score = Math.round(Number(detail.risk_score || 0) * 100);
+  const statusMap = { open: "进行中", closed: "已结束", handled: "已处置", ignored: "已忽略", observing: "观察中" };
+  container.innerHTML = `
+    <div class="situation-risk-orbit risk-${escapeHtml(detail.risk_level || "low")}" style="--score:${score * 3.6}deg">
+      <strong>${score}</strong><span>风险指数</span>
+    </div>
+    <div class="situation-risk-facts">
+      <div><span>攻击阶段</span><strong>${escapeHtml(formatSituationStage(detail.current_stage))}</strong></div>
+      <div><span>动作种类</span><strong>${Number(detail.distinct_action_types || 0)}</strong></div>
+      <div><span>累计频次</span><strong>${Number(detail.total_action_count || 0)}</strong></div>
+      <div><span>会话状态</span><strong>${escapeHtml(statusMap[detail.status] || detail.status || "-")}</strong></div>
+    </div>
+    <div class="situation-risk-actions ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}">
+      <button class="btn btn-ghost btn-mini" data-situation-status="handled" type="button">标记已处置</button>
+      <button class="btn btn-ghost btn-mini" data-situation-status="ignored" type="button">忽略</button>
+    </div>`;
+  container.querySelectorAll("[data-situation-status]").forEach((button) => {
+    button.addEventListener("click", () => updateSelectedSituationStatus(button.dataset.situationStatus));
+  });
+}
+
+function renderSituationAiReport(detail) {
+  const container = document.getElementById("situationAiReport");
+  const meta = document.getElementById("situationAiMeta");
+  if (!container) return;
+  const report = detail.ai_report;
+  if (meta) meta.textContent = formatAiStatus(detail.ai_status, report);
+  if (!report) {
+    container.innerHTML = `<div class="situation-report-placeholder"><i class="live-pulse"></i> 研判任务已入队，Ollama 完成后将自动刷新</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <header class="situation-report-lead">
+      <span>执行摘要</span>
+      <p>${escapeHtml(report.executive_summary || report.narrative || "暂无摘要")}</p>
+      <div class="situation-report-intent"><b>可能意图</b><span>${escapeHtml(report.likely_intent || "待确认")}</span></div>
+    </header>
+    <div class="situation-report-reading">
+      ${renderSituationReportSection("事件叙述", report.narrative)}
+      ${renderSituationReportSection("时间线分析", report.timeline_analysis)}
+      ${renderSituationReportSection("技术手法分析", report.technique_analysis)}
+      ${renderSituationReportSection("证据强度", report.evidence_assessment || report.analysis)}
+      ${renderSituationReportSection("影响评估", report.impact_assessment)}
+      ${renderSituationReportSection("失陷判断", report.compromise_assessment || report.conclusion, "critical")}
+      ${renderSituationReportSection("综合结论", report.conclusion, "conclusion")}
+    </div>
+    <div class="situation-response-plan">
+      <section><h4>调查步骤</h4>${renderSituationAdvice(report.investigation_steps)}</section>
+      <section><h4>即时防护</h4>${renderSituationAdvice(report.protection_measures)}</section>
+      <section><h4>检测优化</h4>${renderSituationAdvice(report.detection_improvements)}</section>
+      <section><h4>长期改进</h4>${renderSituationAdvice(report.improvement_suggestions)}</section>
+    </div>
+    <details class="situation-evidence-limits">
+      <summary>证据边界与不确定性</summary>
+      ${renderSituationAdvice(report.evidence_limitations)}
+    </details>`;
+}
+
+function renderSituationReportSection(title, content, className = "") {
+  if (!content) return "";
+  return `<section class="${escapeHtml(className)}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(content)}</p></section>`;
+}
+
+function renderSituationAdvice(items) {
+  const rows = Array.isArray(items) ? items : [];
+  return rows.length ? `<ol>${rows.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>` : `<p>暂无建议</p>`;
+}
+
+function renderSituationEvidence(actions) {
+  const container = document.getElementById("situationEvidence");
+  if (!container) return;
+  container.innerHTML = actions
+    .map((action, index) => {
+      const catalogName = state.situations.graph?.nodes?.[index]?.name || action.action_type || "异常行为";
+      const metadata = action.metadata || {};
+      const ports = Array.isArray(metadata.ports) ? metadata.ports.slice(0, 12).join(", ") : "";
+      return `
+        <details class="situation-evidence-item" ${index === 0 ? "open" : ""}>
+          <summary><b>${Number(action.sequence_no || index + 1)}</b><span><strong>${escapeHtml(catalogName)}</strong><small>${escapeHtml(action.sensor || "unknown")} · ${Number(action.action_count || 1)} 次</small></span><time>${escapeHtml(formatDateTime(action.occurred_at, false))}</time></summary>
+          <div><p>目标接口：${escapeHtml(action.target_interface || "-")}</p><p>置信度：${Math.round(Number(action.confidence || 0) * 100)}%</p>${ports ? `<p>目标端口：${escapeHtml(ports)}</p>` : ""}<p>证据引用：${escapeHtml((action.evidence_refs || []).join("、") || "已留存于原始事件")}</p></div>
+        </details>`;
+    })
+    .join("");
+}
+
+function aggregateSituationNodes(nodes, maxNodes = 10) {
+  const groups = [];
+  nodes.forEach((node) => {
+    const previous = groups[groups.length - 1];
+    const key = `${node.stage || "unknown"}|${node.action_type || node.name || "unknown"}`;
+    if (previous && previous.aggregateKey === key) {
+      previous.members.push(node);
+      previous.count += Number(node.count || 1);
+      previous.confidence = Math.max(previous.confidence, Number(node.confidence || 0));
+      previous.last_seen_at = node.last_seen_at || node.occurred_at || previous.last_seen_at;
+      return;
+    }
+    groups.push({
+      ...node,
+      aggregateKey: key,
+      members: [node],
+      count: Number(node.count || 1),
+      confidence: Number(node.confidence || 0),
+      last_seen_at: node.last_seen_at || node.occurred_at,
+    });
+  });
+  if (groups.length <= maxNodes) return groups;
+
+  const compacted = [];
+  const chunkSize = Math.ceil(groups.length / maxNodes);
+  for (let index = 0; index < groups.length; index += chunkSize) {
+    const chunk = groups.slice(index, index + chunkSize);
+    const names = [...new Set(chunk.map((item) => item.name).filter(Boolean))];
+    const members = chunk.flatMap((item) => item.members || [item]);
+    compacted.push({
+      ...chunk[0],
+      id: `aggregate-${index}`,
+      name: names.length <= 2 ? names.join(" / ") : `${names.slice(0, 2).join(" / ")} 等`,
+      count: chunk.reduce((sum, item) => sum + Number(item.count || 1), 0),
+      confidence: Math.max(...chunk.map((item) => Number(item.confidence || 0))),
+      last_seen_at: chunk[chunk.length - 1].last_seen_at || chunk[chunk.length - 1].occurred_at,
+      members,
+      mixedStages: new Set(chunk.map((item) => item.stage)).size > 1,
+    });
+  }
+  return compacted;
+}
+
+function buildSituationGraphView(graph) {
+  const sourceNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  if (state.situations.chainMode === "evidence") {
+    return { nodes: sourceNodes, edges: Array.isArray(graph.edges) ? graph.edges : [], aggregated: false };
+  }
+  const nodes = aggregateSituationNodes(sourceNodes, 10);
+  const edges = nodes.slice(1).map((node, index) => {
+    const previous = nodes[index];
+    const previousTime = new Date(previous.last_seen_at || previous.occurred_at || 0).getTime();
+    const currentTime = new Date(node.occurred_at || 0).getTime();
+    const gap = Number.isFinite(previousTime) && Number.isFinite(currentTime)
+      ? Math.max(0, Math.round((currentTime - previousTime) / 1000))
+      : 0;
+    return { source: previous.id, target: node.id, gap_seconds: gap };
+  });
+  return { nodes, edges, aggregated: true };
+}
+
+function drawSituationChain(graph) {
+  const empty = document.getElementById("situationChainEmpty");
+  const chart = getEchartsInstance("situationChainChart");
+  const graphView = buildSituationGraphView(graph);
+  const nodes = graphView.nodes;
+  if (!chart || !nodes.length) {
+    if (empty) {
+      empty.classList.remove("hidden");
+      empty.innerHTML = `<b>暂无可绘制动作</b><span>等待关联引擎补充证据。</span>`;
+    }
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  const width = Math.max(640, chart.getWidth() || 900);
+  const height = Math.max(340, chart.getHeight() || 420);
+  const stageY = { recon: 72, credential: 144, exploit: 216, execution: 288, impact: 360, unknown: 28 };
+  const left = 104;
+  // Reserve enough room for long labels such as "WebShell 行为" at both ends.
+  const right = 146;
+  const usable = Math.max(340, width - left - right);
+  const colors = { recon: "#58b8ff", credential: "#ffc45c", exploit: "#ff687f", execution: "#d986ff", impact: "#43e2aa", unknown: "#91a9be" };
+  const crowded = nodes.length > 10;
+  const graphNodes = nodes.map((node, index) => ({
+    id: node.id,
+    name: node.name,
+    x: left + (nodes.length === 1 ? usable / 2 : (usable * index) / (nodes.length - 1)),
+    y: Math.min(height - 42, stageY[node.stage] || 40),
+    symbolSize: Math.max(42, Math.min(64, 42 + Math.log10(Number(node.count || 1) + 1) * 10)),
+    itemStyle: { color: colors[node.stage] || colors.unknown, borderColor: "rgba(242,247,250,.72)", borderWidth: 1.5, shadowBlur: 12, shadowColor: `${colors[node.stage] || colors.unknown}55` },
+    label: {
+      show: !crowded || index % 2 === 0,
+      position: index % 2 === 0 ? "bottom" : "top",
+      distance: 8,
+      formatter: `{name|${String(node.name || "异常动作").slice(0, 16)}}\n{count|${Number(node.count || 1)} 次}`,
+      rich: { name: { color: "#edf3f6", fontSize: 12, fontWeight: 700, lineHeight: 18 }, count: { color: "#9caeb8", fontSize: 10 } },
+    },
+    raw: node,
+  }));
+  chart.setOption({
+    animationDuration: 850,
+    animationEasingUpdate: "cubicOut",
+    tooltip: {
+      trigger: "item",
+      backgroundColor: "rgba(5,15,27,.96)",
+      borderColor: "rgba(116,188,246,.5)",
+      textStyle: { color: "#eaf6ff" },
+      formatter: (params) => {
+        if (params.dataType === "edge") return `间隔 ${Number(params.data.gap_seconds || 0)} 秒`;
+        const row = params.data.raw || {};
+        const memberCount = Array.isArray(row.members) ? row.members.length : 1;
+        return `<b>${escapeHtml(row.name || "")}</b><br/>阶段：${escapeHtml(row.stage_label || formatSituationStage(row.stage))}<br/>聚合动作：${memberCount} 条<br/>累计频次：${Number(row.count || 0)}<br/>最高置信度：${Math.round(Number(row.confidence || 0) * 100)}%<br/>首见：${escapeHtml(formatDateTime(row.occurred_at, false))}<br/>末见：${escapeHtml(formatDateTime(row.last_seen_at || row.occurred_at, false))}`;
+      },
+    },
+    graphic: Object.entries(stageY)
+      .filter(([stage]) => stage !== "unknown")
+      .map(([stage, y]) => ({
+        type: "group",
+        left: 14,
+        top: y - 14,
+        children: [
+          { type: "text", style: { text: formatSituationStage(stage), fill: "#7f9db8", font: "12px sans-serif" } },
+          { type: "line", shape: { x1: 76, y1: 7, x2: width - 166, y2: 7 }, style: { stroke: "rgba(105,154,194,.12)", lineWidth: 1 } },
+        ],
+      })),
+    series: [
+      {
+        type: "graph",
+        layout: "none",
+        roam: true,
+        draggable: false,
+        data: graphNodes,
+        edges: graphView.edges.map((edge) => ({
+          ...edge,
+          lineStyle: { color: "rgba(134,166,184,.72)", width: 2, curveness: 0.08 },
+          label: { show: nodes.length <= 7, formatter: `${Number(edge.gap_seconds || 0)}s`, color: "#8196a3", fontSize: 9 },
+        })),
+        edgeSymbol: ["none", "arrow"],
+        edgeSymbolSize: [0, 10],
+        emphasis: { focus: "adjacency", scale: 1.12, lineStyle: { width: 4, color: "#d7f2ff" } },
+      },
+    ],
+  }, true);
+}
+
+function renderSituationEmptyState() {
+  state.situations.detail = null;
+  state.situations.graph = null;
+  const chart = getEchartsInstance("situationChainChart");
+  chart?.clear?.();
+  const empty = document.getElementById("situationChainEmpty");
+  if (empty) {
+    empty.classList.remove("hidden");
+    empty.innerHTML = `<div class="situation-empty-radar"><i></i><i></i><i></i></div><b>正在观察跨阶段行为</b><span>同一来源在 30 分钟内出现至少三种不同动作后，将形成攻击者态势。</span>`;
+  }
+  const title = document.getElementById("situationChainTitle");
+  if (title) title.textContent = "攻击链路";
+  const risk = document.getElementById("situationRiskSummary");
+  if (risk) risk.innerHTML = `<div class="situation-risk-orbit"><strong>-</strong><span>等待态势</span></div><div class="situation-sensor-note"><b>数据来自真实传感器</b><span>HTTP / SSH / TCP SYN</span></div>`;
+  const report = document.getElementById("situationAiReport");
+  if (report) report.innerHTML = `<div class="situation-report-placeholder">暂无符合关联条件的攻击链，不生成虚构研判。</div>`;
+  const evidence = document.getElementById("situationEvidence");
+  if (evidence) evidence.innerHTML = `<div class="situation-evidence-empty">证据将在动作发生后按时间顺序列出</div>`;
+}
+
+function renderSituationFailure(error) {
+  const list = document.getElementById("situationList");
+  if (list) list.innerHTML = `<div class="situation-list-empty error"><b>态势服务暂不可用</b><span>${escapeHtml(error?.message || String(error))}</span></div>`;
+  renderSituationEmptyState();
+}
+
+async function reanalyzeSelectedSituation() {
+  if (!state.situations.selectedId || state.profile?.role !== ROLE_ADMIN) return;
+  const button = document.getElementById("btnSituationReanalyze");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "研判中...";
+  }
+  try {
+    await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/reanalyze`, { method: "POST", body: {} });
+    showToast("AI 态势报告已更新");
+    await loadSituationDetail(state.situations.selectedId);
+  } catch (error) {
+    showToast(`重新研判失败：${error.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "重新研判";
+    }
+  }
+}
+
+async function updateSelectedSituationStatus(status) {
+  if (!state.situations.selectedId || state.profile?.role !== ROLE_ADMIN) return;
+  try {
+    await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/status`, { method: "POST", body: { status } });
+    showToast(status === "handled" ? "已标记为处置完成" : "该态势已忽略");
+    await refreshSituationData({ preserveSelection: true });
+  } catch (error) {
+    showToast(`状态更新失败：${error.message}`);
+  }
+}
+
+function formatSituationStage(stage) {
+  return { recon: "侦察探测", credential: "凭据攻击", exploit: "漏洞利用", execution: "执行控制", impact: "影响处置", unknown: "其他行为" }[stage] || "其他行为";
+}
+
+function formatAiStatus(status, report) {
+  if (status === "complete") return `Ollama + RAG · 命中 ${Number(report?.rag_hits || 0)} 条知识`;
+  if (status === "fallback") {
+    const reason = String(report?.fallback_reason || "");
+    if (/未经证据确认|事实|中文|ValueError/i.test(reason)) return "规则化应急报告 · AI 输出未通过事实校验";
+    if (/urlopen|connect|timeout|timed out|ollama/i.test(reason)) return "规则化应急报告 · Ollama 暂不可用";
+    return "规则化应急报告 · AI 结果不可用";
+  }
+  if (status === "failed") return "研判失败，等待重试";
+  return "Ollama + RAG 可解释研判";
 }
 
 function renderProQueryView() {
@@ -3670,6 +4199,26 @@ function renderAdminConfigView() {
           <label>自定义模型(可选，优先)</label>
           <input id="cfg_llm_model_custom" placeholder="例如 qwen2.5:7b" />
         </div>
+        <div>
+          <label>形成态势所需动作种类</label>
+          <input id="cfg_situation_minimum_actions" type="number" min="3" max="12" />
+        </div>
+        <div>
+          <label>态势关联窗口(分钟)</label>
+          <input id="cfg_situation_window_minutes" type="number" min="1" max="1440" />
+        </div>
+        <div>
+          <label>静默切段时间(分钟)</label>
+          <input id="cfg_situation_inactivity_minutes" type="number" min="1" max="1440" />
+        </div>
+        <div>
+          <label>扫描判定端口数量</label>
+          <input id="cfg_scan_port_threshold" type="number" min="3" max="65535" />
+        </div>
+        <div>
+          <label>扫描聚合窗口(秒)</label>
+          <input id="cfg_scan_window_seconds" type="number" min="10" max="3600" />
+        </div>
       </div>
       <div class="background-config-card">
         <div id="cfg_home_bg_preview" class="background-preview"></div>
@@ -3723,6 +4272,11 @@ async function loadAdminConfig() {
   setInputValue("cfg_monitor_ports", map.monitor_ports || "80,443,8080");
   setInputValue("cfg_llm_model_custom", "");
   setInputValue("cfg_capture_interface", map.capture_interface || "auto");
+  setInputValue("cfg_situation_minimum_actions", map.situation_minimum_actions || "3");
+  setInputValue("cfg_situation_window_minutes", map.situation_window_minutes || "30");
+  setInputValue("cfg_situation_inactivity_minutes", map.situation_inactivity_minutes || "15");
+  setInputValue("cfg_scan_port_threshold", map.scan_port_threshold || "10");
+  setInputValue("cfg_scan_window_seconds", map.scan_window_seconds || "60");
   applyHomepageBackground(map.homepage_background_url || "/assets/bg-main.jpg");
 }
 
@@ -3738,6 +4292,11 @@ async function saveAdminConfig() {
     monitor_ports: String(document.getElementById("cfg_monitor_ports")?.value || "80,443,8080"),
     capture_interface: String(document.getElementById("cfg_capture_interface")?.value || "auto"),
     llm_model: finalModel,
+    situation_minimum_actions: String(document.getElementById("cfg_situation_minimum_actions")?.value || "3"),
+    situation_window_minutes: String(document.getElementById("cfg_situation_window_minutes")?.value || "30"),
+    situation_inactivity_minutes: String(document.getElementById("cfg_situation_inactivity_minutes")?.value || "15"),
+    scan_port_threshold: String(document.getElementById("cfg_scan_port_threshold")?.value || "10"),
+    scan_window_seconds: String(document.getElementById("cfg_scan_window_seconds")?.value || "60"),
   };
   await api("/api/v2/admin/config", { method: "PUT", body: payload });
   showToast("配置保存成功");
@@ -4165,7 +4724,7 @@ function renderTrendChart(containerId, rows) {
           smooth: true,
           data: total,
           symbolSize: 8,
-          lineStyle: { width: 3, color: "#2ca7ff" },
+          lineStyle: { width: 2.4, color: "#2ca7ff" },
           itemStyle: { color: "#2ca7ff" },
           areaStyle: { color: "rgba(44,167,255,.16)" },
           markPoint:
@@ -4182,7 +4741,7 @@ function renderTrendChart(containerId, rows) {
           smooth: true,
           data: blocked,
           symbolSize: 7,
-          lineStyle: { width: 2.4, color: "#16d88b" },
+          lineStyle: { width: 2, color: "#16d88b" },
           itemStyle: { color: "#16d88b" },
           areaStyle: { color: "rgba(22,216,139,.12)" },
         },
@@ -4214,27 +4773,25 @@ function renderTopTypeBarChart(containerId, rows) {
       yAxis: {
         type: "value",
         axisLabel: { color: "#9ec6e6" },
-        splitLine: { lineStyle: { color: "rgba(130,180,225,.16)" } },
+        splitLine: { lineStyle: { color: "rgba(130,180,225,.18)" } },
       },
       series: [
         {
           type: "bar",
           data: vals.map((v, idx) => ({
             value: v,
-            itemStyle:
-              idx < 3
-                ? {
-                    color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            itemStyle: {
+              color:
+                idx < 3
+                  ? new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
                       { offset: 0, color: ["#ff4965", "#ff6a5c", "#ff8a47"][idx] || "#ff4965" },
                       { offset: 1, color: ["#ff8547", "#ff9b4a", "#ffad53"][idx] || "#ff8547" },
-                    ]),
-                  }
-                : {
-                    color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    ])
+                  : new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
                       { offset: 0, color: "#2ca7ff" },
                       { offset: 1, color: "#16d88b" },
                     ]),
-                  },
+            },
           })),
           barWidth: "56%",
           label: { show: true, position: "top", color: "#d9f1ff" },
@@ -4291,7 +4848,7 @@ function renderPieChart(containerId, rows, labelKey, valueKey) {
             show: true,
             length: 16,
             length2: 10,
-            lineStyle: { color: "rgba(244, 251, 255, 0.88)", width: 1.2 },
+            lineStyle: { color: "rgba(244,251,255,0.88)", width: 1.2 },
           },
           labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
           itemStyle: { borderColor: "#081c2e", borderWidth: 1 },

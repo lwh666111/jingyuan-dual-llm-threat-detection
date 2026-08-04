@@ -660,7 +660,7 @@ def ensure_schema_mysql(conn: Any) -> None:
           source_ip VARCHAR(64) NULL,
           destination_ip VARCHAR(64) NULL,
           attack_interface VARCHAR(255) NULL,
-          attack_method VARCHAR(255) NULL,
+          attack_method LONGTEXT NULL,
           attack_path TEXT NULL,
           attack_time VARCHAR(64) NULL,
           severity VARCHAR(64) NULL,
@@ -721,7 +721,8 @@ def ensure_schema_mysql(conn: Any) -> None:
         for ddl in ddl_list:
             cur.execute(ddl)
         cur.execute("SHOW COLUMNS FROM analyses")
-        existing = {str(row["Field"]) for row in cur.fetchall()}
+        columns = {str(row["Field"]): row for row in cur.fetchall()}
+        existing = set(columns)
         if "attack_event_time" not in existing:
             cur.execute("ALTER TABLE analyses ADD COLUMN attack_event_time VARCHAR(64) NULL")
         if "attack_ip" not in existing:
@@ -732,6 +733,11 @@ def ensure_schema_mysql(conn: Any) -> None:
             cur.execute("ALTER TABLE analyses ADD COLUMN attack_type VARCHAR(255) NULL")
         if "attack_confidence" not in existing:
             cur.execute("ALTER TABLE analyses ADD COLUMN attack_confidence DOUBLE NULL")
+        # LLM output may describe an attack method in more than 255 characters.
+        # Preserve the evidence instead of aborting the entire result import batch.
+        attack_method_type = str(columns.get("attack_method", {}).get("Type") or "").lower()
+        if attack_method_type.startswith("varchar"):
+            cur.execute("ALTER TABLE analyses MODIFY COLUMN attack_method LONGTEXT NULL")
 
 
 def upsert_requests_sqlite(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
@@ -977,11 +983,16 @@ def sync_result_to_db(
     backend: Backend = "mysql",
     db_path: Path | None = None,
     mysql_config: MySQLConfig | None = None,
+    case_names: set[str] | None = None,
 ) -> Dict[str, Any]:
     manifest_map = load_manifest(result_dir / "manifest.jsonl")
 
     case_dirs: List[Path] = sorted(
-        [p for p in result_dir.glob("b.*") if p.is_dir()],
+        [
+            p
+            for p in result_dir.glob("b.*")
+            if p.is_dir() and (case_names is None or p.name in case_names)
+        ],
         key=lambda p: int(p.name.split(".", 1)[1]) if p.name.split(".", 1)[1].isdigit() else 10**9,
     )
 
