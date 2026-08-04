@@ -2812,11 +2812,21 @@ function renderEvidenceList(items) {
       ${arr
         .map((item) => {
           const text = typeof item === "string" ? item : JSON.stringify(item, null, 2);
-          return `<li>${escapeHtml(text)}</li>`;
+          return `<li>${escapeHtml(sanitizeEvidenceText(text))}</li>`;
         })
         .join("")}
     </ul>
   `;
+}
+
+function sanitizeEvidenceText(value) {
+  const text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+  if (!text) return "";
+  const replacementCount = (text.match(/�/g) || []).length;
+  const questionCount = (text.match(/\?{4,}/g) || []).reduce((total, row) => total + row.length, 0);
+  if (!replacementCount && questionCount < 8) return text;
+  const ips = [...new Set(text.match(/(?:\d{1,3}\.){3}\d{1,3}/g) || [])].slice(0, 5);
+  return `Windows 登录失败事件（历史原始消息编码异常，乱码内容已隐藏）${ips.length ? `；关联IP：${ips.join("、")}` : ""}`;
 }
 
 function renderV2DetectionDetail(row) {

@@ -250,11 +250,40 @@ def normalize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [normalize_row(r) for r in rows]
 
 
+DISPLAY_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+
+
+def sanitize_evidence_text(value: Any) -> str:
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or "")).strip()
+    if not text:
+        return ""
+    replacement_count = text.count("�")
+    question_runs = sum(len(match.group(0)) for match in re.finditer(r"\?{4,}", text))
+    if replacement_count or question_runs >= 8:
+        ips = list(dict.fromkeys(DISPLAY_IPV4_RE.findall(text)))[:5]
+        suffix = f"；关联IP：{'、'.join(ips)}" if ips else ""
+        return f"Windows 登录失败事件（历史原始消息编码异常，乱码内容已隐藏）{suffix}"
+    return text
+
+
+def sanitize_evidence_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: sanitize_evidence_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_evidence_value(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_evidence_text(value)
+    return value
+
+
 def normalize_situation_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat(timespec="milliseconds") + ("Z" if value.tzinfo is None else "")
     if isinstance(value, dict):
-        return {key: normalize_situation_value(item) for key, item in value.items()}
+        return {
+            key: normalize_situation_value(sanitize_evidence_value(item) if key in {"evidence", "metadata"} else item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [normalize_situation_value(item) for item in value]
     return value
@@ -448,9 +477,9 @@ def load_v2_detection_detail(cur: Any, event_id: str) -> Optional[Dict[str, Any]
 
     evidence: List[Any] = []
     if candidate:
-        evidence = safe_json_loads(candidate.get("evidence_json"), [])
+        evidence = sanitize_evidence_value(safe_json_loads(candidate.get("evidence_json"), []))
     if not evidence and attack_event:
-        evidence = safe_json_loads(attack_event.get("evidence_json"), [])
+        evidence = sanitize_evidence_value(safe_json_loads(attack_event.get("evidence_json"), []))
 
     item: Dict[str, Any] = {
         "case_id": case_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import subprocess
@@ -63,6 +64,9 @@ def run_powershell_json(script: str, timeout: int = 30) -> List[Dict[str, Any]]:
 
 def get_windows_security_failures(window_minutes: int) -> List[Dict[str, Any]]:
     script = rf"""
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 $start=(Get-Date).AddMinutes(-{int(window_minutes)})
 Get-WinEvent -FilterHashtable @{{LogName='Security'; Id=4625; StartTime=$start}} -ErrorAction SilentlyContinue |
   Select-Object TimeCreated, Id, ProviderName, Message |
@@ -73,6 +77,9 @@ Get-WinEvent -FilterHashtable @{{LogName='Security'; Id=4625; StartTime=$start}}
 
 def get_openssh_failures(window_minutes: int) -> List[Dict[str, Any]]:
     script = rf"""
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 $start=(Get-Date).AddMinutes(-{int(window_minutes)})
 Get-WinEvent -FilterHashtable @{{LogName='OpenSSH/Operational'; StartTime=$start}} -ErrorAction SilentlyContinue |
   Where-Object {{ $_.Message -match 'fail|invalid|Unable to negotiate|authentication|password' }} |
@@ -104,11 +111,13 @@ def normalize_event_time(value: Any) -> datetime:
 
 def is_public_or_lan_ip(ip: str) -> bool:
     ip = str(ip or "").strip()
-    if not ip or ip in {"-", "::1", "127.0.0.1", "0.0.0.0"}:
+    if not ip or ip == "-":
         return False
-    if ip.lower().startswith("fe80:"):
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
         return False
-    return True
+    return not (address.is_unspecified or address.is_loopback or address.is_link_local)
 
 
 def extract_source_ip(message: str) -> str:
@@ -125,6 +134,28 @@ def extract_source_ip(message: str) -> str:
     return ""
 
 
+def summarize_failure_event(item: Dict[str, Any], message: str, source_ip: str) -> str:
+    """Return stable evidence without persisting localized Windows message blobs."""
+    provider = str(item.get("ProviderName") or "").strip()
+    event_id = str(item.get("Id") or "").strip()
+    account_patterns = [
+        re.compile(r"(?im)^\s*(?:Account Name|Target User Name)\s*:\s*([^\r\n]+)"),
+        re.compile(r"(?im)^\s*(?:帐户名|账户名|目标帐户名|目标账户名)\s*[:：]\s*([^\r\n]+)"),
+    ]
+    accounts: List[str] = []
+    for pattern in account_patterns:
+        for value in pattern.findall(str(message or "")):
+            clean = re.sub(r"[\x00-\x1f\x7f]", "", str(value)).strip()
+            if clean and clean not in {"-", "N/A"} and "�" not in clean:
+                accounts.append(clean[:80])
+    account = accounts[-1] if accounts else "未知"
+    source = "OpenSSH 日志" if "openssh" in provider.lower() else "Windows 安全日志"
+    parts = [f"{source}登录失败", f"来源IP={source_ip}", f"目标账户={account}"]
+    if event_id:
+        parts.append(f"事件ID={event_id}")
+    return "；".join(parts)
+
+
 def collect_ssh_failures(window_minutes: int) -> List[Tuple[datetime, str, str]]:
     rows: List[Tuple[datetime, str, str]] = []
     for item in get_windows_security_failures(window_minutes) + get_openssh_failures(window_minutes):
@@ -133,7 +164,7 @@ def collect_ssh_failures(window_minutes: int) -> List[Tuple[datetime, str, str]]
         if not ip:
             continue
         t = normalize_event_time(item.get("TimeCreated"))
-        rows.append((t, ip, message[:500]))
+        rows.append((t, ip, summarize_failure_event(item, message, ip)))
     return rows
 
 

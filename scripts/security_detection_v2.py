@@ -489,15 +489,25 @@ def fuse_detection(
 
     final_score = payload_score * 0.45 + behavior_score * 0.30 + poc_score * 0.20 + ctx_score * 0.05
     strong_poc = any(m.severity in {"high", "critical"} for m in poc_matches)
+    # The bundled lab emits safe reconnaissance simulations instead of running a
+    # real scanner. Promote only these explicitly tagged rules so their recon
+    # stages reach the situation chain without weakening ordinary medium rules.
+    simulation_recon_poc = any(
+        m.attack_type in {"端口扫描", "目录扫描"}
+        and m.score >= 0.75
+        and "simulation" in {str(tag).strip().lower() for tag in m.tags}
+        for m in poc_matches
+    )
     behavior_features = behavior.get("features") or {}
     behavior_supported = bool(behavior_features.get("behavior_model_supported", True))
     strong_behavior = behavior_score >= 0.82 and behavior_supported
     high_payload = payload_score >= 0.90 and payload_label != "normal"
 
-    candidate = final_score >= candidate_threshold or strong_poc or strong_behavior or high_payload
+    candidate = final_score >= candidate_threshold or strong_poc or simulation_recon_poc or strong_behavior or high_payload
     attack_event = (
         final_score >= event_threshold
         or strong_poc
+        or simulation_recon_poc
         or strong_behavior
         or payload_score >= 0.94
         or (payload_score >= 0.80 and poc_score >= 0.65)
@@ -543,6 +553,7 @@ def fuse_detection(
         "poc_score": round(poc_score, 6),
         "context_score": round(ctx_score, 6),
         "context_reason": ctx_reason,
+        "simulation_recon_poc": simulation_recon_poc,
         "poc_matches": [m.__dict__ for m in poc_matches],
         "behavior_features": behavior.get("features") or {},
         "evidence": evidence,

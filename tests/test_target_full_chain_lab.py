@@ -13,7 +13,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import target_multivuln_lab as lab  # noqa: E402
-from security_detection_v2 import POCRuleEngine  # noqa: E402
+from security_detection_v2 import POCRuleEngine, fuse_detection  # noqa: E402
 from situation_core import normalize_action_type  # noqa: E402
 
 
@@ -91,6 +91,46 @@ class FullChainLabTests(unittest.TestCase):
                 }
                 matches = [item for item in self.rules.match(event) if "nday" in item.tags]
                 self.assertEqual(matches, [])
+
+    def test_lab_recon_simulations_reach_attack_event(self) -> None:
+        cases = [
+            ("POST", "/api/recon/ports", {"scan_mode": "connect", "ports": [22, 80, 443, 3306]}),
+            ("GET", "/api/recon/directory?path=/.git/config", None),
+        ]
+        for method, uri, body in cases:
+            with self.subTest(uri=uri):
+                event = {
+                    "method": method,
+                    "uri": uri,
+                    "content_type": "application/json",
+                    "body": json.dumps(body, ensure_ascii=False) if body is not None else "",
+                }
+                matches = self.rules.match(event)
+                result = fuse_detection(
+                    event,
+                    {"label": "normal", "score": 0.0},
+                    matches,
+                    {"score": 0.0, "type": "normal", "features": {}, "evidence": []},
+                )
+                self.assertEqual(result["decision"], "attack_event")
+                self.assertTrue(result["simulation_recon_poc"])
+
+    def test_unmatched_recon_page_stays_raw_only(self) -> None:
+        event = {
+            "method": "POST",
+            "uri": "/api/recon/ports",
+            "content_type": "application/json",
+            "body": json.dumps({"ports": [3000]}, ensure_ascii=False),
+        }
+        matches = self.rules.match(event)
+        result = fuse_detection(
+            event,
+            {"label": "normal", "score": 0.0},
+            matches,
+            {"score": 0.0, "type": "normal", "features": {}, "evidence": []},
+        )
+        self.assertEqual(matches, [])
+        self.assertEqual(result["decision"], "raw_only")
 
 
 if __name__ == "__main__":
