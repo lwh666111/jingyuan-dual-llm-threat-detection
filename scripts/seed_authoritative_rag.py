@@ -151,6 +151,7 @@ def main() -> None:
     parser.add_argument("--data-dir", default="D:/JingyuanTrafficPipelineData/rag")
     parser.add_argument("--kb-id", type=int, default=0)
     parser.add_argument("--source-dir", default="", help="已下载的三份官方 Markdown 快照目录")
+    parser.add_argument("--only-playbook", action="store_true", help="仅导入项目内置行为检测手册，不访问外部数据源")
     args = parser.parse_args()
 
     conf = read_db_config((PROJECT_ROOT / args.db_config).resolve())
@@ -166,7 +167,13 @@ def main() -> None:
             ("OWASP_Cheat_Sheet_Security_Knowledge.md", build_owasp),
             ("MITRE_ATTACK_Enterprise_Selected_Techniques.md", build_mitre),
             ("CISA_KEV_Selected.md", build_cisa),
+            (
+                "Jingyuan_Security_Behavior_Playbook.md",
+                lambda: (PROJECT_ROOT / "examples" / "rag_security_behavior_playbook.md").read_text(encoding="utf-8"),
+            ),
         ]
+        if args.only_playbook:
+            builders = builders[-1:]
         with tempfile.TemporaryDirectory(prefix="jingyuan-rag-") as temp_dir:
             for filename, builder in builders:
                 print(f"[download] {filename}")
@@ -185,16 +192,85 @@ def main() -> None:
                     "question": "登录接口的 password 参数出现单引号、OR 1=1 与注释符，应如何识别和修复？",
                     "expected_keywords": "SQL Injection, SQL 注入, parameterized",
                     "expected_document": "OWASP",
+                    "query_mode": "incident",
+                    "expected_top_k": 3,
                 },
                 {
                     "question": "响应页面把用户输入直接插入 HTML，出现 script 标签和 onerror 事件时，应如何防护？",
                     "expected_keywords": "XSS, output encoding, CSP",
                     "expected_document": "OWASP",
+                    "query_mode": "incident",
+                    "expected_top_k": 3,
                 },
                 {
                     "question": "Nmap 在短时间内向服务器多个端口发送 SYN 探测包，这属于什么行为，应如何发现和处置？",
                     "expected_keywords": "PortScan, port scan, 端口扫描",
                     "expected_document": "",
+                    "query_mode": "incident",
+                    "expected_top_k": 3,
+                },
+                {
+                    "question": "来源 IP 10.0.0.8 在一分钟内对 /admin、/.git、/.env 等多个路径发起大量请求并收到连续 404。",
+                    "expected_keywords": "directory scan, directory enumeration, 目录扫描",
+                    "expected_document": "",
+                    "query_mode": "incident",
+                    "expected_top_k": 3,
+                },
+                {
+                    "question": "GET /download?file=../../../../etc/passwd，来源 IP 10.0.0.9，响应包含 root:x:0:0。",
+                    "expected_keywords": "path traversal, directory traversal, 路径遍历",
+                    "expected_document": "",
+                    "query_mode": "incident",
+                    "expected_top_k": 3,
+                },
+                {
+                    "question": "如何为登录系统配置账号锁定、失败计数和解锁策略？",
+                    "expected_keywords": "Account Lockout, lockout, 账号锁定",
+                    "expected_document": "OWASP",
+                    "query_mode": "knowledge",
+                    "expected_top_k": 3,
+                },
+                {
+                    "question": "POST /login username=alice password=correcthorse Status=200 Source IP 10.0.0.3",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "incident",
+                },
+                {
+                    "question": "GET /assets/app.css HTTP/1.1 Status=304 Source IP 10.0.0.4",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "incident",
+                },
+                {
+                    "question": "某用户只登录失败了一次，没有连续尝试。",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "incident",
+                },
+                {
+                    "question": "明天巴黎天气怎么样？",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "knowledge",
+                },
+                {
+                    "question": "番茄炒蛋应该怎么做？",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "knowledge",
+                },
+                {
+                    "question": "qzxvblorp9f3kmoonxj77",
+                    "expected_keywords": "",
+                    "expected_document": "",
+                    "expected_no_match": True,
+                    "query_mode": "knowledge",
                 },
             ]
             for case in cases:

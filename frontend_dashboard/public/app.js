@@ -5309,6 +5309,8 @@ function rag3State() {
       documents: [],
       chunks: [],
       recallItems: [],
+      recallMeta: null,
+      recallMode: "incident",
       recallHistory: [],
       evalCases: [],
       evalRuns: [],
@@ -5571,7 +5573,7 @@ function rag3OpenKbModal(kb = null) {
           <label><span>最终召回数</span><input name="final_top_k" type="number" min="1" max="20" value="${Number(kb?.final_top_k || 5)}" /></label>
           <label><span>向量候选数</span><input name="vector_top_k" type="number" min="1" max="100" value="${Number(kb?.vector_top_k || 20)}" /></label>
           <label><span>关键词候选数</span><input name="keyword_top_k" type="number" min="1" max="100" value="${Number(kb?.keyword_top_k || 20)}" /></label>
-          <label><span>重排阈值</span><input name="score_threshold" type="number" min="0" max="1" step="0.01" value="${Number(kb?.score_threshold ?? 0.1)}" /></label>
+          <label><span>重排阈值</span><input name="score_threshold" type="number" min="0.35" max="1" step="0.01" value="${Math.max(.35, Number(kb?.score_threshold ?? 0.35))}" /><small>生产安全下限为 0.35，需结合回归评估调优。</small></label>
           <label class="rag3-check"><input name="enabled" type="checkbox" ${kb?.enabled === 0 ? "" : "checked"} /><span>创建后立即启用</span></label>
         </div>
         <footer><button type="button" class="btn btn-ghost" data-close>取消</button><button type="submit" class="btn btn-primary">保存配置</button></footer>
@@ -5631,6 +5633,10 @@ async function rag3LoadWorkspaceData() {
       passed_cases: latest.passed_cases,
       pass_rate: latest.pass_rate,
       average_duration_ms: latest.average_duration_ms,
+      recall_at_k: latest.recall_at_k,
+      mean_reciprocal_rank: latest.mean_reciprocal_rank,
+      no_match_accuracy: latest.no_match_accuracy,
+      false_positive_rate: latest.false_positive_rate,
       items: latest.items || [],
     };
   }
@@ -5755,13 +5761,21 @@ function rag3RenderRecall() {
   const body = document.getElementById("rag3_workspace_body");
   const workspace = rag3State();
   if (!body) return;
+  const meta = workspace.recallMeta;
+  const modeLabel = workspace.recallMode === "knowledge" ? "安全知识问答" : "攻击证据研判";
+  const resultPanel = workspace.recallItems.length ? workspace.recallItems.map((item, index) => `
+    <article>
+      <div class="rag3-score"><strong>${Number(item.score || 0).toFixed(3)}</strong><span>重排匹配分</span></div>
+      <div><span class="section-eyebrow">TOP ${index + 1} · ${escapeHtml(item.document_name || "未知文档")}</span><h4>${escapeHtml(item.title_path || "正文")}</h4><p>${escapeHtml(item.content)}</p><footer><span>切片 #${Number(item.chunk_index || 0) + 1}</span><span>BM25 ${Number(item.bm25_score || 0).toFixed(3)}</span><span>RRF ${Number(item.rrf_score || 0).toFixed(4)}</span>${item.vector_distance == null ? "" : `<span>向量距离 ${Number(item.vector_distance).toFixed(3)}</span>`}</footer></div>
+    </article>`).join("") : meta ? `<div class="rag3-recall-empty rejected"><i>NO MATCH</i><b>未发现可靠匹配知识</b><span>${escapeHtml(meta.no_match_reason || "候选证据未达到检索门槛")}</span><small>系统已主动拒绝低可信结果，不会将其交给大模型。</small></div>` : `<div class="rag3-recall-empty"><b>输入一段攻击证据开始召回</b><span>建议使用真实请求路径、Payload、响应特征与行为描述组合测试。</span></div>`;
   body.innerHTML = `
     <section class="rag3-recall-layout">
-      <main><header><div><h3>召回测试结果</h3><p>检查 Vector + BM25 + RRF + qwen3-rerank 的真实检索效果。</p></div>${workspace.recallItems.length ? `<span>${workspace.recallItems.length} 个切片</span>` : ""}</header><div class="rag3-recall-results">${workspace.recallItems.length ? workspace.recallItems.map((item, index) => `<article><div class="rag3-score"><strong>${Math.round(Number(item.score || 0) * 100)}</strong><span>相关度</span></div><div><span class="section-eyebrow">TOP ${index + 1} · ${escapeHtml(item.document_name || "未知文档")}</span><h4>${escapeHtml(item.title_path || "正文")}</h4><p>${escapeHtml(item.content)}</p><footer>切片 #${Number(item.chunk_index || 0) + 1} · RRF ${Number(item.rrf_score || 0).toFixed(4)}</footer></div></article>`).join("") : `<div class="rag3-recall-empty"><b>输入一段攻击证据开始召回</b><span>建议使用真实请求路径、Payload、响应特征与行为描述组合测试。</span></div>`}</div></main>
-      <aside><div><span class="section-eyebrow">RETRIEVAL TEST</span><h3>召回测试</h3><p>${escapeHtml(workspace.selectedKb.name)}</p><textarea id="rag3_recall_query" rows="9" placeholder="例如：POST /login 的 password 参数出现单引号、OR 1=1 与注释符，应该如何判断和处置？"></textarea><button id="rag3_run_recall" class="btn btn-primary">运行混合召回</button></div><section><h4>最近测试</h4>${workspace.recallHistory.length ? workspace.recallHistory.map((item) => `<button data-history-query="${escapeHtml(item.query_text)}"><span>${escapeHtml(String(item.query_text).slice(0, 58))}</span><small>${item.duration_ms}ms · ${item.result_count} 条 · ${escapeHtml(rag3Date(item.created_at))}</small></button>`).join("") : `<p>暂无测试记录</p>`}</section></aside>
+      <main><header><div><h3>召回测试结果</h3><p>Vector + BM25 + RRF + qwen3-rerank，并增加领域拒答与证据门。</p></div><span>${meta ? `${escapeHtml(modeLabel)} · ${workspace.recallItems.length} 个切片` : "等待测试"}</span></header>${meta ? `<div class="rag3-recall-diagnostic"><div><span>判定</span><strong class="${meta.no_match ? "reject" : "accept"}">${meta.no_match ? "主动拒答" : "可靠召回"}</strong></div><div><span>有效阈值</span><strong>${Number(meta.effective_threshold || 0).toFixed(2)}</strong></div><div><span>候选最高分</span><strong>${Number(meta.top_candidate_score || 0).toFixed(3)}</strong></div><p>${escapeHtml(meta.score_semantics || "匹配分仅用于检索排序")}</p></div>` : ""}<div class="rag3-recall-results">${resultPanel}</div></main>
+      <aside><div><span class="section-eyebrow">RETRIEVAL TEST</span><h3>召回测试</h3><p>${escapeHtml(workspace.selectedKb.name)}</p><label class="rag3-mode-field"><span>查询用途</span><select id="rag3_recall_mode"><option value="incident" ${workspace.recallMode === "incident" ? "selected" : ""}>攻击证据研判</option><option value="knowledge" ${workspace.recallMode === "knowledge" ? "selected" : ""}>安全知识问答</option></select><small>${workspace.recallMode === "incident" ? "要求请求、Payload、IP/端口或行为窗口证据" : "用于查询安全规范、处置方法与技术知识"}</small></label><textarea id="rag3_recall_query" rows="9" placeholder="例如：POST /login 的 password 参数出现单引号、OR 1=1 与注释符，应该如何判断和处置？"></textarea><button id="rag3_run_recall" class="btn btn-primary">运行混合召回</button></div><section><h4>最近测试</h4>${workspace.recallHistory.length ? workspace.recallHistory.map((item) => `<button data-history-query="${escapeHtml(item.query_text)}"><span>${escapeHtml(String(item.query_text).slice(0, 58))}</span><small>${item.duration_ms}ms · ${item.result_count} 条 · ${escapeHtml(rag3Date(item.created_at))}</small></button>`).join("") : `<p>暂无测试记录</p>`}</section></aside>
     </section>
   `;
   document.getElementById("rag3_run_recall")?.addEventListener("click", rag3RunRecall);
+  document.getElementById("rag3_recall_mode")?.addEventListener("change", (event) => { workspace.recallMode = event.target.value; rag3RenderRecall(); });
   body.querySelectorAll("[data-history-query]").forEach((button) => button.addEventListener("click", () => { document.getElementById("rag3_recall_query").value = button.dataset.historyQuery; }));
 }
 
@@ -5771,11 +5785,12 @@ async function rag3RunRecall() {
   if (!query) return showToast("请输入召回测试文本");
   const button = document.getElementById("rag3_run_recall"); if (button) { button.disabled = true; button.textContent = "检索与重排中..."; }
   try {
-    const data = await api(`/api/v3/rag/knowledge-bases/${workspace.selectedKb.id}/recall`, { method: "POST", body: { query } });
+    const data = await api(`/api/v3/rag/knowledge-bases/${workspace.selectedKb.id}/recall`, { method: "POST", body: { query, query_mode: workspace.recallMode } });
     workspace.recallItems = data.items || [];
+    workspace.recallMeta = data;
     await rag3LoadWorkspaceData();
     rag3RenderRecall();
-    showToast(`召回完成：${workspace.recallItems.length} 条，耗时 ${data.duration_ms || 0}ms`);
+    showToast(data.no_match ? `已主动拒答：${data.no_match_reason || "没有可靠匹配"}` : `召回完成：${workspace.recallItems.length} 条，耗时 ${data.duration_ms || 0}ms`);
   } catch (err) { showToast(`召回失败：${err.message}`); if (button) { button.disabled = false; button.textContent = "运行混合召回"; } }
 }
 
@@ -5788,25 +5803,28 @@ function rag3RenderEvaluation() {
     <section class="rag3-eval-layout">
       <main>
         <header><div><span class="section-eyebrow">REGRESSION EVALUATION</span><h3>知识库回归评估</h3><p>批量验证升级知识、切片参数或向量模型后，关键安全问题仍能召回正确证据。</p></div><button id="rag3_run_eval" class="btn btn-primary" ${workspace.evalCases.length ? "" : "disabled"}>运行全部用例</button></header>
-        ${result ? `<div class="rag3-eval-summary"><article><span>通过率</span><strong>${Math.round(Number(result.pass_rate || 0) * 100)}%</strong></article><article><span>通过用例</span><strong>${result.passed_cases}/${result.total_cases}</strong></article><article><span>平均耗时</span><strong>${result.average_duration_ms}ms</strong></article><article><span>本次编号</span><strong>#${result.run_id}</strong></article></div>` : ""}
+        ${result ? `<div class="rag3-eval-summary"><article><span>综合通过率</span><strong>${Math.round(Number(result.pass_rate || 0) * 100)}%</strong></article><article><span>Recall@K</span><strong>${Math.round(Number(result.recall_at_k || 0) * 100)}%</strong></article><article><span>MRR</span><strong>${Number(result.mean_reciprocal_rank || 0).toFixed(3)}</strong></article><article><span>无关查询拒绝率</span><strong>${Math.round(Number(result.no_match_accuracy || 0) * 100)}%</strong></article><article><span>负样本误召回率</span><strong class="${Number(result.false_positive_rate || 0) > 0 ? "danger" : ""}">${Math.round(Number(result.false_positive_rate || 0) * 100)}%</strong></article><article><span>平均耗时</span><strong>${result.average_duration_ms}ms</strong></article></div>` : ""}
         <div class="rag3-eval-cases">
           ${workspace.evalCases.length ? workspace.evalCases.map((item, index) => {
             const row = result?.items?.find((candidate) => Number(candidate.case_id) === Number(item.id));
-            return `<article class="${row ? (row.passed ? "passed" : "failed") : ""}"><div class="rag3-eval-index">${String(index + 1).padStart(2, "0")}</div><div><div class="rag3-eval-title"><h4>${escapeHtml(item.question)}</h4><span>${row ? (row.passed ? "通过" : "失败") : (item.enabled ? "待运行" : "已停用")}</span></div><p>期望关键词：${escapeHtml(item.expected_keywords || "任一有效结果")}</p><p>期望文档：${escapeHtml(item.expected_document || "不限")}</p>${row ? `<footer>${escapeHtml(row.reason)} · ${row.duration_ms}ms · TOP1 ${escapeHtml(row.top_document || "无")}</footer>` : ""}</div><div class="rag3-eval-actions"><button data-eval-edit="${item.id}" class="btn btn-ghost">编辑</button><button data-eval-delete="${item.id}" class="btn btn-danger">删除</button></div></article>`;
+            return `<article class="${row ? (row.passed ? "passed" : "failed") : ""}"><div class="rag3-eval-index">${String(index + 1).padStart(2, "0")}</div><div><div class="rag3-eval-title"><h4>${escapeHtml(item.question)}</h4><span>${row ? (row.passed ? "通过" : "失败") : (item.enabled ? "待运行" : "已停用")}</span></div><div class="rag3-eval-tags"><i>${item.expected_no_match ? "负样本 · 应拒答" : `正样本 · TOP${Number(item.expected_top_k || 3)}`}</i><i>${item.query_mode === "knowledge" ? "知识问答" : "攻击证据"}</i></div>${item.expected_no_match ? `<p>期望结果：不返回任何知识切片</p>` : `<p>期望关键词：${escapeHtml(item.expected_keywords || "任一有效结果")}</p><p>期望文档：${escapeHtml(item.expected_document || "不限")}</p>`}${row ? `<footer>${escapeHtml(row.reason)} · ${row.duration_ms}ms${row.relevant_rank ? ` · 正确证据 TOP${row.relevant_rank}` : ""}</footer>` : ""}</div><div class="rag3-eval-actions"><button data-eval-edit="${item.id}" class="btn btn-ghost">编辑</button><button data-eval-delete="${item.id}" class="btn btn-danger">删除</button></div></article>`;
           }).join("") : `<div class="rag3-empty-state wide"><b>还没有回归用例</b><span>添加比赛演示中的典型 SQL 注入、XSS、扫描与爆破问题，建立可重复的质量基线。</span></div>`}
         </div>
       </main>
       <aside>
-        <div><span class="section-eyebrow">TEST CASE</span><h3>新增回归用例</h3><p>关键词支持用逗号分隔，命中任意一个即满足关键词条件。</p></div>
+        <div><span class="section-eyebrow">TEST CASE</span><h3>新增回归用例</h3><p>正样本验证正确证据排名，负样本验证系统能否拒绝无关输入。</p></div>
         <form id="rag3_eval_form">
           <input type="hidden" name="case_id" />
           <label><span>测试问题 *</span><textarea name="question" rows="6" required placeholder="例如：登录参数出现单引号、恒真条件和注释符时，应判断为何种攻击？"></textarea></label>
+          <label><span>查询用途</span><select name="query_mode"><option value="incident">攻击证据研判</option><option value="knowledge">安全知识问答</option></select></label>
+          <label class="rag3-check"><input name="expected_no_match" type="checkbox" /><span>负样本：期望系统主动拒答</span></label>
           <label><span>期望关键词</span><input name="expected_keywords" placeholder="SQL注入, 参数化查询" /></label>
           <label><span>期望来源文档</span><input name="expected_document" placeholder="例如：OWASP（可留空）" /></label>
+          <label><span>正确证据最晚排名</span><input name="expected_top_k" type="number" min="1" max="20" value="3" /></label>
           <label class="rag3-check"><input name="enabled" type="checkbox" checked /><span>纳入批量回归</span></label>
           <div><button type="button" id="rag3_eval_cancel" class="btn btn-ghost hidden">取消编辑</button><button type="submit" class="btn btn-primary">保存用例</button></div>
         </form>
-        <section><h4>最近运行</h4>${workspace.evalRuns.length ? workspace.evalRuns.map((run) => `<div class="rag3-eval-run"><span>#${run.id} · ${run.passed_cases}/${run.total_cases} 通过</span><small>${Math.round(Number(run.pass_rate || 0) * 100)}% · ${run.average_duration_ms}ms · ${escapeHtml(rag3Date(run.created_at))}</small></div>`).join("") : `<p>暂无批量运行记录</p>`}</section>
+        <section><h4>最近运行</h4>${workspace.evalRuns.length ? workspace.evalRuns.map((run) => `<div class="rag3-eval-run"><span>#${run.id} · ${run.passed_cases}/${run.total_cases} 通过</span><small>Recall@K ${Math.round(Number(run.recall_at_k || 0) * 100)}% · 拒绝率 ${Math.round(Number(run.no_match_accuracy || 0) * 100)}% · ${escapeHtml(rag3Date(run.created_at))}</small></div>`).join("") : `<p>暂无批量运行记录</p>`}</section>
       </aside>
     </section>`;
   document.getElementById("rag3_run_eval")?.addEventListener("click", rag3RunEvaluation);
@@ -5824,6 +5842,9 @@ function rag3EditEvalCase(caseId) {
   form.elements.question.value = item.question || "";
   form.elements.expected_keywords.value = item.expected_keywords || "";
   form.elements.expected_document.value = item.expected_document || "";
+  form.elements.expected_no_match.checked = Boolean(Number(item.expected_no_match));
+  form.elements.expected_top_k.value = Number(item.expected_top_k || 3);
+  form.elements.query_mode.value = item.query_mode || "incident";
   form.elements.enabled.checked = Boolean(Number(item.enabled));
   document.getElementById("rag3_eval_cancel")?.classList.remove("hidden");
   form.elements.question.focus();
@@ -5834,7 +5855,7 @@ async function rag3SaveEvalCase(event) {
   const form = new FormData(event.currentTarget);
   const caseId = Number(form.get("case_id") || 0);
   try {
-    await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/eval-cases${caseId ? `/${caseId}` : ""}`, { method: caseId ? "PUT" : "POST", body: { question: form.get("question"), expected_keywords: form.get("expected_keywords"), expected_document: form.get("expected_document"), enabled: form.get("enabled") === "on" } });
+    await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/eval-cases${caseId ? `/${caseId}` : ""}`, { method: caseId ? "PUT" : "POST", body: { question: form.get("question"), expected_keywords: form.get("expected_keywords"), expected_document: form.get("expected_document"), expected_no_match: form.get("expected_no_match") === "on", expected_top_k: Number(form.get("expected_top_k") || 3), query_mode: form.get("query_mode"), enabled: form.get("enabled") === "on" } });
     rag3State().evalResult = null;
     await rag3ReloadWorkspace(caseId ? "回归用例已更新" : "回归用例已添加");
   } catch (err) { showToast(`保存失败：${err.message}`); }

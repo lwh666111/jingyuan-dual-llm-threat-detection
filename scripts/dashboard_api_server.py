@@ -2857,7 +2857,11 @@ def create_app(
         data_dir, api_config = rag2_runtime()
         try:
             with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
-                result = rag2_hybrid_search(conn, data_dir, api_config, kb_id, str(body.get("query") or ""), g.session["username"], save_test=True)
+                result = rag2_hybrid_search(
+                    conn, data_dir, api_config, kb_id, str(body.get("query") or ""),
+                    g.session["username"], save_test=True,
+                    query_mode=str(body.get("query_mode") or "incident"),
+                )
         except (ValueError, KeyError, RuntimeError) as exc:
             return jsonify({"error": "recall_failed", "message": str(exc)}), 400
         return jsonify(result)
