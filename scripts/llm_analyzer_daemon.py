@@ -231,7 +231,6 @@ def retrieve_advanced_rag(args, query_text: str) -> List[Dict]:
                 query_text,
                 username="llm-daemon",
                 save_test=False,
-                query_mode="incident",
             )
         return [
             {

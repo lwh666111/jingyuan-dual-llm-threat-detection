@@ -288,7 +288,6 @@ def analyze_situation(
                         query,
                         username="situation-ai",
                         save_test=False,
-                        query_mode="incident",
                     )
                     rag_rows = [
                         {

@@ -52,7 +52,7 @@
 
 ## 高级 RAG 知识库（2026-08）
 
-“大模型设置”中的知识库管理已升级为完整工作台。管理员可以创建多个相互隔离的知识库，上传 `PDF/DOCX/PPTX/XLSX/Markdown/JSON/CSV/TXT` 文档，查看解析状态与切片，在线修改切片并自动重建向量，还可以执行真实召回测试、维护正负回归用例，并批量查看 Recall@K、MRR、拒答准确率和误召率。
+“大模型设置”中的知识库管理已升级为完整工作台。管理员可以创建多个相互隔离的知识库，上传 `PDF/DOCX/PPTX/XLSX/Markdown/JSON/CSV/TXT` 文档，查看解析状态与切片，在线修改切片并自动重建向量，还可以执行真实召回测试、维护回归用例并批量查看通过率与失败原因。
 
 检索链路：
 
@@ -62,19 +62,11 @@
  -> LanceDB 向量召回 + 本地 BM25 关键词召回
  -> RRF 融合候选
  -> qwen3-rerank 云端重排
- -> 领域门控 + 动态阈值 + 低置信拒答
  -> Top-K 证据片段与来源引用
  -> 原有 Ollama 态势/事件报告生成
 ```
 
 百炼只承担嵌入与重排，不替换现有 Ollama 报告模型。云 API 暂时不可用时，事件研判守护会自动退回旧 SQLite FTS5 检索，不阻断主链路。
-
-召回测试支持两种模式：
-
-- `安全事件`：用于真实请求、响应和攻击证据。必须同时存在事件上下文与可复核攻击特征，否则主动拒绝召回，避免把普通登录、普通 GET 等流量硬关联到攻击知识。
-- `知识问答`：用于管理员查询安全概念和处置方法。问题必须属于网络安全领域，无关文本和随机字符串会被拒绝。
-
-界面显示的 `重排匹配分` 是当前查询与知识片段的相对匹配强度，不是攻击概率，也不是系统准确率。检索质量应使用回归评估中的 Recall@K、MRR、拒答准确率和误召率判断。默认有效阈值为 `0.35`，低于阈值或缺少 BM25 词法证据的中低置信候选不会送入大模型。
 
 1. 将 `config/ai_api.example.json` 复制为 `config/ai_api.local.json`。
 2. 填写自己的百炼 `api_key`、工作空间 `base_url` 和 `rerank_url`。
@@ -88,25 +80,11 @@
 python scripts/seed_authoritative_rag.py --data-dir D:\JingyuanTrafficPipelineData\rag
 ```
 
-服务器已有官方知识、只需增量导入随项目发布的行为检测手册时，可避免重复访问外部数据源：
-
-```powershell
-python scripts/seed_authoritative_rag.py --only-playbook --data-dir D:\JingyuanTrafficPipelineData\rag
-```
-
-脚本使用三类权威来源和一份项目内置行为检测手册，并在首次初始化时建立覆盖 SQL 注入、XSS、端口扫描、目录扫描、暴力破解和正常流量边界的正负回归用例：
+脚本使用三类权威来源，并在首次初始化时建立 SQL 注入、XSS、端口扫描三条基础回归用例：
 
 - OWASP Cheat Sheet Series：`https://github.com/OWASP/CheatSheetSeries`
 - MITRE ATT&CK Enterprise STIX 2.1：`https://github.com/mitre-attack/attack-stix-data`
 - CISA Known Exploited Vulnerabilities：`https://www.cisa.gov/known-exploited-vulnerabilities-catalog`
-
-导入可重复执行的 12 条召回评估样例：
-
-```powershell
-python scripts/import_rag_eval_suite.py --replace
-```
-
-样例文件位于 `examples/rag_retrieval_evaluation.json`，安全行为补充知识位于 `examples/rag_security_behavior_playbook.md`。本机真实调用百炼的当前小规模基线为：12/12 通过、Recall@K 1.0000、MRR 0.8333、拒答准确率 1.0000、误召率 0.0000。该结果只代表这 12 条可复现实例，不代表未知真实流量上的总体准确率；正式比赛前应继续加入服务器误报、漏报和对抗样本做回归。
 
 测试上传文件位于 `test\rag_upload_samples\Web攻击研判知识测试样例.md`。
 

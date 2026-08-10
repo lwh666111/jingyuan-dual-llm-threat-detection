@@ -148,7 +148,7 @@ def ensure_schema(conn: Any) -> None:
           vector_top_k INT NOT NULL DEFAULT 20,
           keyword_top_k INT NOT NULL DEFAULT 20,
           final_top_k INT NOT NULL DEFAULT 5,
-          score_threshold DECIMAL(8,6) NOT NULL DEFAULT 0.350000,
+          score_threshold DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
           enabled TINYINT(1) NOT NULL DEFAULT 1,
           scope_mode VARCHAR(20) NOT NULL DEFAULT 'all',
           created_by VARCHAR(80) NOT NULL DEFAULT 'system',
@@ -221,9 +221,6 @@ def ensure_schema(conn: Any) -> None:
           question TEXT NOT NULL,
           expected_keywords TEXT NULL,
           expected_document VARCHAR(255) NULL,
-          expected_no_match TINYINT(1) NOT NULL DEFAULT 0,
-          expected_top_k INT NOT NULL DEFAULT 3,
-          query_mode VARCHAR(20) NOT NULL DEFAULT 'incident',
           enabled TINYINT(1) NOT NULL DEFAULT 1,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           KEY idx_rag_eval_kb(kb_id)
@@ -237,11 +234,6 @@ def ensure_schema(conn: Any) -> None:
           passed_cases INT NOT NULL DEFAULT 0,
           pass_rate DECIMAL(8,6) NOT NULL DEFAULT 0,
           average_duration_ms INT NOT NULL DEFAULT 0,
-          recall_at_k DECIMAL(8,6) NOT NULL DEFAULT 0,
-          mean_reciprocal_rank DECIMAL(8,6) NOT NULL DEFAULT 0,
-          no_match_accuracy DECIMAL(8,6) NOT NULL DEFAULT 0,
-          false_positive_rate DECIMAL(8,6) NOT NULL DEFAULT 0,
-          config_json LONGTEXT NULL,
           results_json LONGTEXT NULL,
           created_by VARCHAR(80) NOT NULL DEFAULT 'system',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -260,23 +252,6 @@ def ensure_schema(conn: Any) -> None:
                     cur.execute(statement.replace(" WITH PARSER ngram", ""))
                 else:
                     raise exc
-        migrations = [
-            "ALTER TABLE rag_eval_cases ADD COLUMN expected_no_match TINYINT(1) NOT NULL DEFAULT 0",
-            "ALTER TABLE rag_eval_cases ADD COLUMN expected_top_k INT NOT NULL DEFAULT 3",
-            "ALTER TABLE rag_eval_cases ADD COLUMN query_mode VARCHAR(20) NOT NULL DEFAULT 'incident'",
-            "ALTER TABLE rag_eval_runs ADD COLUMN recall_at_k DECIMAL(8,6) NOT NULL DEFAULT 0",
-            "ALTER TABLE rag_eval_runs ADD COLUMN mean_reciprocal_rank DECIMAL(8,6) NOT NULL DEFAULT 0",
-            "ALTER TABLE rag_eval_runs ADD COLUMN no_match_accuracy DECIMAL(8,6) NOT NULL DEFAULT 0",
-            "ALTER TABLE rag_eval_runs ADD COLUMN false_positive_rate DECIMAL(8,6) NOT NULL DEFAULT 0",
-            "ALTER TABLE rag_eval_runs ADD COLUMN config_json LONGTEXT NULL",
-        ]
-        for statement in migrations:
-            try:
-                cur.execute(statement)
-            except Exception as exc:
-                if getattr(exc, "args", [None])[0] != 1060:
-                    raise
-        cur.execute("UPDATE rag_knowledge_bases SET score_threshold=0.350000 WHERE score_threshold < 0.350000")
     conn.commit()
 
 
@@ -472,7 +447,7 @@ def save_kb(conn: Any, body: Dict[str, Any], username: str, kb_id: Optional[int]
         min(max(int(body.get("vector_top_k") or 20), 1), 100),
         min(max(int(body.get("keyword_top_k") or 20), 1), 100),
         min(max(int(body.get("final_top_k") or 5), 1), 20),
-        max(0.0, min(float(body.get("score_threshold") or 0.35), 1.0)),
+        max(0.0, min(float(body.get("score_threshold") or 0.1), 1.0)),
         1 if body.get("enabled", True) else 0,
     )
     with conn.cursor() as cur:
@@ -561,15 +536,6 @@ def ingest_file(
         raise ValueError(f"不支持 .{extension} 文件")
     raw = source_path.read_bytes()
     checksum = hashlib.sha256(raw).hexdigest()
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT id,name,status,chunk_count,char_count FROM rag_documents
-            WHERE kb_id=%s AND checksum=%s AND status='ready' ORDER BY id DESC LIMIT 1""",
-            (kb_id, checksum),
-        )
-        existing = cur.fetchone()
-    if existing:
-        return {**existing, "skipped": True, "reason": "相同内容已经入库"}
     target_dir = data_dir / "uploads" / str(kb_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{uuid.uuid4().hex}_{safe_filename(original_name)}"
@@ -736,73 +702,11 @@ def expand_security_query(query: str) -> str:
         (("<script" in lowered) or "onerror" in lowered or ("html" in lowered and "用户输入" in raw), "XSS cross site scripting output encoding CSP"),
         (("爆破" in raw) or ("失败登录" in raw and "短时间" in raw), "brute force credential attack 暴力破解"),
         (("../" in raw) or "路径穿越" in raw, "path traversal directory traversal 路径遍历"),
-        (("账号锁定" in raw) or ("失败计数" in raw) or "account lockout" in lowered, "account lockout authentication throttling failed login counter 账号锁定"),
     ]
     for matched, terms in rules:
         if matched:
             additions.append(terms)
     return f"{raw}\n安全领域标准术语：{' '.join(additions)}" if additions else raw
-
-
-def analyze_security_query(query: str) -> Dict[str, Any]:
-    """Classify retrieval intent without treating retrieval as attack detection."""
-    raw = str(query or "").strip()
-    lowered = raw.lower()
-    compact = re.sub(r"\s+", "", raw)
-    tokens = _tokens(raw)
-    alpha_numeric = re.findall(r"[a-z0-9\u4e00-\u9fff]", lowered)
-    unique_ratio = len(set(alpha_numeric)) / max(1, len(alpha_numeric))
-    ascii_blob = bool(re.fullmatch(r"[a-z0-9_-]+", lowered))
-    gibberish = bool(
-        len(compact) < 4
-        or not alpha_numeric
-        or (ascii_blob and len(compact) >= 16 and unique_ratio > 0.60)
-    )
-    security_patterns = [
-        r"\b(?:sql|xss|csrf|ssrf|rce|xxe|owasp|mitre|nmap|payload|shell|security|authentication|authorization|credential|hardening|mitigation|firewall|waf)\b|cve[-_ ]?\d+|vulnerabilit|account\s+lockout|漏洞|注入|跨站|扫描|爆破|攻击|防护|认证|登录失败|密码|端口|目录|多个路径|路径穿越|账号锁定|失败计数|解锁策略|恶意|告警",
-        r"union\s+select|or\s+['\"]?1['\"]?\s*=\s*['\"]?1|<script|onerror\s*=|\.\./|\$\{jndi:|/etc/passwd|cmd\.exe|powershell",
-    ]
-    incident_patterns = [
-        r"\b(?:get|post|put|delete|patch|head|options)\s+/|\buri\s*=|\brequest(?:_body)?\s*=|\bstatus(?:_code)?\s*=|响应.*用户输入|response.*user\s+input",
-        r"\b(?:\d{1,3}\.){3}\d{1,3}\b|\bport\s*[=:]?\s*\d{1,5}\b|端口\s*\d{1,5}",
-        r"union\s+select|or\s+['\"]?1['\"]?\s*=\s*['\"]?1|<script|script\s*标签|onerror(?:\s*=)?|\.\./|\$\{jndi:|/etc/passwd|cmd\.exe|powershell",
-        r"短时间|连续|大量|多次|多个端口|多个路径|失败\s*\d+\s*次|请求\s*\d+\s*次|syn\s+(?:probe|scan)|directory\s+(?:scan|enumeration)|brute\s*force",
-    ]
-    attack_indicator_patterns = [
-        r"sql\s*注入|sql\s*injection|\b(?:xss|csrf|ssrf|rce|xxe|nmap)\b|cross[- ]site|port\s*scan|directory\s+(?:scan|enumeration)|brute\s*force|漏洞利用|端口扫描|目录扫描|暴力破解|恶意|攻击",
-        r"union\s+select|or\s+['\"]?1['\"]?\s*=\s*['\"]?1|<script|script\s*标签|onerror(?:\s*=)?|\.\./|\$\{jndi:|/etc/passwd|cmd\.exe|powershell",
-        r"(?:短时间|一分钟内|\d+\s*秒内).*(?:连续|大量|多次|端口|路径|失败)|(?:连续|大量|多次|多个端口|多个路径).*(?:短时间|一分钟内|\d+\s*秒内)|多个路径.*大量|连续\s*404|失败\s*[5-9]\d*\s*次|请求\s*[1-9]\d+\s*次|syn\s+(?:probe|scan)",
-    ]
-    security_hits = sum(1 for pattern in security_patterns if re.search(pattern, lowered, re.I))
-    incident_hits = sum(1 for pattern in incident_patterns if re.search(pattern, lowered, re.I))
-    attack_hits = sum(1 for pattern in attack_indicator_patterns if re.search(pattern, lowered, re.I))
-    return {
-        "gibberish": gibberish,
-        "token_count": len(tokens),
-        "security_signal_count": security_hits,
-        "incident_evidence_count": incident_hits,
-        "attack_indicator_count": attack_hits,
-        "has_security_context": security_hits > 0 or incident_hits > 0,
-        "has_incident_evidence": incident_hits > 0,
-        "has_attack_indicator": attack_hits > 0,
-    }
-
-
-def retrieval_gate(query: str, requested_mode: str = "auto") -> Dict[str, Any]:
-    profile = analyze_security_query(query)
-    mode = requested_mode if requested_mode in {"auto", "incident", "knowledge"} else "auto"
-    if mode == "auto":
-        mode = "incident" if profile["has_incident_evidence"] else "knowledge"
-    reason = ""
-    if profile["gibberish"]:
-        reason = "输入缺少可识别语义，已停止无效召回"
-    elif mode == "incident" and not profile["has_incident_evidence"]:
-        reason = "未发现请求、Payload、IP/端口或时间窗口行为证据"
-    elif mode == "incident" and not profile["has_attack_indicator"]:
-        reason = "事件中没有可复核的攻击特征，禁止仅凭语义相近生成攻击知识"
-    elif mode == "knowledge" and not profile["has_security_context"]:
-        reason = "问题与当前网络安全知识域无明确关联"
-    return {"accepted": not reason, "mode": mode, "reason": reason, "profile": profile}
 
 
 def diversify_candidates(rows: Sequence[Dict[str, Any]], per_document: int = 12, limit: int = 30) -> List[Dict[str, Any]]:
@@ -827,7 +731,6 @@ def hybrid_search(
     query: str,
     username: str = "system",
     save_test: bool = False,
-    query_mode: str = "auto",
 ) -> Dict[str, Any]:
     started = time.perf_counter()
     kb = get_kb(conn, kb_id)
@@ -839,28 +742,9 @@ def hybrid_search(
     rows = list_chunks(conn, kb_id)
     rows = [row for row in rows if int(row.get("enabled") or 0) == 1]
     if not rows:
-        return {"items": [], "duration_ms": 0, "query": query, "no_match": True, "no_match_reason": "知识库中没有启用的切片"}
-    gate = retrieval_gate(query, query_mode)
-    effective_threshold = max(0.35, float(kb["score_threshold"]))
-    if not gate["accepted"]:
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        result = {
-            "items": [], "duration_ms": duration_ms, "query": query, "query_mode": gate["mode"],
-            "no_match": True, "no_match_reason": gate["reason"], "effective_threshold": effective_threshold,
-            "score_semantics": "重排匹配分，不代表攻击概率或准确率", "query_profile": gate["profile"],
-        }
-        if save_test:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO rag_retrieval_tests
-                    (kb_id,query_text,duration_ms,result_count,results_json,created_by) VALUES (%s,%s,%s,%s,%s,%s)""",
-                    (kb_id, query, duration_ms, 0, json.dumps(result, ensure_ascii=False), username),
-                )
-            conn.commit()
-        return result
+        return {"items": [], "duration_ms": 0, "query": query}
     search_query = expand_security_query(query)
     vector_scores: Dict[int, float] = {}
-    vector_distances: Dict[int, float] = {}
     table = _lance_table(data_dir, int(api_config["embedding_dimensions"]), create=False)
     if table is not None:
         vector = embed_texts([search_query], api_config)[0]
@@ -872,8 +756,6 @@ def hybrid_search(
         )
         for rank, item in enumerate(result, 1):
             vector_scores[int(item["chunk_id"])] = 1.0 / (60 + rank)
-            if item.get("_distance") is not None:
-                vector_distances[int(item["chunk_id"])] = float(item["_distance"])
     bm25 = _bm25_scores(search_query, rows)
     keyword_ranked = sorted(bm25, key=bm25.get, reverse=True)[: int(kb["keyword_top_k"])]
     fused: Dict[int, float] = dict(vector_scores)
@@ -885,8 +767,7 @@ def hybrid_search(
     ranked = rerank(search_query, [row["content"] for row in candidates], api_config, min(20, len(candidates)))
     items = []
     document_counts: Dict[int, int] = {}
-    threshold = effective_threshold
-    top_candidate_score = 0.0
+    threshold = float(kb["score_threshold"])
     for item in ranked:
         index = int(item.get("index", -1))
         if index < 0 or index >= len(candidates):
@@ -896,14 +777,7 @@ def hybrid_search(
         if document_counts.get(document_id, 0) >= 3:
             continue
         score = float(item.get("relevance_score") or item.get("score") or 0.0)
-        top_candidate_score = max(top_candidate_score, score)
         if score < threshold:
-            continue
-        chunk_id = int(row["id"])
-        lexical_score = float(bm25.get(chunk_id, 0.0))
-        # Mid-confidence matches need either lexical support or a strong rerank
-        # score. This prevents vector-nearest but unrelated text from leaking in.
-        if score < 0.55 and lexical_score <= 0:
             continue
         items.append(
             {
@@ -914,9 +788,7 @@ def hybrid_search(
                 "title_path": row.get("title_path") or "正文",
                 "content": row.get("content") or "",
                 "score": round(score, 6),
-                "rrf_score": round(fused.get(chunk_id, 0.0), 6),
-                "bm25_score": round(lexical_score, 6),
-                "vector_distance": round(vector_distances[chunk_id], 6) if chunk_id in vector_distances else None,
+                "rrf_score": round(fused.get(int(row["id"]), 0.0), 6),
             }
         )
         document_counts[document_id] = document_counts.get(document_id, 0) + 1
@@ -932,27 +804,15 @@ def hybrid_search(
                 tuple(ids),
             )
         conn.commit()
-    no_match_reason = ""
-    if not items:
-        if top_candidate_score and top_candidate_score < threshold:
-            no_match_reason = f"最高重排分 {top_candidate_score:.3f} 低于有效阈值 {threshold:.3f}"
-        else:
-            no_match_reason = "候选结果缺少足够的语义与关键词交叉证据"
-    response = {
-        "items": items, "duration_ms": duration_ms, "query": query, "query_mode": gate["mode"],
-        "no_match": not items, "no_match_reason": no_match_reason,
-        "effective_threshold": threshold, "top_candidate_score": round(top_candidate_score, 6),
-        "score_semantics": "重排匹配分，不代表攻击概率或准确率", "query_profile": gate["profile"],
-    }
     if save_test:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO rag_retrieval_tests
                 (kb_id,query_text,duration_ms,result_count,results_json,created_by) VALUES (%s,%s,%s,%s,%s,%s)""",
-                (kb_id, query, duration_ms, len(items), json.dumps(response, ensure_ascii=False), username),
+                (kb_id, query, duration_ms, len(items), json.dumps(items, ensure_ascii=False), username),
             )
         conn.commit()
-    return response
+    return {"items": items, "duration_ms": duration_ms, "query": query}
 
 
 def list_test_history(conn: Any, kb_id: int, limit: int = 30) -> List[Dict[str, Any]]:
@@ -968,8 +828,7 @@ def list_test_history(conn: Any, kb_id: int, limit: int = 30) -> List[Dict[str, 
 def list_eval_cases(conn: Any, kb_id: int) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT id,kb_id,question,expected_keywords,expected_document,expected_no_match,
-            expected_top_k,query_mode,enabled,created_at
+            """SELECT id,kb_id,question,expected_keywords,expected_document,enabled,created_at
             FROM rag_eval_cases WHERE kb_id=%s ORDER BY id""",
             (kb_id,),
         )
@@ -982,28 +841,22 @@ def save_eval_case(conn: Any, kb_id: int, payload: Dict[str, Any], case_id: int 
         raise ValueError("测试问题不能为空")
     keywords = str(payload.get("expected_keywords") or "").strip()
     expected_document = str(payload.get("expected_document") or "").strip()
-    expected_no_match = 1 if bool(payload.get("expected_no_match", False)) else 0
-    expected_top_k = min(max(int(payload.get("expected_top_k") or 3), 1), 20)
-    query_mode = str(payload.get("query_mode") or "incident").strip().lower()
-    if query_mode not in {"incident", "knowledge", "auto"}:
-        query_mode = "incident"
     enabled = 1 if bool(payload.get("enabled", True)) else 0
     with conn.cursor() as cur:
         if case_id:
             cur.execute(
                 """UPDATE rag_eval_cases SET question=%s,expected_keywords=%s,
-                expected_document=%s,expected_no_match=%s,expected_top_k=%s,query_mode=%s,
-                enabled=%s WHERE id=%s AND kb_id=%s""",
-                (question, keywords, expected_document, expected_no_match, expected_top_k, query_mode, enabled, case_id, kb_id),
+                expected_document=%s,enabled=%s WHERE id=%s AND kb_id=%s""",
+                (question, keywords, expected_document, enabled, case_id, kb_id),
             )
             if not cur.rowcount:
                 raise KeyError("回归用例不存在")
         else:
             cur.execute(
                 """INSERT INTO rag_eval_cases
-                (kb_id,question,expected_keywords,expected_document,expected_no_match,expected_top_k,query_mode,enabled)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (kb_id, question, keywords, expected_document, expected_no_match, expected_top_k, query_mode, enabled),
+                (kb_id,question,expected_keywords,expected_document,enabled)
+                VALUES (%s,%s,%s,%s,%s)""",
+                (kb_id, question, keywords, expected_document, enabled),
             )
             case_id = int(cur.lastrowid)
     conn.commit()
@@ -1019,46 +872,30 @@ def delete_eval_case(conn: Any, kb_id: int, case_id: int) -> bool:
 
 
 def evaluate_retrieval_items(
-    items: Sequence[Dict[str, Any]], expected_keywords: str = "", expected_document: str = "",
-    expected_no_match: bool = False, expected_top_k: int = 3,
+    items: Sequence[Dict[str, Any]], expected_keywords: str = "", expected_document: str = ""
 ) -> Dict[str, Any]:
     keywords = [part.strip().lower() for part in re.split(r"[,，;；\n]+", expected_keywords or "") if part.strip()]
-    if expected_no_match:
-        passed = not items
-        return {
-            "passed": passed, "matched_keywords": [], "relevant_rank": 0, "reciprocal_rank": 0.0,
-            "reason": "正确拒绝无关查询" if passed else f"期望无结果，但错误召回 {len(items)} 个切片",
-        }
-    expected_top_k = min(max(int(expected_top_k or 3), 1), 20)
-    needle = expected_document.strip().lower()
-    relevant_rank = 0
-    matched_keywords: List[str] = []
-    for rank, item in enumerate(items, 1):
-        combined = f"{item.get('document_name') or ''}\n{item.get('title_path') or ''}\n{item.get('content') or ''}".lower()
-        item_keywords = [keyword for keyword in keywords if keyword in combined]
-        document_ok = not needle or needle in str(item.get("document_name") or "").lower()
-        keyword_ok = not keywords or bool(item_keywords)
-        if document_ok and keyword_ok:
-            relevant_rank = rank
-            matched_keywords = item_keywords
-            break
-    passed = bool(relevant_rank and relevant_rank <= expected_top_k)
+    combined = "\n".join(
+        f"{item.get('document_name') or ''}\n{item.get('title_path') or ''}\n{item.get('content') or ''}" for item in items
+    ).lower()
+    matched_keywords = [keyword for keyword in keywords if keyword in combined]
+    document_ok = True
+    if expected_document.strip():
+        needle = expected_document.strip().lower()
+        document_ok = any(needle in str(item.get("document_name") or "").lower() for item in items)
+    keyword_ok = not keywords or bool(matched_keywords)
+    passed = bool(items) and keyword_ok and document_ok
     reasons = []
     if not items:
         reasons.append("未召回任何切片")
-    elif not relevant_rank:
-        if keywords:
-            reasons.append("没有单个切片命中期望关键词")
-        if needle:
-            reasons.append("未召回同时满足条件的期望来源文档")
-    elif relevant_rank > expected_top_k:
-        reasons.append(f"正确证据位于 TOP{relevant_rank}，低于 TOP{expected_top_k} 要求")
+    if keywords and not matched_keywords:
+        reasons.append("未命中任一期望关键词")
+    if not document_ok:
+        reasons.append("未召回期望来源文档")
     return {
         "passed": passed,
         "matched_keywords": matched_keywords,
-        "relevant_rank": relevant_rank,
-        "reciprocal_rank": round(1.0 / relevant_rank, 6) if relevant_rank else 0.0,
-        "reason": "；".join(reasons) if reasons else f"正确证据位于 TOP{relevant_rank}",
+        "reason": "；".join(reasons) if reasons else "召回结果满足预期",
     }
 
 
@@ -1075,15 +912,12 @@ def run_eval_suite(
     results: List[Dict[str, Any]] = []
     for case in cases:
         search_result = hybrid_search(
-            conn, data_dir, api_config, kb_id, str(case["question"]), username=username, save_test=False,
-            query_mode=str(case.get("query_mode") or "incident"),
+            conn, data_dir, api_config, kb_id, str(case["question"]), username=username, save_test=False
         )
         evaluation = evaluate_retrieval_items(
             search_result.get("items") or [],
             str(case.get("expected_keywords") or ""),
             str(case.get("expected_document") or ""),
-            bool(case.get("expected_no_match")),
-            int(case.get("expected_top_k") or 3),
         )
         results.append(
             {
@@ -1091,12 +925,7 @@ def run_eval_suite(
                 "question": case["question"],
                 "expected_keywords": case.get("expected_keywords") or "",
                 "expected_document": case.get("expected_document") or "",
-                "expected_no_match": bool(case.get("expected_no_match")),
-                "expected_top_k": int(case.get("expected_top_k") or 3),
-                "query_mode": case.get("query_mode") or "incident",
                 "duration_ms": int(search_result.get("duration_ms") or 0),
-                "no_match": bool(search_result.get("no_match")),
-                "no_match_reason": search_result.get("no_match_reason") or "",
                 "top_document": (search_result.get("items") or [{}])[0].get("document_name") if search_result.get("items") else "",
                 "top_score": (search_result.get("items") or [{}])[0].get("score") if search_result.get("items") else 0,
                 **evaluation,
@@ -1106,26 +935,12 @@ def run_eval_suite(
     total = len(results)
     average_ms = int(sum(row["duration_ms"] for row in results) / total) if total else 0
     pass_rate = passed / total if total else 0.0
-    positive_rows = [row for row in results if not row["expected_no_match"]]
-    negative_rows = [row for row in results if row["expected_no_match"]]
-    recall_at_k = sum(1 for row in positive_rows if row["passed"]) / len(positive_rows) if positive_rows else 0.0
-    mrr = sum(float(row.get("reciprocal_rank") or 0) for row in positive_rows) / len(positive_rows) if positive_rows else 0.0
-    no_match_accuracy = sum(1 for row in negative_rows if row["passed"]) / len(negative_rows) if negative_rows else 0.0
-    false_positive_rate = sum(1 for row in negative_rows if not row["passed"]) / len(negative_rows) if negative_rows else 0.0
-    config_snapshot = {
-        "embedding_model": get_kb(conn, kb_id).get("embedding_model"),
-        "rerank_model": get_kb(conn, kb_id).get("rerank_model"),
-        "effective_min_threshold": max(0.35, float(get_kb(conn, kb_id).get("score_threshold") or 0.35)),
-    }
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO rag_eval_runs
-            (kb_id,total_cases,passed_cases,pass_rate,average_duration_ms,recall_at_k,
-            mean_reciprocal_rank,no_match_accuracy,false_positive_rate,config_json,results_json,created_by)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (kb_id, total, passed, pass_rate, average_ms, recall_at_k, mrr, no_match_accuracy,
-             false_positive_rate, json.dumps(config_snapshot, ensure_ascii=False),
-             json.dumps(results, ensure_ascii=False), username),
+            (kb_id,total_cases,passed_cases,pass_rate,average_duration_ms,results_json,created_by)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (kb_id, total, passed, pass_rate, average_ms, json.dumps(results, ensure_ascii=False), username),
         )
         run_id = int(cur.lastrowid)
     conn.commit()
@@ -1135,13 +950,6 @@ def run_eval_suite(
         "passed_cases": passed,
         "pass_rate": round(pass_rate, 6),
         "average_duration_ms": average_ms,
-        "positive_cases": len(positive_rows),
-        "negative_cases": len(negative_rows),
-        "recall_at_k": round(recall_at_k, 6),
-        "mean_reciprocal_rank": round(mrr, 6),
-        "no_match_accuracy": round(no_match_accuracy, 6),
-        "false_positive_rate": round(false_positive_rate, 6),
-        "config": config_snapshot,
         "items": results,
     }
 
@@ -1149,8 +957,7 @@ def run_eval_suite(
 def list_eval_runs(conn: Any, kb_id: int, limit: int = 20) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT id,kb_id,total_cases,passed_cases,pass_rate,average_duration_ms,recall_at_k,
-            mean_reciprocal_rank,no_match_accuracy,false_positive_rate,config_json,
+            """SELECT id,kb_id,total_cases,passed_cases,pass_rate,average_duration_ms,
             results_json,created_by,created_at FROM rag_eval_runs WHERE kb_id=%s ORDER BY id DESC LIMIT %s""",
             (kb_id, min(max(1, limit), 100)),
         )
@@ -1160,10 +967,6 @@ def list_eval_runs(conn: Any, kb_id: int, limit: int = 20) -> List[Dict[str, Any
             row["items"] = json.loads(row.pop("results_json") or "[]")
         except (TypeError, ValueError):
             row["items"] = []
-        try:
-            row["config"] = json.loads(row.pop("config_json") or "{}")
-        except (TypeError, ValueError):
-            row["config"] = {}
     return rows
 
 

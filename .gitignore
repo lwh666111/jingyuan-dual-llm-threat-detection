@@ -46,7 +46,6 @@ models/*.joblib
 # RAG artifacts
 llm/rag/rag_knowledge.db
 llm/rag/runtime/
-llm/rag/v3/
 config/ai_api.local.json
 *.lance
 
