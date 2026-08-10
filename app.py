@@ -435,6 +435,26 @@ def build_capture_cmd(
         cmd.extend(["--interface", iface])
     if args.decode_http_port is not None:
         cmd.extend(["--decode-http-port", str(args.decode_http_port)])
+    if args.enable_situation and str(args.db_backend).lower() == "mysql":
+        cmd.extend(
+            [
+                "--fast-defense",
+                "--fast-rules",
+                str(args.project_root / "rules" / "fast_defense_rules.json"),
+                "--fast-audit-log",
+                str(args.project_root / "output" / "fast_defense_audit.log"),
+                "--mysql-host",
+                args.mysql_host,
+                "--mysql-port",
+                str(args.mysql_port),
+                "--mysql-user",
+                args.mysql_user,
+                "--mysql-password",
+                args.mysql_password,
+                "--mysql-database",
+                args.mysql_database,
+            ]
+        )
     return cmd
 
 
@@ -1157,6 +1177,10 @@ def main() -> None:
             [
                 "situation_supervisor.py",
                 "situation_daemon.py",
+                "auto_defense_daemon.py",
+                "firewall_control.py",
+                "fast_defense.py",
+                "situation_cluster.py",
                 "situation_ai_daemon.py",
                 "port_scan_sensor.py",
                 "situation_core.py",
@@ -1167,6 +1191,8 @@ def main() -> None:
     if run_api:
         required_scripts.append("dashboard_api_server.py")
     ensure_scripts(scripts_dir, required_scripts)
+    if run_capture and run_situation:
+        ensure_paths([project_root / "rules" / "fast_defense_rules.json"], hint="fast defense rules are required")
     if run_dashboard:
         ensure_paths([dashboard_server], hint="Please ensure frontend_dashboard exists.")
 

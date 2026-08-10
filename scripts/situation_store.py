@@ -310,6 +310,8 @@ class MySQLSituationStore:
         source_ip: str = "",
         status: str = "",
         minimum_risk: float = 0.0,
+        lookback_hours: int = 0,
+        include_observing: bool = False,
     ) -> List[Dict[str, Any]]:
         where = ["risk_score >= %s"]
         values: List[Any] = [max(0.0, min(1.0, float(minimum_risk)))]
@@ -319,9 +321,15 @@ class MySQLSituationStore:
         if status:
             where.append("status = %s")
             values.append(status)
-        else:
+        elif not include_observing:
             where.append("status <> 'observing'")
-        values.extend([max(1, min(500, int(limit))), max(0, int(offset))])
+        lookback = max(0, min(24 * 30, int(lookback_hours)))
+        if lookback:
+            where.append("last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s HOUR")
+            values.append(lookback)
+        # Time-bounded correlation needs more than the latest page; normal list APIs stay capped at 500.
+        limit_cap = 5000 if lookback else 500
+        values.extend([max(1, min(limit_cap, int(limit))), max(0, int(offset))])
         sql = f"""
             SELECT situation_id,source_ip,target_asset,started_at,last_action_at,status,
                    distinct_action_types,total_action_count,current_stage,risk_score,
@@ -354,6 +362,46 @@ class MySQLSituationStore:
             rows = list(cur.fetchall())
         conn.commit()
         return [self._action_from_db(row) for row in rows]
+
+    def list_situation_details(
+        self,
+        *,
+        limit: int = 500,
+        status: str = "",
+        minimum_risk: float = 0.0,
+        lookback_hours: int = 0,
+        include_observing: bool = False,
+    ) -> List[Dict[str, Any]]:
+        situations = self.list_situations(
+            limit=limit,
+            status=status,
+            minimum_risk=minimum_risk,
+            lookback_hours=lookback_hours,
+            include_observing=include_observing,
+        )
+        ids = [str(row.get("situation_id") or "") for row in situations if row.get("situation_id")]
+        if not ids:
+            return situations
+        placeholders = ",".join(["%s"] * len(ids))
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT sa.situation_id,sa.sequence_no,sa.gap_seconds,a.*
+                    FROM situation_actions sa JOIN security_actions a ON a.action_id=sa.action_id
+                    WHERE sa.situation_id IN ({placeholders})
+                    ORDER BY sa.situation_id,sa.sequence_no""",
+                tuple(ids),
+            )
+            actions = list(cur.fetchall())
+        conn.commit()
+        grouped: Dict[str, List[Dict[str, Any]]] = {item_id: [] for item_id in ids}
+        for action in actions:
+            action["evidence_refs"] = json_value(action.pop("evidence_json", None), [])
+            action["metadata"] = json_value(action.pop("metadata_json", None), {})
+            grouped.setdefault(str(action.get("situation_id") or ""), []).append(action)
+        for situation in situations:
+            situation["actions"] = grouped.get(str(situation.get("situation_id") or ""), [])
+        return situations
 
     @staticmethod
     def _action_from_db(row: Dict[str, Any]) -> SecurityAction:

@@ -659,7 +659,7 @@ def ensure_schema_mysql(conn: Any) -> None:
           verdict VARCHAR(64) NULL,
           source_ip VARCHAR(64) NULL,
           destination_ip VARCHAR(64) NULL,
-          attack_interface VARCHAR(255) NULL,
+          attack_interface TEXT NULL,
           attack_method LONGTEXT NULL,
           attack_path TEXT NULL,
           attack_time VARCHAR(64) NULL,
@@ -670,7 +670,7 @@ def ensure_schema_mysql(conn: Any) -> None:
           analysis_raw LONGTEXT NULL,
           attack_event_time VARCHAR(64) NULL,
           attack_ip VARCHAR(64) NULL,
-          target_interface VARCHAR(255) NULL,
+          target_interface TEXT NULL,
           attack_type VARCHAR(255) NULL,
           attack_confidence DOUBLE NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -688,7 +688,7 @@ def ensure_schema_mysql(conn: Any) -> None:
           source_ip VARCHAR(64) NOT NULL,
           source_region VARCHAR(64) NOT NULL,
           target_node VARCHAR(64) NOT NULL,
-          target_interface VARCHAR(255) NOT NULL,
+          target_interface TEXT NOT NULL,
           attack_result VARCHAR(16) NOT NULL,
           process_status VARCHAR(16) NOT NULL DEFAULT 'unprocessed',
           acked TINYINT(1) NOT NULL DEFAULT 0,
@@ -738,6 +738,19 @@ def ensure_schema_mysql(conn: Any) -> None:
         attack_method_type = str(columns.get("attack_method", {}).get("Type") or "").lower()
         if attack_method_type.startswith("varchar"):
             cur.execute("ALTER TABLE analyses MODIFY COLUMN attack_method LONGTEXT NULL")
+        # LLMs may return a descriptive interface value rather than only a short URI.
+        # Keep the complete evidence and prevent one long row from rolling back a batch.
+        attack_interface_type = str(columns.get("attack_interface", {}).get("Type") or "").lower()
+        if attack_interface_type.startswith("varchar"):
+            cur.execute("ALTER TABLE analyses MODIFY COLUMN attack_interface TEXT NULL")
+        target_interface_type = str(columns.get("target_interface", {}).get("Type") or "").lower()
+        if target_interface_type.startswith("varchar"):
+            cur.execute("ALTER TABLE analyses MODIFY COLUMN target_interface TEXT NULL")
+        cur.execute("SHOW COLUMNS FROM demo_attack_events")
+        event_columns = {str(row["Field"]): row for row in cur.fetchall()}
+        event_target_type = str(event_columns.get("target_interface", {}).get("Type") or "").lower()
+        if event_target_type.startswith("varchar"):
+            cur.execute("ALTER TABLE demo_attack_events MODIFY COLUMN target_interface TEXT NOT NULL")
 
 
 def upsert_requests_sqlite(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:

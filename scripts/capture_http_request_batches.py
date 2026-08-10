@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 try:
+    from fast_defense import FastDefenseGuard
+except ImportError:  # package import during tests
+    from scripts.fast_defense import FastDefenseGuard
+
+try:
     csv.field_size_limit(16 * 1024 * 1024)
 except Exception:
     pass
@@ -500,6 +505,14 @@ def main():
     parser.add_argument("--decode-http-port", type=int, default=None, help="强制 HTTP 解码端口，默认等于 --port")
     parser.add_argument("--keep-running", action="store_true", default=True, help="持续运行直到 Ctrl+C")
     parser.add_argument("--once", action="store_true", help="仅生成一个 batch 后退出")
+    parser.add_argument("--fast-defense", action="store_true", help="启用后端静默高置信快速封禁")
+    parser.add_argument("--fast-rules", default="rules/fast_defense_rules.json")
+    parser.add_argument("--fast-audit-log", default="output/fast_defense_audit.log")
+    parser.add_argument("--mysql-host", default="127.0.0.1")
+    parser.add_argument("--mysql-port", type=int, default=3306)
+    parser.add_argument("--mysql-user", default="root")
+    parser.add_argument("--mysql-password", default="123456")
+    parser.add_argument("--mysql-database", default="traffic_pipeline")
     args = parser.parse_args()
 
     monitor_ports = parse_ports(args.port, args.ports)
@@ -523,6 +536,23 @@ def main():
 
     input_dir = Path(args.input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
+    fast_guard = None
+    if args.fast_defense:
+        try:
+            fast_guard = FastDefenseGuard(
+                rules_path=Path(args.fast_rules),
+                mysql_config={
+                    "host": args.mysql_host,
+                    "port": args.mysql_port,
+                    "user": args.mysql_user,
+                    "password": args.mysql_password,
+                    "database": args.mysql_database,
+                },
+                log_path=Path(args.fast_audit_log),
+            )
+            print(f"静默快速防御: enabled rules={len(fast_guard.engine.rules)}")
+        except Exception as exc:
+            print(f"[WARN] fast defense unavailable; capture continues: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     iface_arg = (args.interface or "").strip()
     if iface_arg.isdigit():
@@ -637,6 +667,11 @@ def main():
 
             if method:
                 req = build_request_from_fields(fields, response_in_field=response_in_field)
+                if fast_guard is not None:
+                    try:
+                        fast_guard.inspect(req)
+                    except Exception as exc:
+                        print(f"[WARN] fast defense inspect failed: {type(exc).__name__}: {exc}", file=sys.stderr)
                 frame_no = req["frame_no"]
                 pending_by_frame[frame_no] = req
                 stream = req.get("stream", -1)
@@ -699,6 +734,8 @@ def main():
     except KeyboardInterrupt:
         print("\n收到 Ctrl+C，正在停止抓包...")
     finally:
+        if fast_guard is not None:
+            fast_guard.close()
         try:
             proc.terminate()
             proc.wait(timeout=5)

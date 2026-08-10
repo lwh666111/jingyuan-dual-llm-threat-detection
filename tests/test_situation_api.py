@@ -49,14 +49,62 @@ class SituationAPITests(unittest.TestCase):
         ]
         situation = SituationCorrelator().correlate(actions)[0]
         situation.situation_id = "SIT-API-INTEGRATION"
-        cls.store.save([situation])
+        proxy_actions = [
+            SecurityAction("ACT-API-PROXY-1", "198.51.100.77", "api-test", "DIRECTORY_SCAN", base + timedelta(minutes=1), count=12),
+            SecurityAction("ACT-API-PROXY-2", "198.51.100.77", "api-test", "XSS", base + timedelta(minutes=2), count=3),
+            SecurityAction("ACT-API-PROXY-3", "198.51.100.77", "api-test", "COMMAND_INJECTION", base + timedelta(minutes=3), count=1),
+        ]
+        proxy_situation = SituationCorrelator().correlate(proxy_actions)[0]
+        proxy_situation.situation_id = "SIT-API-PROXY"
+        # A proxy can contribute only one action and remain "observing" on its own.
+        # Cross-IP correlation must still include it before applying cluster thresholds.
+        observing_actions = [
+            SecurityAction("ACT-API-OBSERVING-1", "192.0.2.251", "api-test", "SSTI", base + timedelta(minutes=3), count=1),
+        ]
+        observing_situation = SituationCorrelator().correlate(observing_actions)[0]
+        observing_situation.situation_id = "SIT-API-OBSERVING"
+        cls.store.save([situation, proxy_situation, observing_situation])
+        # Reproduce the server regression: a high-volume, single-action sensor can occupy
+        # the latest 500 rows and must not hide an older multi-IP attack cluster.
+        conn = cls.store.connect()
+        filler_time = base + timedelta(minutes=4)
+        filler_rows = []
+        for index in range(510):
+            filler_rows.append(
+                (
+                    f"SIT-API-FILLER-{index:04d}",
+                    f"192.0.2.{(index % 250) + 1}",
+                    f"noise-target-{index:04d}",
+                    filler_time,
+                    filler_time,
+                    "open",
+                    1,
+                    1,
+                    "credential_access",
+                    0.5,
+                    "medium",
+                    f"filler-{index:04d}",
+                    "complete",
+                )
+            )
+        with conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO attack_situations(
+                       situation_id,source_ip,target_asset,started_at,last_action_at,status,
+                       distinct_action_types,total_action_count,current_stage,risk_score,
+                       risk_level,sequence_hash,ai_status
+                   ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                filler_rows,
+            )
+        conn.commit()
 
     @classmethod
     def clean_rows(cls) -> None:
         conn = cls.store.connect()
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM situation_outbox WHERE aggregate_id='SIT-API-INTEGRATION'")
-            cur.execute("DELETE FROM attack_situations WHERE situation_id='SIT-API-INTEGRATION'")
+            cur.execute("DELETE FROM situation_outbox WHERE aggregate_id IN ('SIT-API-INTEGRATION','SIT-API-PROXY','SIT-API-OBSERVING')")
+            cur.execute("DELETE FROM attack_situations WHERE situation_id IN ('SIT-API-INTEGRATION','SIT-API-PROXY','SIT-API-OBSERVING')")
+            cur.execute("DELETE FROM attack_situations WHERE situation_id LIKE 'SIT-API-FILLER-%'")
             cur.execute("DELETE FROM security_actions WHERE action_id LIKE 'ACT-API-%'")
         conn.commit()
 
@@ -91,6 +139,18 @@ class SituationAPITests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v2/situations/by-ip/not-an-ip").status_code, 400)
         response = self.client.post("/api/v2/situations/SIT-API-INTEGRATION/status", json={"status": "magic"})
         self.assertEqual(response.status_code, 400)
+
+    def test_cross_ip_cluster_endpoint_preserves_both_sources(self) -> None:
+        response = self.client.get("/api/v2/situation-clusters?window_minutes=60&lookback_hours=24")
+        self.assertEqual(response.status_code, 200)
+        items = response.get_json()["items"]
+        expected_sources = {"203.0.113.66", "198.51.100.77", "192.0.2.251"}
+        cluster = next(row for row in items if set(row.get("source_ips") or []) == expected_sources)
+        detail = self.client.get(f"/api/v2/situation-clusters/{cluster['cluster_id']}?window_minutes=60&lookback_hours=24")
+        self.assertEqual(detail.status_code, 200)
+        payload = detail.get_json()
+        self.assertEqual(len(payload["item"]["source_ips"]), 3)
+        self.assertGreaterEqual(len(payload["graph"]["nodes"]), 6)
 
     def test_admin_can_update_validated_situation_thresholds(self) -> None:
         payload = {

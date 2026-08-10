@@ -30,8 +30,15 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from situation_ai import analyze_situation
+from situation_cluster import build_proxy_clusters
 from situation_core import ACTION_CATALOG, STAGE_LABELS, STAGE_ORDER
 from situation_store import MySQLSettings, MySQLSituationStore
+from firewall_control import (
+    firewall_block_ip as verified_firewall_block_ip,
+    firewall_status as verified_firewall_status,
+    firewall_status_many as verified_firewall_status_many,
+    firewall_unblock_ip as verified_firewall_unblock_ip,
+)
 from rag_service import (
     MAX_UPLOAD_BYTES as RAG_MAX_UPLOAD_BYTES,
     SUPPORTED_EXTENSIONS as RAG_SUPPORTED_EXTENSIONS,
@@ -1031,36 +1038,11 @@ def firewall_create_rule(rule_name: str, direction: str, ip_val: str) -> Tuple[b
 
 
 def firewall_block_ip(ip_text: str) -> Tuple[bool, str]:
-    if os.name != "nt":
-        return False, "firewall_block_supported_only_on_windows"
-    ip_val = normalize_ip_literal(ip_text)
-    if not ip_val:
-        return False, "invalid_or_empty_ip"
-    in_rule, out_rule = firewall_rule_names(ip_val)
-    # make command idempotent
-    firewall_delete_rule(in_rule)
-    firewall_delete_rule(out_rule)
-    ok1, detail1 = firewall_create_rule(in_rule, "in", ip_val)
-    ok2, detail2 = firewall_create_rule(out_rule, "out", ip_val)
-    if ok1 and ok2:
-        return True, ""
-    detail = f"in: {detail1}; out: {detail2}"
-    return False, detail.strip()
+    return verified_firewall_block_ip(ip_text)
 
 
 def firewall_unblock_ip(ip_text: str) -> Tuple[bool, str]:
-    if os.name != "nt":
-        return False, "firewall_unblock_supported_only_on_windows"
-    ip_val = normalize_ip_literal(ip_text)
-    if not ip_val:
-        return False, "invalid_or_empty_ip"
-    in_rule, out_rule = firewall_rule_names(ip_val)
-    ok1, detail1 = firewall_delete_rule(in_rule)
-    ok2, detail2 = firewall_delete_rule(out_rule)
-    if ok1 and ok2:
-        return True, ""
-    detail = f"in: {detail1}; out: {detail2}"
-    return False, detail.strip()
+    return verified_firewall_unblock_ip(ip_text)
 
 
 def normalize_ip_literal(value: Any) -> str:
@@ -1661,6 +1643,35 @@ def ensure_schema(conn: Any) -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
         """
+        CREATE TABLE IF NOT EXISTS demo_auto_defense_releases (
+          ip_address VARCHAR(64) PRIMARY KEY,
+          released_action_at DATETIME(3) NULL,
+          released_by VARCHAR(64) NOT NULL DEFAULT '',
+          released_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS demo_fast_defense_audit (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          request_fingerprint CHAR(64) NOT NULL,
+          source_ip VARCHAR(64) NOT NULL,
+          destination_ip VARCHAR(64) NOT NULL DEFAULT '',
+          method VARCHAR(16) NOT NULL DEFAULT '',
+          uri TEXT NOT NULL,
+          category VARCHAR(64) NOT NULL,
+          score INT NOT NULL,
+          rule_ids_json TEXT NOT NULL,
+          decision VARCHAR(32) NOT NULL,
+          firewall_success TINYINT(1) NOT NULL DEFAULT 0,
+          firewall_detail TEXT NOT NULL,
+          request_time DATETIME(3) NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          KEY idx_fast_ip_time (source_ip, created_at),
+          KEY idx_fast_category_time (category, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
         CREATE TABLE IF NOT EXISTS demo_user_action_logs (
           id BIGINT AUTO_INCREMENT PRIMARY KEY,
           username VARCHAR(64) NOT NULL,
@@ -1706,6 +1717,23 @@ def log_action(conn: Any, username: str, role: str, action: str, target: str, de
             """,
             (username, role, action, target, detail),
         )
+
+
+def record_auto_defense_release(cur: Any, ip_address: str, username: str) -> None:
+    """Prevent old situation evidence from immediately undoing a manual release."""
+    cur.execute(
+        """
+        INSERT INTO demo_auto_defense_releases(ip_address, released_action_at, released_by)
+        SELECT %s, MAX(last_action_at), %s
+        FROM attack_situations
+        WHERE source_ip=%s
+        ON DUPLICATE KEY UPDATE
+          released_action_at=VALUES(released_action_at),
+          released_by=VALUES(released_by),
+          released_at=CURRENT_TIMESTAMP
+        """,
+        (ip_address, username, ip_address),
+    )
 
 
 def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
@@ -1758,6 +1786,10 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "situation_inactivity_minutes": "15",
             "scan_port_threshold": "10",
             "scan_window_seconds": "60",
+            "proxy_cluster_window_minutes": "60",
+            "auto_defense_enabled": "0",
+            "auto_defense_min_risk": "critical",
+            "auto_defense_allow_private": "0",
             "homepage_background_url": DEFAULT_HOMEPAGE_BACKGROUND,
         }
         for k, v in defaults.items():
@@ -3426,6 +3458,91 @@ def create_app(
     def open_situation_store() -> MySQLSituationStore:
         return MySQLSituationStore(MySQLSettings(**app.config["MYSQL_CONF"]))
 
+    def load_proxy_cluster_rows(window_minutes: int, lookback_hours: int, status: str = "") -> List[Dict[str, Any]]:
+        store = open_situation_store()
+        try:
+            full_rows = store.list_situation_details(
+                limit=5000,
+                status=status,
+                lookback_hours=lookback_hours,
+                include_observing=True,
+            )
+            return build_proxy_clusters(full_rows, window_minutes=window_minutes, lookback_hours=lookback_hours)
+        finally:
+            store.close()
+
+    @app.route("/api/v2/situation-clusters", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_clusters():
+        try:
+            window_minutes = max(5, min(1440, int(request.args.get("window_minutes", "60"))))
+            lookback_hours = max(1, min(720, int(request.args.get("lookback_hours", "24"))))
+        except ValueError:
+            return jsonify({"error": "invalid_time_range"}), 400
+        status = request.args.get("status", "").strip()
+        if status and status not in {"open", "closed", "handled", "ignored", "observing"}:
+            return jsonify({"error": "invalid_status"}), 400
+        clusters = load_proxy_cluster_rows(window_minutes, lookback_hours, status=status)
+        items = []
+        for cluster in clusters:
+            summary = {key: value for key, value in cluster.items() if key not in {"actions", "graph", "ai_report"}}
+            summary["ai_status"] = cluster.get("ai_status")
+            items.append(summary)
+        return jsonify(
+            {
+                "items": normalize_rows(items),
+                "total": len(items),
+                "window_minutes": window_minutes,
+                "lookback_hours": lookback_hours,
+                "correlation_rule": "same_target + time_window + multiple_ips + at_least_3_action_types",
+            }
+        )
+    @app.route("/api/v2/situation-clusters/<cluster_id>", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_cluster_detail(cluster_id: str):
+        try:
+            window_minutes = max(5, min(1440, int(request.args.get("window_minutes", "60"))))
+            lookback_hours = max(1, min(720, int(request.args.get("lookback_hours", "24"))))
+        except ValueError:
+            return jsonify({"error": "invalid_time_range"}), 400
+        cluster = next(
+            (row for row in load_proxy_cluster_rows(window_minutes, lookback_hours) if row.get("cluster_id") == cluster_id),
+            None,
+        )
+        if not cluster:
+            return jsonify({"error": "cluster_not_found"}), 404
+        graph = cluster.pop("graph", {"nodes": [], "edges": []})
+        return jsonify({"item": normalize_rows([cluster])[0], "graph": normalize_rows([graph])[0]})
+
+    @app.route("/api/v2/situation-clusters/<cluster_id>/reanalyze", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def situation_cluster_reanalyze(cluster_id: str):
+        body = request.get_json(silent=True) or {}
+        window_minutes = max(5, min(1440, int(body.get("window_minutes", 60))))
+        lookback_hours = max(1, min(720, int(body.get("lookback_hours", 24))))
+        cluster = next(
+            (row for row in load_proxy_cluster_rows(window_minutes, lookback_hours) if row.get("cluster_id") == cluster_id),
+            None,
+        )
+        if not cluster:
+            return jsonify({"error": "cluster_not_found"}), 404
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            config_map = load_system_config_map(conn)
+        ai_input = dict(cluster)
+        ai_input["source_ip"] = f"多个代理来源：{', '.join(cluster.get('source_ips') or [])}"
+        report, ai_status = analyze_situation(
+            ai_input,
+            ollama_url=app.config["OLLAMA_URL"],
+            model=config_map.get("llm_model", "qwen3:8b"),
+            rag_db_path=Path(app.config["RAG_DB_PATH"]),
+            rag_mysql_conf=app.config["MYSQL_CONF"],
+            rag_data_dir=Path(app.config["RAG_DATA_DIR"]),
+            rag_api_config=Path(app.config["RAG_API_CONFIG_PATH"]),
+            rag_top_k=4,
+            timeout_sec=120,
+        )
+        return jsonify({"ok": True, "cluster_id": cluster_id, "ai_status": ai_status, "report": report})
+
     @app.route("/api/v2/situations", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def situation_list():
@@ -4033,6 +4150,8 @@ def create_app(
                 placeholders = ",".join(["%s"] * len(unblock_ips))
                 cur.execute(f"DELETE FROM demo_blocked_ips WHERE ip_address IN ({placeholders})", tuple(unblock_ips))
                 changed = int(cur.rowcount or 0)
+                for ip_text in unblock_ips:
+                    record_auto_defense_release(cur, ip_text, g.session["username"])
                 log_action(
                     conn,
                     g.session["username"],
@@ -4053,6 +4172,59 @@ def create_app(
                 "block_mode": block_meta.get("mode"),
             }
         )
+
+    @app.route("/api/v2/defense/status", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def defense_status():
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            config = load_system_config_map(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS c FROM demo_blocked_ips")
+                blocked_count = int((cur.fetchone() or {}).get("c", 0))
+        return jsonify(
+            {
+                "enabled": config.get("auto_defense_enabled", "0") == "1",
+                "minimum_risk": config.get("auto_defense_min_risk", "critical"),
+                "allow_private": config.get("auto_defense_allow_private", "0") == "1",
+                "blocked_count": blocked_count,
+                "enforcement": "windows_firewall_bidirectional",
+                "platform_supported": os.name == "nt",
+                "poll_seconds": 5,
+            }
+        )
+
+    @app.route("/api/v2/defense/config", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def defense_config_update():
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        minimum_risk = str(body.get("minimum_risk", "critical")).strip().lower()
+        allow_private = bool(body.get("allow_private", False))
+        if minimum_risk not in {"high", "critical"}:
+            return jsonify({"error": "invalid_minimum_risk"}), 400
+        values = {
+            "auto_defense_enabled": "1" if enabled else "0",
+            "auto_defense_min_risk": minimum_risk,
+            "auto_defense_allow_private": "1" if allow_private else "0",
+        }
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                for key, value in values.items():
+                    cur.execute(
+                        """INSERT INTO demo_system_config(config_key,config_value)
+                           VALUES(%s,%s) ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)""",
+                        (key, value),
+                    )
+                log_action(
+                    conn,
+                    g.session["username"],
+                    g.session["role"],
+                    "update_auto_defense",
+                    "windows_firewall",
+                    json.dumps(values, ensure_ascii=False),
+                )
+            conn.commit()
+        return jsonify({"ok": True, "enabled": enabled, "minimum_risk": minimum_risk, "allow_private": allow_private})
 
     @app.route("/api/v2/pro/blocked-ips", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
@@ -4091,7 +4263,13 @@ def create_app(
                     """,
                     tuple(params + [page_size, offset]),
                 )
-                rows = cur.fetchall()
+                rows = list(cur.fetchall())
+        firewall_states = verified_firewall_status_many([str(row.get("ip_address") or "") for row in rows])
+        for row in rows:
+            status = firewall_states.get(str(row.get("ip_address") or ""), {})
+            row["firewall_active"] = bool(status.get("active"))
+            row["inbound_active"] = bool(status.get("inbound"))
+            row["outbound_active"] = bool(status.get("outbound"))
         return jsonify({"items": normalize_rows(rows), "page": page, "page_size": page_size, "total": total})
 
     @app.route("/api/v2/pro/blocked-ips/unblock", methods=["POST"])
@@ -4116,6 +4294,7 @@ def create_app(
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM demo_blocked_ips WHERE ip_address=%s", (ip_text,))
                 changed = int(cur.rowcount or 0)
+                record_auto_defense_release(cur, ip_text, g.session["username"])
                 log_action(
                     conn,
                     g.session["username"],

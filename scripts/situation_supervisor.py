@@ -156,6 +156,16 @@ def neo4j_command(args: argparse.Namespace) -> List[str]:
     ]
 
 
+def auto_defense_command(args: argparse.Namespace) -> List[str]:
+    return [
+        args.python_exe,
+        str(args.scripts_dir / "auto_defense_daemon.py"),
+        *common_mysql_args(args),
+        "--poll-seconds", "2",
+        "--log-file", "output/auto_defense_daemon.log",
+    ]
+
+
 def start(command: List[str], name: str, cwd: Path) -> subprocess.Popen:
     proc = subprocess.Popen(command, cwd=str(cwd), text=True, encoding="utf-8", errors="replace")
     log(f"started {name} pid={proc.pid}")
@@ -196,6 +206,7 @@ def main() -> None:
         "ai": None,
         "sensor": None,
         "neo4j": None,
+        "auto-defense": None,
     }
     active_model = ""
     active_interface = ""
@@ -247,6 +258,8 @@ def main() -> None:
             if args.neo4j_url and args.neo4j_password:
                 if processes["neo4j"] is None or processes["neo4j"].poll() is not None:
                     processes["neo4j"] = start(neo4j_command(args), "neo4j", project_root)
+            if processes["auto-defense"] is None or processes["auto-defense"].poll() is not None:
+                processes["auto-defense"] = start(auto_defense_command(args), "auto-defense", project_root)
             time.sleep(3)
     except KeyboardInterrupt:
         log("shutdown requested")

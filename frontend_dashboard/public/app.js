@@ -183,6 +183,12 @@ const state = {
       total: 0,
       items: [],
     },
+    defense: {
+      enabled: false,
+      minimumRisk: "critical",
+      blockedCount: 0,
+      enforcement: "windows_firewall_bidirectional",
+    },
   },
   admin: {
     summary: null,
@@ -245,6 +251,9 @@ const state = {
     graph: null,
     status: "",
     chainMode: "aggregate",
+    scopeMode: "single_ip",
+    clusterWindowMinutes: 60,
+    clusterLookbackHours: 720,
   },
 };
 
@@ -1753,6 +1762,18 @@ function renderSituationView() {
         <p>将同一来源在短时间内的扫描、凭据攻击与漏洞利用关联为一条可解释攻击链。</p>
       </div>
       <div class="situation-hero-actions">
+        <button id="btnSituationScope" class="situation-scope-toggle" type="button" aria-pressed="false">
+          <span class="scope-toggle-icon">◎</span><span><b>多代理聚合</b><small>识别高频换 IP</small></span>
+        </button>
+        <label id="situationClusterWindowWrap" class="situation-filter hidden">聚合时间
+          <select id="situationClusterWindow">
+            <option value="30">30 分钟</option>
+            <option value="60">1 小时</option>
+            <option value="180">3 小时</option>
+            <option value="360">6 小时</option>
+            <option value="1440">24 小时</option>
+          </select>
+        </label>
         <label class="situation-filter">状态
           <select id="situationStatusFilter">
             <option value="">全部</option>
@@ -1769,7 +1790,7 @@ function renderSituationView() {
     <section class="situation-workspace">
       <aside class="situation-list-panel">
         <div class="situation-panel-title">
-          <div><span>最近攻击者</span><small id="situationCount">正在加载</small></div>
+          <div><span id="situationListTitle">最近攻击者</span><small id="situationCount">正在加载</small></div>
           <span class="live-pulse" aria-label="实时更新"></span>
         </div>
         <div id="situationList" class="situation-list">
@@ -1825,6 +1846,19 @@ function renderSituationView() {
     await refreshSituationData({ preserveSelection: false });
   });
   document.getElementById("btnSituationRefresh")?.addEventListener("click", () => refreshSituationData({ preserveSelection: true }));
+  const clusterWindow = document.getElementById("situationClusterWindow");
+  if (clusterWindow) clusterWindow.value = String(state.situations.clusterWindowMinutes);
+  clusterWindow?.addEventListener("change", async (event) => {
+    state.situations.clusterWindowMinutes = Number(event.target.value || 60);
+    state.situations.selectedId = "";
+    await refreshSituationData({ preserveSelection: false });
+  });
+  document.getElementById("btnSituationScope")?.addEventListener("click", async () => {
+    state.situations.scopeMode = state.situations.scopeMode === "single_ip" ? "cross_ip" : "single_ip";
+    state.situations.selectedId = "";
+    syncSituationScopeMode();
+    await refreshSituationData({ preserveSelection: false });
+  });
   document.getElementById("btnSituationReanalyze")?.addEventListener("click", reanalyzeSelectedSituation);
   document.querySelectorAll("[data-chain-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1834,7 +1868,28 @@ function renderSituationView() {
     });
   });
   syncSituationChainMode();
+  syncSituationScopeMode();
   refreshSituationData({ preserveSelection: true }).catch((err) => renderSituationFailure(err));
+}
+
+function syncSituationScopeMode() {
+  const crossIp = state.situations.scopeMode === "cross_ip";
+  const button = document.getElementById("btnSituationScope");
+  button?.classList.toggle("active", crossIp);
+  button?.setAttribute("aria-pressed", crossIp ? "true" : "false");
+  if (button) {
+    button.querySelector("b").textContent = crossIp ? "返回单 IP 态势" : "多代理聚合";
+    button.querySelector("small").textContent = crossIp ? "当前汇总多个来源" : "识别高频换 IP";
+  }
+  document.getElementById("situationClusterWindowWrap")?.classList.toggle("hidden", !crossIp);
+  const heading = document.querySelector(".situation-hero h2");
+  const description = document.querySelector(".situation-hero p");
+  if (heading) heading.textContent = crossIp ? "多代理协同态势" : "攻击者连续态势";
+  const listTitle = document.getElementById("situationListTitle");
+  if (listTitle) listTitle.textContent = crossIp ? "最近代理集群" : "最近攻击者";
+  if (description) description.textContent = crossIp
+    ? "跨来源关联同一目标在时间窗内的攻击动作，识别代理池轮换与分布式协同行为。"
+    : "将同一来源在短时间内的扫描、凭据攻击与漏洞利用关联为一条可解释攻击链。";
 }
 
 function syncSituationChainMode() {
@@ -1850,14 +1905,17 @@ function renderSituationSkeleton(count) {
 }
 
 async function refreshSituationData({ preserveSelection = true } = {}) {
-  const query = new URLSearchParams({ limit: "80" });
+  const crossIp = state.situations.scopeMode === "cross_ip";
+  const query = new URLSearchParams(crossIp
+    ? { window_minutes: String(state.situations.clusterWindowMinutes), lookback_hours: String(state.situations.clusterLookbackHours) }
+    : { limit: "80" });
   if (state.situations.status) query.set("status", state.situations.status);
-  const data = await api(`/api/v2/situations?${query.toString()}`);
+  const data = await api(`${crossIp ? "/api/v2/situation-clusters" : "/api/v2/situations"}?${query.toString()}`);
   if (state.currentView !== "situations") return;
   state.situations.items = Array.isArray(data.items) ? data.items : [];
-  const selectedStillExists = state.situations.items.some((item) => item.situation_id === state.situations.selectedId);
+  const selectedStillExists = state.situations.items.some((item) => situationItemId(item) === state.situations.selectedId);
   if (!preserveSelection || !selectedStillExists) {
-    state.situations.selectedId = state.situations.items[0]?.situation_id || "";
+    state.situations.selectedId = situationItemId(state.situations.items[0]);
   }
   renderSituationList();
   if (state.situations.selectedId) {
@@ -1867,24 +1925,30 @@ async function refreshSituationData({ preserveSelection = true } = {}) {
   }
 }
 
+function situationItemId(item) {
+  return String(item?.cluster_id || item?.situation_id || "");
+}
+
 function renderSituationList() {
   const container = document.getElementById("situationList");
   const count = document.getElementById("situationCount");
-  if (count) count.textContent = `${state.situations.items.length} 条关联会话`;
+  const crossIp = state.situations.scopeMode === "cross_ip";
+  if (count) count.textContent = `${state.situations.items.length} 条${crossIp ? "代理集群" : "关联会话"}`;
   if (!container) return;
   if (!state.situations.items.length) {
-    container.innerHTML = `<div class="situation-list-empty"><b>暂无连续攻击态势</b><span>单一请求仍会保留在详情信息中；至少三种不同动作才会形成攻击链。</span></div>`;
+    container.innerHTML = `<div class="situation-list-empty"><b>${crossIp ? "暂无多代理协同态势" : "暂无连续攻击态势"}</b><span>${crossIp ? "同一目标在时间窗内至少出现两个来源和三类动作后才会聚合，避免误拼无关攻击。" : "单一请求仍会保留在详情信息中；至少三种不同动作才会形成攻击链。"}</span></div>`;
     return;
   }
   container.innerHTML = state.situations.items
     .map((item, index) => {
-      const active = item.situation_id === state.situations.selectedId;
+      const itemId = situationItemId(item);
+      const active = itemId === state.situations.selectedId;
       return `
-        <button class="situation-list-item ${active ? "active" : ""}" data-situation-id="${escapeHtml(item.situation_id)}" type="button" style="--delay:${Math.min(index, 8) * 38}ms">
+        <button class="situation-list-item ${active ? "active" : ""}" data-situation-id="${escapeHtml(itemId)}" type="button" style="--delay:${Math.min(index, 8) * 38}ms">
           <span class="situation-list-index">${String(index + 1).padStart(2, "0")}</span>
           <span class="situation-list-copy">
-            <strong>${escapeHtml(item.source_ip || "未知来源")}</strong>
-            <small>${escapeHtml(formatSituationStage(item.current_stage))} · ${Number(item.distinct_action_types || 0)} 类动作 · ${Number(item.total_action_count || 0)} 次</small>
+            <strong>${escapeHtml(crossIp ? `${Number(item.source_ips?.length || 0)} 个来源 IP` : (item.source_ip || "未知来源"))}</strong>
+            <small>${escapeHtml(formatSituationStage(item.current_stage))} · ${Number(item.distinct_action_types || 0)} 类动作 · ${Number(item.total_action_count || 0)} 次${crossIp && item.proxy_rotation_suspected ? " · 疑似代理轮换" : ""}</small>
             <time>${escapeHtml(formatDateTime(item.last_action_at, false))}</time>
           </span>
           <span class="situation-risk-tag ${escapeHtml(item.risk_level || "low")}">${escapeHtml(formatRiskLevel(item.risk_level))}</span>
@@ -1901,10 +1965,23 @@ function renderSituationList() {
 }
 
 async function loadSituationDetail(situationId) {
-  const [detailData, graphData] = await Promise.all([
-    api(`/api/v2/situations/${encodeURIComponent(situationId)}`),
-    api(`/api/v2/situations/${encodeURIComponent(situationId)}/graph`),
-  ]);
+  const crossIp = state.situations.scopeMode === "cross_ip";
+  let detailData;
+  let graphData;
+  if (crossIp) {
+    const query = new URLSearchParams({
+      window_minutes: String(state.situations.clusterWindowMinutes),
+      lookback_hours: String(state.situations.clusterLookbackHours),
+    });
+    const response = await api(`/api/v2/situation-clusters/${encodeURIComponent(situationId)}?${query.toString()}`);
+    detailData = response;
+    graphData = response.graph || {};
+  } else {
+    [detailData, graphData] = await Promise.all([
+      api(`/api/v2/situations/${encodeURIComponent(situationId)}`),
+      api(`/api/v2/situations/${encodeURIComponent(situationId)}/graph`),
+    ]);
+  }
   if (state.currentView !== "situations" || situationId !== state.situations.selectedId) return;
   state.situations.detail = detailData.item || null;
   state.situations.graph = graphData || null;
@@ -1917,7 +1994,9 @@ function renderSituationDetail() {
   if (!detail || !graph) return renderSituationEmptyState();
   const title = document.getElementById("situationChainTitle");
   const subtitle = document.getElementById("situationChainSubtitle");
-  if (title) title.textContent = `${detail.source_ip} 攻击链路`;
+  if (title) title.textContent = state.situations.scopeMode === "cross_ip"
+    ? `${Number(detail.source_ips?.length || 0)} 个代理来源融合链路`
+    : `${detail.source_ip} 攻击链路`;
   if (subtitle) subtitle.textContent = `${formatDateTime(detail.started_at, false)} 至 ${formatDateTime(detail.last_action_at, false)}`;
   renderSituationStagePills(graph.nodes || []);
   renderSituationRisk(detail);
@@ -1946,9 +2025,10 @@ function renderSituationRisk(detail) {
       <div><span>攻击阶段</span><strong>${escapeHtml(formatSituationStage(detail.current_stage))}</strong></div>
       <div><span>动作种类</span><strong>${Number(detail.distinct_action_types || 0)}</strong></div>
       <div><span>累计频次</span><strong>${Number(detail.total_action_count || 0)}</strong></div>
-      <div><span>会话状态</span><strong>${escapeHtml(statusMap[detail.status] || detail.status || "-")}</strong></div>
+      <div><span>${detail.mode === "cross_ip" ? "来源 IP" : "会话状态"}</span><strong>${detail.mode === "cross_ip" ? Number(detail.source_ips?.length || 0) : escapeHtml(statusMap[detail.status] || detail.status || "-")}</strong></div>
     </div>
-    <div class="situation-risk-actions ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}">
+    ${detail.mode === "cross_ip" ? `<div class="situation-proxy-indicator ${detail.proxy_rotation_suspected ? "alert" : ""}"><i></i><span>${detail.proxy_rotation_suspected ? "疑似代理池轮换" : "多来源时间关联"}</span></div>` : ""}
+    <div class="situation-risk-actions ${state.profile?.role === ROLE_ADMIN && detail.mode !== "cross_ip" ? "" : "hidden"}">
       <button class="btn btn-ghost btn-mini" data-situation-status="handled" type="button">标记已处置</button>
       <button class="btn btn-ghost btn-mini" data-situation-status="ignored" type="button">忽略</button>
     </div>`;
@@ -1962,7 +2042,11 @@ function renderSituationAiReport(detail) {
   const meta = document.getElementById("situationAiMeta");
   if (!container) return;
   const report = detail.ai_report;
-  if (meta) meta.textContent = formatAiStatus(detail.ai_status, report);
+  if (meta) {
+    meta.textContent = detail.mode === "cross_ip" && report?.generated_by === "cross_ip_correlation_engine"
+      ? "跨 IP 融合引擎 · 证据可回溯"
+      : formatAiStatus(detail.ai_status, report);
+  }
   if (!report) {
     container.innerHTML = `<div class="situation-report-placeholder"><i class="live-pulse"></i> 研判任务已入队，Ollama 完成后将自动刷新</div>`;
     return;
@@ -2014,7 +2098,7 @@ function renderSituationEvidence(actions) {
       const ports = Array.isArray(metadata.ports) ? metadata.ports.slice(0, 12).join(", ") : "";
       return `
         <details class="situation-evidence-item" ${index === 0 ? "open" : ""}>
-          <summary><b>${Number(action.sequence_no || index + 1)}</b><span><strong>${escapeHtml(catalogName)}</strong><small>${escapeHtml(action.sensor || "unknown")} · ${Number(action.action_count || 1)} 次</small></span><time>${escapeHtml(formatDateTime(action.occurred_at, false))}</time></summary>
+          <summary><b>${Number(action.sequence_no || index + 1)}</b><span><strong>${escapeHtml(catalogName)}</strong><small>${escapeHtml(action.source_ip ? `${action.source_ip} · ` : "")}${escapeHtml(action.sensor || "unknown")} · ${Number(action.action_count || action.count || 1)} 次</small></span><time>${escapeHtml(formatDateTime(action.occurred_at, false))}</time></summary>
           <div><p>目标接口：${escapeHtml(action.target_interface || "-")}</p><p>置信度：${Math.round(Number(action.confidence || 0) * 100)}%</p>${ports ? `<p>目标端口：${escapeHtml(ports)}</p>` : ""}<p>证据引用：${escapeHtml((action.evidence_refs || []).join("、") || "已留存于原始事件")}</p></div>
         </details>`;
     })
@@ -2174,14 +2258,20 @@ function renderSituationEmptyState() {
   const empty = document.getElementById("situationChainEmpty");
   if (empty) {
     empty.classList.remove("hidden");
-    empty.innerHTML = `<div class="situation-empty-radar"><i></i><i></i><i></i></div><b>正在观察跨阶段行为</b><span>同一来源在 30 分钟内出现至少三种不同动作后，将形成攻击者态势。</span>`;
+    empty.innerHTML = `<div class="situation-empty-radar"><i></i><i></i><i></i></div><b>正在观察跨阶段行为</b><span>${state.situations.scopeMode === "cross_ip" ? "同一目标在所选时间窗内出现多个来源和至少三种动作后，将形成代理集群态势。" : "同一来源在 30 分钟内出现至少三种不同动作后，将形成攻击者态势。"}</span>`;
   }
   const title = document.getElementById("situationChainTitle");
   if (title) title.textContent = "攻击链路";
+  const subtitle = document.getElementById("situationChainSubtitle");
+  if (subtitle) subtitle.textContent = state.situations.scopeMode === "cross_ip" ? "选择一个代理集群查看跨来源动作推进" : "选择一个攻击者查看动作推进";
+  const stagePills = document.getElementById("situationStagePills");
+  if (stagePills) stagePills.innerHTML = "";
   const risk = document.getElementById("situationRiskSummary");
   if (risk) risk.innerHTML = `<div class="situation-risk-orbit"><strong>-</strong><span>等待态势</span></div><div class="situation-sensor-note"><b>数据来自真实传感器</b><span>HTTP / SSH / TCP SYN</span></div>`;
   const report = document.getElementById("situationAiReport");
   if (report) report.innerHTML = `<div class="situation-report-placeholder">暂无符合关联条件的攻击链，不生成虚构研判。</div>`;
+  const reportMeta = document.getElementById("situationAiMeta");
+  if (reportMeta) reportMeta.textContent = state.situations.scopeMode === "cross_ip" ? "跨 IP 融合研判" : "Ollama + RAG 可解释研判";
   const evidence = document.getElementById("situationEvidence");
   if (evidence) evidence.innerHTML = `<div class="situation-evidence-empty">证据将在动作发生后按时间顺序列出</div>`;
 }
@@ -2200,9 +2290,21 @@ async function reanalyzeSelectedSituation() {
     button.textContent = "研判中...";
   }
   try {
-    await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/reanalyze`, { method: "POST", body: {} });
+    if (state.situations.scopeMode === "cross_ip") {
+      const response = await api(`/api/v2/situation-clusters/${encodeURIComponent(state.situations.selectedId)}/reanalyze`, {
+        method: "POST",
+        body: { window_minutes: state.situations.clusterWindowMinutes, lookback_hours: state.situations.clusterLookbackHours },
+      });
+      if (state.situations.detail) {
+        state.situations.detail.ai_report = response.report;
+        state.situations.detail.ai_status = response.ai_status;
+        renderSituationAiReport(state.situations.detail);
+      }
+    } else {
+      await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/reanalyze`, { method: "POST", body: {} });
+    }
     showToast("AI 态势报告已更新");
-    await loadSituationDetail(state.situations.selectedId);
+    if (state.situations.scopeMode !== "cross_ip") await loadSituationDetail(state.situations.selectedId);
   } catch (error) {
     showToast(`重新研判失败：${error.message}`);
   } finally {
@@ -2321,6 +2423,22 @@ function renderProQueryView() {
       </article>
 
       <article class="panel pro-detail-panel">
+        <section class="auto-defense-card" id="autoDefenseCard">
+          <div class="auto-defense-head">
+            <div><span class="auto-defense-kicker">ACTIVE RESPONSE</span><h3>自动防御</h3><p>Windows 防火墙入站、出站双向联动</p></div>
+            <label class="defense-switch ${canHandle ? "" : "disabled"}" title="${canHandle ? "开启后自动封禁达到风险阈值的来源 IP" : "仅管理员可更改自动防御策略"}">
+              <input id="auto_defense_toggle" type="checkbox" ${canHandle ? "" : "disabled"} />
+              <span></span>
+            </label>
+          </div>
+          <div class="auto-defense-stats">
+            <div><span id="auto_defense_state_dot" class="defense-state-dot"></span><small>策略状态</small><strong id="auto_defense_state">读取中</strong></div>
+            <div><small>触发阈值</small><select id="auto_defense_risk" ${canHandle ? "" : "disabled"}><option value="critical">仅严重</option><option value="high">高危及以上</option></select></div>
+            <div><small>已封禁</small><strong id="auto_defense_count">0</strong></div>
+          </div>
+          <div class="auto-defense-list-head"><span>最近封禁</span><button id="auto_defense_view_all" class="text-button" type="button">查看完整列表 ↓</button></div>
+          <div id="auto_defense_recent" class="auto-defense-recent"><span>暂无封禁记录</span></div>
+        </section>
         <div class="panel-head"><h3 class="panel-title">事件详情</h3><span class="panel-sub" id="pro_detail_hint">请选择左侧事件</span></div>
         <div id="pro_event_detail" class="detail-card">暂无详情</div>
         <div class="note-box">
@@ -2414,6 +2532,11 @@ function renderProQueryView() {
     loadProEvents().catch((err) => showToast(err.message));
   });
   document.getElementById("blocked_ip_refresh")?.addEventListener("click", () => loadBlockedIpList(true));
+  document.getElementById("auto_defense_toggle")?.addEventListener("change", updateAutoDefenseConfig);
+  document.getElementById("auto_defense_risk")?.addEventListener("change", updateAutoDefenseConfig);
+  document.getElementById("auto_defense_view_all")?.addEventListener("click", () => {
+    document.querySelector(".blocked-ip-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   document.getElementById("candidate_refresh")?.addEventListener("click", () => loadProCandidates(true));
   document.getElementById("candidate_q")?.addEventListener("keyup", (ev) => {
     if (ev.key === "Enter") loadProCandidates(true).catch((err) => showToast(err.message));
@@ -2479,12 +2602,60 @@ function renderProQueryView() {
   loadProEvents().catch((err) => showToast(`加载事件失败：${err.message}`));
   loadProCandidates(true).catch((err) => showToast(`加载候选失败：${err.message}`));
   loadBlockedIpList(true).catch((err) => showToast(`加载封禁列表失败：${err.message}`));
+  loadAutoDefenseStatus().catch((err) => showToast(`加载自动防御失败：${err.message}`));
 }
 
 async function refreshProWorkspace() {
   await loadProEvents();
   await loadProCandidates();
   await loadBlockedIpList();
+  await loadAutoDefenseStatus();
+}
+
+async function loadAutoDefenseStatus() {
+  const data = await api("/api/v2/defense/status");
+  state.pro.defense.enabled = Boolean(data.enabled);
+  state.pro.defense.minimumRisk = String(data.minimum_risk || "critical");
+  state.pro.defense.blockedCount = Number(data.blocked_count || 0);
+  state.pro.defense.enforcement = String(data.enforcement || "windows_firewall_bidirectional");
+  renderAutoDefensePanel();
+}
+
+function renderAutoDefensePanel() {
+  const data = state.pro.defense;
+  const toggle = document.getElementById("auto_defense_toggle");
+  const risk = document.getElementById("auto_defense_risk");
+  const stateText = document.getElementById("auto_defense_state");
+  const stateDot = document.getElementById("auto_defense_state_dot");
+  const count = document.getElementById("auto_defense_count");
+  if (toggle) toggle.checked = data.enabled;
+  if (risk) risk.value = data.minimumRisk;
+  if (stateText) stateText.textContent = data.enabled ? "持续防御中" : "已关闭";
+  stateDot?.classList.toggle("active", data.enabled);
+  if (count) count.textContent = String(data.blockedCount);
+  renderAutoDefenseRecent();
+}
+
+async function updateAutoDefenseConfig() {
+  if (state.profile?.role !== ROLE_ADMIN) return;
+  const toggle = document.getElementById("auto_defense_toggle");
+  const risk = document.getElementById("auto_defense_risk");
+  if (toggle) toggle.disabled = true;
+  if (risk) risk.disabled = true;
+  try {
+    await api("/api/v2/defense/config", {
+      method: "PUT",
+      body: { enabled: Boolean(toggle?.checked), minimum_risk: String(risk?.value || "critical"), allow_private: false },
+    });
+    await loadAutoDefenseStatus();
+    showToast(state.pro.defense.enabled ? "自动防御已开启，将持续执行双向封禁" : "自动防御已关闭，现有封禁规则保持不变");
+  } catch (error) {
+    showToast(`自动防御配置失败：${error.message}`);
+    await loadAutoDefenseStatus();
+  } finally {
+    if (toggle) toggle.disabled = false;
+    if (risk) risk.disabled = false;
+  }
 }
 
 async function initProOptions() {
@@ -2666,7 +2837,7 @@ function renderBlockedIpTable() {
         <td>${escapeHtml(x.source_event_id || "-")}</td>
         <td>${escapeHtml(x.reason || "-")}</td>
         <td>${escapeHtml(x.blocked_by || "-")} (${escapeHtml(x.blocked_role || "-")})</td>
-        <td>${escapeHtml(x.blocked_at || "-")}</td>
+        <td>${escapeHtml(x.blocked_at || "-")}<span class="firewall-proof ${x.firewall_active ? "active" : "missing"}">${x.firewall_active ? "双向规则生效" : "规则待修复"}</span></td>
         <td><button class="btn btn-ghost" data-unblock-ip="${escapeHtml(x.ip_address || "")}">解封该IP</button></td>
       </tr>
     `
@@ -2686,6 +2857,37 @@ function renderBlockedIpTable() {
         await loadBlockedIpList();
       } catch (err) {
         showToast(`解封失败：${err.message}`);
+      }
+    });
+  });
+  state.pro.defense.blockedCount = state.pro.blocked.total;
+  renderAutoDefenseRecent();
+}
+
+function renderAutoDefenseRecent() {
+  const container = document.getElementById("auto_defense_recent");
+  if (!container) return;
+  const items = state.pro.blocked.items.slice(0, 3);
+  if (!items.length) {
+    container.innerHTML = `<span>暂无封禁记录</span>`;
+    return;
+  }
+  container.innerHTML = items.map((item) => `
+    <div><i class="${item.firewall_active ? "active" : "missing"}"></i><span><b>${escapeHtml(item.ip_address || "-")}</b><small>${escapeHtml(item.reason || "人工封禁")}</small></span><button type="button" data-defense-unblock="${escapeHtml(item.ip_address || "")}">解封</button></div>
+  `).join("");
+  container.querySelectorAll("[data-defense-unblock]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const ip = String(button.dataset.defenseUnblock || "");
+      if (!ip) return;
+      button.disabled = true;
+      try {
+        await api("/api/v2/pro/blocked-ips/unblock", { method: "POST", body: { ip_address: ip, reason: "manual_unblock_from_auto_defense" } });
+        showToast(`已解除 ${ip} 的入站与出站封禁`);
+        await Promise.all([loadBlockedIpList(true), loadAutoDefenseStatus(), loadProEvents()]);
+      } catch (error) {
+        showToast(`解封失败：${error.message}`);
+      } finally {
+        button.disabled = false;
       }
     });
   });

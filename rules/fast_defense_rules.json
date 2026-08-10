@@ -1,0 +1,191 @@
+[
+  {
+    "id": "FAST-SQLI-UNION-001",
+    "category": "SQL_INJECTION",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["\\bunion(?:\\s+all)?\\s+select\\b", "(?:--|#|/\\*|\\bfrom\\b|\\bnull\\b|\\bconcat\\s*\\()"]
+  },
+  {
+    "id": "FAST-SQLI-BOOLEAN-002",
+    "category": "SQL_INJECTION",
+    "score": 10,
+    "instant_block": true,
+    "all_regex": ["(?:['\"]\\s*)?(?:or|and)\\s+['\"]?[0-9a-z_]+['\"]?\\s*=\\s*['\"]?[0-9a-z_]+", "(?:--|#|/\\*|['\"])"]
+  },
+  {
+    "id": "FAST-SQLI-TIME-003",
+    "category": "SQL_INJECTION",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["\\b(?:sleep|benchmark|pg_sleep|waitfor\\s+delay)\\s*\\(?", "(?:select|and|or|;|')"]
+  },
+  {
+    "id": "FAST-SQLI-ERROR-004",
+    "category": "SQL_INJECTION",
+    "score": 11,
+    "instant_block": true,
+    "any_regex": ["\\bextractvalue\\s*\\([^)]*concat", "\\bupdatexml\\s*\\([^)]*concat", "\\bexp\\s*\\(~?\\s*select", "\\bjson_keys\\s*\\([^)]*select"]
+  },
+  {
+    "id": "FAST-SQLI-FILE-005",
+    "category": "SQL_INJECTION",
+    "score": 13,
+    "instant_block": true,
+    "any_regex": ["\\bload_file\\s*\\(", "\\binto\\s+(?:out|dump)file\\b"]
+  },
+  {
+    "id": "FAST-XSS-SCRIPT-101",
+    "category": "XSS",
+    "score": 11,
+    "instant_block": true,
+    "any_regex": ["<\\s*script\\b[^>]*>", "<\\s*/\\s*script\\s*>"]
+  },
+  {
+    "id": "FAST-XSS-EVENT-102",
+    "category": "XSS",
+    "score": 11,
+    "instant_block": true,
+    "all_regex": ["<\\s*(?:img|svg|iframe|body|details|video|audio|input|marquee)\\b", "\\bon(?:error|load|click|mouseover|focus|begin|animationstart)\\s*="]
+  },
+  {
+    "id": "FAST-XSS-PROTOCOL-103",
+    "category": "XSS",
+    "score": 10,
+    "instant_block": true,
+    "all_regex": ["(?:href|src|action|formaction)\\s*=", "(?:javascript|vbscript)\\s*:"]
+  },
+  {
+    "id": "FAST-XSS-SRCDOC-104",
+    "category": "XSS",
+    "score": 10,
+    "instant_block": true,
+    "all_regex": ["<\\s*iframe\\b", "\\bsrcdoc\\s*=", "(?:<|javascript:|onload)"]
+  },
+  {
+    "id": "FAST-CMD-SHELL-201",
+    "category": "COMMAND_INJECTION",
+    "score": 14,
+    "instant_block": true,
+    "all_regex": ["(?:;|\\|\\||&&|`|\\$\\()\\s*", "\\b(?:whoami|uname|id|cat|curl|wget|nc|netcat|bash|sh|powershell|cmd\\.exe|certutil|bitsadmin)\\b"]
+  },
+  {
+    "id": "FAST-CMD-WINDOWS-202",
+    "category": "COMMAND_INJECTION",
+    "score": 14,
+    "instant_block": true,
+    "any_regex": ["\\bpowershell(?:\\.exe)?\\s+(?:-[a-z]+\\s+)*(?:-enc|-encodedcommand)\\b", "\\bcmd(?:\\.exe)?\\s*/[ck]\\s+", "\\bcertutil\\s+-urlcache\\b", "\\bbitsadmin\\s+/transfer\\b"]
+  },
+  {
+    "id": "FAST-CMD-UNIX-203",
+    "category": "COMMAND_INJECTION",
+    "score": 13,
+    "instant_block": true,
+    "any_regex": ["/bin/(?:ba)?sh\\s+-c\\s+", "\\b(?:curl|wget)\\s+https?://[^\\s]+\\s*\\|\\s*(?:ba)?sh\\b", "\\bnc\\s+-e\\s+/bin/(?:ba)?sh\\b"]
+  },
+  {
+    "id": "FAST-TRAVERSAL-301",
+    "category": "PATH_TRAVERSAL",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["(?:\\.\\.[/\\\\]){2,}", "(?:etc[/\\\\](?:passwd|shadow|hosts)|windows[/\\\\](?:win\\.ini|system32)|boot\\.ini|proc[/\\\\]self)"]
+  },
+  {
+    "id": "FAST-TRAVERSAL-ENCODED-302",
+    "category": "PATH_TRAVERSAL",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["(?:%2e|\\.){2}(?:%2f|%5c|[/\\\\])", "(?:passwd|shadow|win\\.ini|system32|boot\\.ini|web\\.config)"]
+  },
+  {
+    "id": "FAST-XXE-401",
+    "category": "XXE",
+    "score": 14,
+    "instant_block": true,
+    "all_regex": ["<!doctype\\s+[^>]*\\[", "<!entity\\s+", "\\bsystem\\s+['\"](?:file|https?|ftp)://"]
+  },
+  {
+    "id": "FAST-XXE-PARAM-402",
+    "category": "XXE",
+    "score": 13,
+    "instant_block": true,
+    "all_regex": ["<!entity\\s+%\\s+", "\\bpublic\\s+['\"]|\\bsystem\\s+['\"]", "%[a-z0-9_.-]+;"]
+  },
+  {
+    "id": "FAST-SSRF-METADATA-501",
+    "category": "SSRF",
+    "score": 13,
+    "instant_block": true,
+    "all_regex": ["(?:url|uri|target|dest|proxy|fetch|callback|redirect|next)\\s*[=:]", "https?://(?:169\\.254\\.169\\.254|100\\.100\\.100\\.200)(?:[/?:]|$)"]
+  },
+  {
+    "id": "FAST-SSRF-SCHEME-502",
+    "category": "SSRF",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["(?:url|uri|target|dest|proxy|fetch|callback)\\s*[=:]", "(?:file|gopher|dict|ldap)://"]
+  },
+  {
+    "id": "FAST-SSTI-JINJA-601",
+    "category": "SSTI",
+    "score": 13,
+    "instant_block": true,
+    "all_regex": ["\\{\\{.*\\}\\}", "(?:__class__|__mro__|__subclasses__|config\\b|cycler\\b|lipsum\\b|self\\._template_reference)"]
+  },
+  {
+    "id": "FAST-SSTI-FREEMARKER-602",
+    "category": "SSTI",
+    "score": 13,
+    "instant_block": true,
+    "any_regex": ["<#assign[^>]+freemarker\\.template\\.utility\\.execute", "\\$\\{[^}]*?new\\s*\\(\\s*['\"]freemarker\\.template\\.utility\\.execute"]
+  },
+  {
+    "id": "FAST-DESER-JAVA-701",
+    "category": "DESERIALIZATION",
+    "score": 14,
+    "instant_block": true,
+    "any_regex": ["(?:rO0AB|aced0005).{8,}", "org\\.apache\\.commons\\.collections\\.functors\\.(?:invokertransformer|chainedtransformer)"]
+  },
+  {
+    "id": "FAST-DESER-PHP-702",
+    "category": "DESERIALIZATION",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["(?:^|[=&;])o:[0-9]+:['\"][a-z0-9_\\\\]+['\"]:[0-9]+:\\{", "(?:__wakeup|__destruct|__toString|protected|private)"]
+  },
+  {
+    "id": "FAST-LOG4J-801",
+    "category": "LOG4J_NDAY",
+    "score": 15,
+    "instant_block": true,
+    "any_regex": ["\\$\\{(?:jndi|${lower:j}${lower:n}${lower:d}${lower:i})\\s*:(?:ldap|rmi|dns|iiop|nis|nds|corba)[:/]", "\\$\\{jndi:[^}]+\\}"]
+  },
+  {
+    "id": "FAST-SPRING-802",
+    "category": "SPRING_NDAY",
+    "score": 14,
+    "instant_block": true,
+    "all_regex": ["class\\.module\\.classloader", "(?:resources\\.context\\.parent\\.pipeline|accesslogvalve|pattern|suffix|directory)"]
+  },
+  {
+    "id": "FAST-FASTJSON-803",
+    "category": "FASTJSON_NDAY",
+    "score": 13,
+    "instant_block": true,
+    "all_regex": ["['\"]@type['\"]\\s*:", "(?:com\\.sun\\.rowset\\.jdbcrowsetimpl|org\\.apache\\.xbean\\.propertyeditor|templatesimpl|jndi|ldap://|rmi://)"]
+  },
+  {
+    "id": "FAST-SHIRO-804",
+    "category": "SHIRO_NDAY",
+    "score": 12,
+    "instant_block": true,
+    "all_regex": ["rememberme\\s*[=:]", "(?:rO0AB|aced0005|org\\.apache\\.commons\\.collections)"]
+  },
+  {
+    "id": "FAST-WEBSHELL-UPLOAD-901",
+    "category": "WEB_SHELL",
+    "score": 15,
+    "instant_block": true,
+    "all_regex": ["filename\\s*=\\s*['\"][^'\"]+\\.(?:php[3457]?|phtml|phar|jsp|jspx|asp|aspx|ashx|asmx|cer)['\"]", "(?:<\\?php|<%@\\s*page|<%\\s*eval|runtime\\.getruntime\\(\\)\\.exec|request\\[['\"](?:cmd|pass))"]
+  }
+]
