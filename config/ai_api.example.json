@@ -1,0 +1,9 @@
+{
+  "api_key": "sk-your-dashscope-key",
+  "base_url": "https://your-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "rerank_url": "https://your-workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1/reranks",
+  "embedding_model": "text-embedding-v4",
+  "rerank_model": "qwen3-rerank",
+  "embedding_dimensions": 1024,
+  "timeout_seconds": 90
+}

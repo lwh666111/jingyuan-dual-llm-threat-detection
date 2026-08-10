@@ -5,3 +5,9 @@ torch
 joblib
 PyMySQL
 Flask
+PyMuPDF>=1.24
+python-docx>=1.1
+python-pptx>=1.0
+openpyxl>=3.1
+jieba>=0.42
+lancedb>=0.24,<0.30

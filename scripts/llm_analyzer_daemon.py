@@ -204,6 +204,52 @@ def retrieve_rag_docs(db_path: Path, query_text: str, top_k: int = 3) -> List[Di
         return [dict(r) for r in cur.fetchall()]
 
 
+def retrieve_advanced_rag(args, query_text: str) -> List[Dict]:
+    """Run the cloud-embedding hybrid retriever and map results to legacy fields."""
+    try:
+        from rag_service import hybrid_search, list_kbs, load_api_config, mysql_connect
+
+        mysql_conf = {
+            "host": args.rag_mysql_host,
+            "port": args.rag_mysql_port,
+            "user": args.rag_mysql_user,
+            "password": args.rag_mysql_password,
+            "database": args.rag_mysql_database,
+        }
+        api_config = load_api_config(args.rag_api_config)
+        if not api_config.get("api_key"):
+            return []
+        with mysql_connect(mysql_conf, autocommit=False) as conn:
+            kbs = list_kbs(conn, include_disabled=False)
+            if not kbs:
+                return []
+            result = hybrid_search(
+                conn,
+                args.rag_data_dir,
+                api_config,
+                int(kbs[0]["id"]),
+                query_text,
+                username="llm-daemon",
+                save_test=False,
+            )
+        return [
+            {
+                "doc_id": f"DOC-{item.get('document_id')}-CHUNK-{item.get('chunk_id')}",
+                "title": item.get("title_path") or item.get("document_name") or "知识片段",
+                "attack_type": "",
+                "evidence": item.get("content") or "",
+                "mitigation": "",
+                "severity": "",
+                "source": item.get("document_name") or "advanced-rag",
+                "score": item.get("score") or 0,
+            }
+            for item in (result.get("items") or [])[: max(1, int(args.rag_top_k))]
+        ]
+    except Exception as exc:
+        log(f"advanced RAG fallback to legacy: {exc}")
+        return []
+
+
 def format_rag_context(rows: List[Dict], max_chars: int = 3200) -> str:
     if not rows:
         return ""
@@ -421,7 +467,9 @@ def process_case(
                 response_text[:1200],
             ]
         )
-        rag_rows = retrieve_rag_docs(args.rag_db_path, query_text=query_text, top_k=args.rag_top_k)
+        rag_rows = retrieve_advanced_rag(args, query_text=query_text)
+        if not rag_rows:
+            rag_rows = retrieve_rag_docs(args.rag_db_path, query_text=query_text, top_k=args.rag_top_k)
         rag_context = format_rag_context(rag_rows, max_chars=args.rag_max_chars)
 
     user_payload = build_user_payload(case_obj, request_text, response_text, src_ip, dst_ip, rag_context=rag_context)
@@ -506,6 +554,13 @@ def main() -> None:
     parser.set_defaults(rag_enable=True)
     parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db 文件路径")
     parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 文件路径")
+    parser.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag", help="高级 RAG 向量与上传目录")
+    parser.add_argument("--rag-api-config", default="config/ai_api.local.json", help="百炼 API 本地配置")
+    parser.add_argument("--rag-mysql-host", default="127.0.0.1")
+    parser.add_argument("--rag-mysql-port", type=int, default=3306)
+    parser.add_argument("--rag-mysql-user", default="root")
+    parser.add_argument("--rag-mysql-password", default="123456")
+    parser.add_argument("--rag-mysql-database", default="traffic_pipeline")
     parser.add_argument("--rag-top-k", type=int, default=3, help="RAG 每次检索条数")
     parser.add_argument("--rag-max-chars", type=int, default=3200, help="注入 LLM 的 RAG 上下文最大字符数")
     parser.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="若 RAG db 不存在则自动构建")
@@ -519,6 +574,8 @@ def main() -> None:
     schema_path = (project_root / args.schema).resolve()
     args.rag_db_path = (project_root / args.rag_db_path).resolve()
     args.rag_seed_file = (project_root / args.rag_seed_file).resolve()
+    args.rag_data_dir = Path(args.rag_data_dir).resolve()
+    args.rag_api_config = (project_root / args.rag_api_config).resolve()
 
     result_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)

@@ -7,13 +7,13 @@
 - 监听指定网卡和端口，抓取完整 HTTP 请求/响应
 - 生成标准化批次文件（`input/1.1.n.txt`）
 - Detection V2 先区分原始日志 / 候选事件 / 攻击事件，再导出高置信攻击（`result/b.n`）
-- Ollama 大模型研判 + SQLite FTS5 RAG 检索增强
+- Ollama 本地研判 + 百炼向量模型 + LanceDB/BM25/RRF/qwen3-rerank 混合 RAG
 - MySQL 持久化（兼容旧三表，并新增 raw/candidate/event/model/rule/behavior 分层表）
 - Flask API（3049）+ Node 前端大屏（1145）
 - 跨传感器攻击态势关联：端口扫描、SSH 爆破、HTTP 漏洞利用按来源 IP 与时间窗串联
 - AI 态势报告：对完整攻击链给出时间线、技术路径、证据强度、影响、失陷判断、结论、调查步骤和分阶段处置建议
 
-## 最新发布（2026-08-04）
+## 最新发布（2026-08-10）
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
@@ -34,7 +34,7 @@
 - 基于完整 HTTP 请求/响应配对的批次采集（非原始切片）
 - 自动检测守护 + LLM 研判守护 + 自动入库守护
 - 前端角色权限：普通用户 / 管理员
-- RAG 文档管理接口：新增、查看详情、编辑保存、删除、重建
+- 企业级 RAG 工作台：多知识库、附件解析、语义切片、向量索引、切片编辑、召回测试、批量回归评估与历史留痕
 - 扩展插件：钓鱼网站检测工具（后端代理调用）
 - 攻击详情支持一键封禁来源 IP
 - 管理员系统配置支持模型/网卡/端口/分组数量/主页背景图配置
@@ -49,6 +49,44 @@
 - 全链路验证靶场：按信息收集、经典漏洞、公开 N-day 特征和未知威胁结构四阶段组织，并提供一键顺序回放
 - 管理员可调参数：动作种类阈值、关联窗口、静默切段、扫描端口阈值和扫描窗口保存后由守护进程动态应用
 - 可选 Neo4j 图镜像：MySQL 保持权威主存储，Neo4j 仅用于图查询与后续溯源扩展；Neo4j 故障不阻断主流程
+
+## 高级 RAG 知识库（2026-08）
+
+“大模型设置”中的知识库管理已升级为完整工作台。管理员可以创建多个相互隔离的知识库，上传 `PDF/DOCX/PPTX/XLSX/Markdown/JSON/CSV/TXT` 文档，查看解析状态与切片，在线修改切片并自动重建向量，还可以执行真实召回测试、维护回归用例并批量查看通过率与失败原因。
+
+检索链路：
+
+```text
+安全事件证据
+ -> text-embedding-v4 云端向量化
+ -> LanceDB 向量召回 + 本地 BM25 关键词召回
+ -> RRF 融合候选
+ -> qwen3-rerank 云端重排
+ -> Top-K 证据片段与来源引用
+ -> 原有 Ollama 态势/事件报告生成
+```
+
+百炼只承担嵌入与重排，不替换现有 Ollama 报告模型。云 API 暂时不可用时，事件研判守护会自动退回旧 SQLite FTS5 检索，不阻断主链路。
+
+1. 将 `config/ai_api.example.json` 复制为 `config/ai_api.local.json`。
+2. 填写自己的百炼 `api_key`、工作空间 `base_url` 和 `rerank_url`。
+3. 不要把 `config/ai_api.local.json` 提交到 Git；该文件已加入 `.gitignore`。
+4. 默认向量和上传文件位于 `D:\JingyuanTrafficPipelineData\rag`，可通过 `--rag-data-dir` 或环境变量 `RAG_DATA_DIR` 修改。
+5. 执行 `python app.py` 后，MySQL 会增量创建 RAG 表并迁移旧 SQLite 知识，不删除旧库。
+
+导入官方安全知识：
+
+```powershell
+python scripts/seed_authoritative_rag.py --data-dir D:\JingyuanTrafficPipelineData\rag
+```
+
+脚本使用三类权威来源，并在首次初始化时建立 SQL 注入、XSS、端口扫描三条基础回归用例：
+
+- OWASP Cheat Sheet Series：`https://github.com/OWASP/CheatSheetSeries`
+- MITRE ATT&CK Enterprise STIX 2.1：`https://github.com/mitre-attack/attack-stix-data`
+- CISA Known Exploited Vulnerabilities：`https://www.cisa.gov/known-exploited-vulnerabilities-catalog`
+
+测试上传文件位于 `test\rag_upload_samples\Web攻击研判知识测试样例.md`。
 
 ## 连续攻击态势
 

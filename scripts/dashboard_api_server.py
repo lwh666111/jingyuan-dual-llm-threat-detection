@@ -32,6 +32,31 @@ from pymysql.cursors import DictCursor
 from situation_ai import analyze_situation
 from situation_core import ACTION_CATALOG, STAGE_LABELS, STAGE_ORDER
 from situation_store import MySQLSettings, MySQLSituationStore
+from rag_service import (
+    MAX_UPLOAD_BYTES as RAG_MAX_UPLOAD_BYTES,
+    SUPPORTED_EXTENSIONS as RAG_SUPPORTED_EXTENSIONS,
+    delete_document as rag2_delete_document,
+    delete_kb as rag2_delete_kb,
+    ensure_default_kb as rag2_ensure_default_kb,
+    ensure_schema as rag2_ensure_schema,
+    get_kb as rag2_get_kb,
+    hybrid_search as rag2_hybrid_search,
+    index_pending_document as rag2_index_pending_document,
+    ingest_file as rag2_ingest_file,
+    list_chunks as rag2_list_chunks,
+    list_documents as rag2_list_documents,
+    list_eval_cases as rag2_list_eval_cases,
+    list_eval_runs as rag2_list_eval_runs,
+    list_kbs as rag2_list_kbs,
+    list_test_history as rag2_list_test_history,
+    load_api_config as rag2_load_api_config,
+    migrate_legacy_sqlite as rag2_migrate_legacy_sqlite,
+    delete_eval_case as rag2_delete_eval_case,
+    run_eval_suite as rag2_run_eval_suite,
+    save_eval_case as rag2_save_eval_case,
+    save_kb as rag2_save_kb,
+    update_chunk as rag2_update_chunk,
+)
 
 try:
     import psutil  # type: ignore
@@ -2213,6 +2238,8 @@ def create_app(
     jwt_ttl_seconds: int = TOKEN_TTL_SECONDS,
     ollama_url: str = "http://127.0.0.1:11434",
     llm_prompt_path: str = "llm/prompts/system_prompt.txt",
+    rag_data_dir: str = "",
+    rag_api_config: str = "config/ai_api.local.json",
 ) -> Flask:
     app = Flask(__name__)
     app.url_map.strict_slashes = False
@@ -2221,6 +2248,9 @@ def create_app(
     app.config["RAG_SEED_PATH"] = str(Path(rag_seed_path).resolve())
     app.config["OLLAMA_URL"] = normalize_ollama_url(ollama_url)
     app.config["LLM_PROMPT_PATH"] = str(resolve_project_path(llm_prompt_path, DEFAULT_LLM_PROMPT_PATH))
+    default_rag_data = Path(os.environ.get("RAG_DATA_DIR") or rag_data_dir or (PROJECT_ROOT / "llm" / "rag" / "runtime"))
+    app.config["RAG_DATA_DIR"] = str(default_rag_data.resolve())
+    app.config["RAG_API_CONFIG_PATH"] = str(resolve_project_path(rag_api_config, PROJECT_ROOT / "config" / "ai_api.local.json"))
     app.config["AUTH_COOKIE_NAME"] = os.environ.get("TP_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
     app.config["AUTH_COOKIE_SECURE"] = str(os.environ.get("TP_AUTH_COOKIE_SECURE", "0")).strip().lower() in {
         "1",
@@ -2238,11 +2268,19 @@ def create_app(
 
     with closing(get_conn(mysql_conf, autocommit=False)) as conn:
         ensure_schema(conn)
+        rag2_ensure_schema(conn)
+        rag2_ensure_default_kb(conn)
         MySQLSituationStore(MySQLSettings(**mysql_conf), connection=conn).ensure_schema()
         ensure_builtin_admin(conn)
         if seed_demo:
             seed_demo_data(conn, force_seed=force_seed)
         conn.commit()
+
+    Path(app.config["RAG_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+    with closing(get_conn(mysql_conf, autocommit=False)) as conn:
+        migration = rag2_migrate_legacy_sqlite(conn, Path(app.config["RAG_DB_PATH"]))
+        if migration.get("document_id"):
+            print(f"[info] legacy RAG metadata migrated: {migration}")
 
     ensure_rag_schema(app.config["RAG_DB_PATH"])
     if rag_force_seed:
@@ -2621,6 +2659,258 @@ def create_app(
         payload = build_llm_prompt_payload(prompt_path)
         payload["ok"] = True
         return jsonify(payload)
+
+    def rag2_runtime() -> Tuple[Path, Dict[str, Any]]:
+        return Path(app.config["RAG_DATA_DIR"]), rag2_load_api_config(Path(app.config["RAG_API_CONFIG_PATH"]))
+
+    @app.route("/api/v3/rag/status", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_status():
+        data_dir, api_config = rag2_runtime()
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            kbs = rag2_list_kbs(conn)
+        return jsonify(
+            {
+                "ok": True,
+                "cloud_configured": bool(api_config.get("api_key")),
+                "embedding_model": api_config["embedding_model"],
+                "rerank_model": api_config["rerank_model"],
+                "embedding_dimensions": api_config["embedding_dimensions"],
+                "data_dir": display_project_path(data_dir),
+                "knowledge_base_count": len(kbs),
+                "document_count": sum(int(row.get("document_count") or 0) for row in kbs),
+                "chunk_count": sum(int(row.get("chunk_count") or 0) for row in kbs),
+                "supported_extensions": sorted(RAG_SUPPORTED_EXTENSIONS),
+                "max_upload_mb": RAG_MAX_UPLOAD_BYTES // 1024 // 1024,
+            }
+        )
+
+    @app.route("/api/v3/rag/knowledge-bases", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_list():
+        q = str(request.args.get("q") or "").strip()
+        include_disabled = str(request.args.get("include_disabled", "1")).lower() not in {"0", "false", "no"}
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            rows = rag2_list_kbs(conn, q=q, include_disabled=include_disabled)
+        return jsonify({"items": rows, "total": len(rows)})
+
+    @app.route("/api/v3/rag/knowledge-bases", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_create():
+        body = request.get_json(silent=True) or {}
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                kb_id = rag2_save_kb(conn, body, g.session["username"])
+                item = rag2_get_kb(conn, kb_id)
+                log_action(conn, g.session["username"], g.session["role"], "rag_kb_create", str(kb_id), str(body.get("name") or ""))
+        except (ValueError, pymysql.IntegrityError) as exc:
+            return jsonify({"error": "invalid_knowledge_base", "message": str(exc)}), 400
+        return jsonify({"ok": True, "item": item}), 201
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_detail(kb_id: int):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            item = rag2_get_kb(conn, kb_id)
+        if not item:
+            return jsonify({"error": "knowledge_base_not_found"}), 404
+        return jsonify({"item": item})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_update(kb_id: int):
+        body = request.get_json(silent=True) or {}
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                rag2_save_kb(conn, body, g.session["username"], kb_id=kb_id)
+                item = rag2_get_kb(conn, kb_id)
+                log_action(conn, g.session["username"], g.session["role"], "rag_kb_update", str(kb_id), str(body.get("name") or ""))
+        except KeyError:
+            return jsonify({"error": "knowledge_base_not_found"}), 404
+        except (ValueError, pymysql.IntegrityError) as exc:
+            return jsonify({"error": "invalid_knowledge_base", "message": str(exc)}), 400
+        return jsonify({"ok": True, "item": item})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/toggle", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_toggle(kb_id: int):
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled", True))
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            item = rag2_get_kb(conn, kb_id)
+            if not item:
+                return jsonify({"error": "knowledge_base_not_found"}), 404
+            item["enabled"] = enabled
+            rag2_save_kb(conn, item, g.session["username"], kb_id=kb_id)
+        return jsonify({"ok": True, "enabled": enabled})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/delete", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_kb_delete(kb_id: int):
+        data_dir, _ = rag2_runtime()
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            changed = rag2_delete_kb(conn, data_dir, kb_id)
+            if changed:
+                log_action(conn, g.session["username"], g.session["role"], "rag_kb_delete", str(kb_id), "deleted")
+        if not changed:
+            return jsonify({"error": "knowledge_base_not_found"}), 404
+        return jsonify({"ok": True})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/documents", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_documents(kb_id: int):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            if not rag2_get_kb(conn, kb_id):
+                return jsonify({"error": "knowledge_base_not_found"}), 404
+            rows = rag2_list_documents(conn, kb_id)
+        return jsonify({"items": rows, "total": len(rows)})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/documents/upload", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_upload(kb_id: int):
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            return jsonify({"error": "file_required", "message": "请选择要上传的文件"}), 400
+        data_dir, api_config = rag2_runtime()
+        temp_dir = data_dir / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / f"{uuid.uuid4().hex}_{Path(upload.filename).name}"
+        upload.save(temp_path)
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                item = rag2_ingest_file(conn, data_dir, api_config, kb_id, temp_path, upload.filename, g.session["username"])
+                log_action(conn, g.session["username"], g.session["role"], "rag_document_upload", str(item["id"]), upload.filename)
+            return jsonify({"ok": True, "item": item}), 201
+        except (ValueError, KeyError, RuntimeError) as exc:
+            return jsonify({"error": "document_ingest_failed", "message": str(exc)}), 400
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/documents/text", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_add_text(kb_id: int):
+        body = request.get_json(silent=True) or {}
+        title = str(body.get("title") or "在线知识.txt").strip()
+        content = str(body.get("content") or "").strip()
+        if not content:
+            return jsonify({"error": "content_required", "message": "知识正文不能为空"}), 400
+        data_dir, api_config = rag2_runtime()
+        temp_dir = data_dir / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        name = title if Path(title).suffix else f"{title}.txt"
+        temp_path = temp_dir / f"{uuid.uuid4().hex}_{Path(name).name}"
+        temp_path.write_text(content, encoding="utf-8")
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                item = rag2_ingest_file(conn, data_dir, api_config, kb_id, temp_path, name, g.session["username"], source_type="text")
+            return jsonify({"ok": True, "item": item}), 201
+        except (ValueError, KeyError, RuntimeError) as exc:
+            return jsonify({"error": "document_ingest_failed", "message": str(exc)}), 400
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    @app.route("/api/v3/rag/documents/<int:document_id>/delete", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_document_delete(document_id: int):
+        data_dir, _ = rag2_runtime()
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            changed = rag2_delete_document(conn, data_dir, document_id)
+        if not changed:
+            return jsonify({"error": "document_not_found"}), 404
+        return jsonify({"ok": True})
+
+    @app.route("/api/v3/rag/documents/<int:document_id>/index", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_document_index(document_id: int):
+        data_dir, api_config = rag2_runtime()
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                item = rag2_index_pending_document(conn, data_dir, api_config, document_id)
+            return jsonify({"ok": True, "item": item})
+        except (KeyError, RuntimeError) as exc:
+            return jsonify({"error": "document_index_failed", "message": str(exc)}), 400
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/chunks", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_chunks(kb_id: int):
+        document_id = int(request.args.get("document_id") or 0) or None
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            rows = rag2_list_chunks(conn, kb_id, document_id=document_id)
+        return jsonify({"items": rows, "total": len(rows)})
+
+    @app.route("/api/v3/rag/chunks/<int:chunk_id>", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_chunk_update(chunk_id: int):
+        body = request.get_json(silent=True) or {}
+        data_dir, api_config = rag2_runtime()
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                rag2_update_chunk(conn, data_dir, api_config, chunk_id, str(body.get("content") or ""), bool(body.get("enabled", True)))
+        except (ValueError, KeyError, RuntimeError) as exc:
+            return jsonify({"error": "chunk_update_failed", "message": str(exc)}), 400
+        return jsonify({"ok": True})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/recall", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_recall(kb_id: int):
+        body = request.get_json(silent=True) or {}
+        data_dir, api_config = rag2_runtime()
+        try:
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+                result = rag2_hybrid_search(conn, data_dir, api_config, kb_id, str(body.get("query") or ""), g.session["username"], save_test=True)
+        except (ValueError, KeyError, RuntimeError) as exc:
+            return jsonify({"error": "recall_failed", "message": str(exc)}), 400
+        return jsonify(result)
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/recall-history", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_recall_history(kb_id: int):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            rows = rag2_list_test_history(conn, kb_id)
+        return jsonify({"items": rows, "total": len(rows)})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/eval-cases", methods=["GET", "POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_eval_cases(kb_id: int):
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=request.method == "GET")) as conn:
+            if request.method == "GET":
+                rows = rag2_list_eval_cases(conn, kb_id)
+                return jsonify({"items": rows, "total": len(rows)})
+            try:
+                item = rag2_save_eval_case(conn, kb_id, request.get_json(silent=True) or {})
+            except (ValueError, KeyError) as exc:
+                return jsonify({"error": "eval_case_save_failed", "message": str(exc)}), 400
+        return jsonify({"ok": True, "item": item}), 201
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/eval-cases/<int:case_id>", methods=["PUT", "POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_eval_case_update(kb_id: int, case_id: int):
+        body = request.get_json(silent=True) or {}
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            try:
+                if request.method == "POST" and body.get("action") == "delete":
+                    changed = rag2_delete_eval_case(conn, kb_id, case_id)
+                    if not changed:
+                        return jsonify({"error": "eval_case_not_found"}), 404
+                    return jsonify({"ok": True})
+                item = rag2_save_eval_case(conn, kb_id, body, case_id=case_id)
+            except (ValueError, KeyError) as exc:
+                return jsonify({"error": "eval_case_save_failed", "message": str(exc)}), 400
+        return jsonify({"ok": True, "item": item})
+
+    @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/eval-runs", methods=["GET", "POST"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_eval_runs(kb_id: int):
+        data_dir, api_config = rag2_runtime()
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=request.method == "GET")) as conn:
+            if request.method == "GET":
+                rows = rag2_list_eval_runs(conn, kb_id)
+                return jsonify({"items": rows, "total": len(rows)})
+            try:
+                result = rag2_run_eval_suite(conn, data_dir, api_config, kb_id, g.session["username"])
+            except (ValueError, KeyError, RuntimeError) as exc:
+                return jsonify({"error": "eval_run_failed", "message": str(exc)}), 400
+        return jsonify({"ok": True, **result})
 
     @app.route("/api/v2/rag/docs", methods=["GET"])
     @require_roles(ROLE_ADMIN)
@@ -3280,6 +3570,9 @@ def create_app(
                 ollama_url=app.config["OLLAMA_URL"],
                 model=model,
                 rag_db_path=Path(app.config["RAG_DB_PATH"]),
+                rag_mysql_conf=app.config["MYSQL_CONF"],
+                rag_data_dir=Path(app.config["RAG_DATA_DIR"]),
+                rag_api_config=Path(app.config["RAG_API_CONFIG_PATH"]),
                 rag_top_k=4,
                 timeout_sec=120,
             )
@@ -4759,6 +5052,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite db path")
     parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed json path")
     parser.add_argument("--rag-force-seed", action="store_true", help="Force rebuild RAG db from seed on startup")
+    parser.add_argument("--rag-data-dir", default="", help="Advanced RAG runtime data directory; RAG_DATA_DIR env has priority")
+    parser.add_argument("--rag-api-config", default="config/ai_api.local.json", help="DashScope local config JSON")
     parser.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="LLM system prompt file path")
     parser.add_argument("--jwt-secret", default="", help="JWT secret, fallback to env TP_JWT_SECRET")
     parser.add_argument("--jwt-ttl-seconds", type=int, default=TOKEN_TTL_SECONDS, help="JWT token TTL seconds")
@@ -4788,6 +5083,8 @@ def main() -> None:
         jwt_ttl_seconds=args.jwt_ttl_seconds,
         ollama_url=args.ollama_url,
         llm_prompt_path=args.llm_prompt,
+        rag_data_dir=args.rag_data_dir,
+        rag_api_config=args.rag_api_config,
     )
     app.run(host=args.host, port=args.port, debug=False)
 

@@ -45,6 +45,9 @@ models/*.joblib
 
 # RAG artifacts
 llm/rag/rag_knowledge.db
+llm/rag/runtime/
+config/ai_api.local.json
+*.lance
 
 # Local deploy env
 deploy/.env

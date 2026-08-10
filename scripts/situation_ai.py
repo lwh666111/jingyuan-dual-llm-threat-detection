@@ -262,6 +262,9 @@ def analyze_situation(
     ollama_url: str,
     model: str,
     rag_db_path: Path,
+    rag_mysql_conf: Optional[Dict[str, Any]] = None,
+    rag_data_dir: Optional[Path] = None,
+    rag_api_config: Optional[Path] = None,
     rag_top_k: int = 4,
     timeout_sec: int = 120,
 ) -> Tuple[Dict[str, Any], str]:
@@ -271,7 +274,31 @@ def analyze_situation(
     )
     rag_rows: List[Dict[str, Any]] = []
     try:
-        if rag_db_path.exists():
+        if rag_mysql_conf and rag_data_dir and rag_api_config:
+            from rag_service import hybrid_search, list_kbs, load_api_config, mysql_connect
+
+            with mysql_connect(rag_mysql_conf, autocommit=False) as conn:
+                kbs = list_kbs(conn, include_disabled=False)
+                if kbs:
+                    result = hybrid_search(
+                        conn,
+                        rag_data_dir,
+                        load_api_config(rag_api_config),
+                        int(kbs[0]["id"]),
+                        query,
+                        username="situation-ai",
+                        save_test=False,
+                    )
+                    rag_rows = [
+                        {
+                            "doc_id": f"DOC-{item.get('document_id')}-CHUNK-{item.get('chunk_id')}",
+                            "title": item.get("title_path") or item.get("document_name") or "知识片段",
+                            "evidence": item.get("content") or "",
+                            "source": item.get("document_name") or "advanced-rag",
+                        }
+                        for item in (result.get("items") or [])[: max(1, rag_top_k)]
+                    ]
+        if not rag_rows and rag_db_path.exists():
             rag_rows = retrieve_rag_docs(rag_db_path, query_text=query, top_k=max(1, rag_top_k))
     except Exception:
         rag_rows = []

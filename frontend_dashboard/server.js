@@ -131,7 +131,11 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  if (reqUrl.pathname.startsWith("/api/v1/") || reqUrl.pathname.startsWith("/api/v2/")) {
+  if (
+    reqUrl.pathname.startsWith("/api/v1/") ||
+    reqUrl.pathname.startsWith("/api/v2/") ||
+    reqUrl.pathname.startsWith("/api/v3/")
+  ) {
     return proxyRequest(req, res, reqUrl.pathname, reqUrl.searchParams);
   }
 

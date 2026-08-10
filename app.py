@@ -524,6 +524,20 @@ def build_llm_cmd(args, script_dir: Path, llm_model: Optional[str] = None) -> Li
             str(args.rag_top_k),
             "--rag-max-chars",
             str(args.rag_max_chars),
+            "--rag-data-dir",
+            args.rag_data_dir,
+            "--rag-api-config",
+            args.rag_api_config,
+            "--rag-mysql-host",
+            args.mysql_host,
+            "--rag-mysql-port",
+            str(args.mysql_port),
+            "--rag-mysql-user",
+            args.mysql_user,
+            "--rag-mysql-password",
+            args.mysql_password,
+            "--rag-mysql-database",
+            args.mysql_database,
         ]
     )
     if args.rag_auto_build:
@@ -673,6 +687,10 @@ def build_api_cmd(args, script_dir: Path) -> List[str]:
         args.rag_db_path,
         "--rag-seed-file",
         args.rag_seed_file,
+        "--rag-data-dir",
+        args.rag_data_dir,
+        "--rag-api-config",
+        args.rag_api_config,
         "--llm-prompt",
         args.llm_prompt,
         "--ollama-url",
@@ -869,6 +887,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(rag_enable=True)
     llm_group.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db", help="RAG sqlite path")
     llm_group.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON path")
+    llm_group.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag", help="Advanced RAG data directory (prefer a non-system disk)")
+    llm_group.add_argument("--rag-api-config", default="config/ai_api.local.json", help="DashScope local config JSON")
     llm_group.add_argument("--rag-top-k", type=int, default=3, help="RAG top-k")
     llm_group.add_argument("--rag-max-chars", type=int, default=3200, help="Max injected RAG context chars")
     llm_group.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="Auto build RAG DB if missing")

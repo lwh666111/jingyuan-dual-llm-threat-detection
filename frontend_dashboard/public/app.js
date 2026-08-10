@@ -213,7 +213,7 @@ const state = {
     selectedDoc: null,
   },
   llmSettings: {
-    activePanel: "prompt",
+    activePanel: "rag",
     prompt: "",
     promptPath: "",
     promptUpdatedAt: "",
@@ -5294,4 +5294,571 @@ function downloadCsv(filename, rows) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/* Advanced RAG workspace. This intentionally overrides the legacy crowded
+ * renderer while keeping its API and data untouched for rollback safety. */
+function rag3State() {
+  if (!state.rag.workspace) {
+    state.rag.workspace = {
+      status: null,
+      kbs: [],
+      query: "",
+      selectedKb: null,
+      detailTab: "documents",
+      documents: [],
+      chunks: [],
+      recallItems: [],
+      recallHistory: [],
+      evalCases: [],
+      evalRuns: [],
+      evalResult: null,
+      busy: false,
+    };
+  }
+  return state.rag.workspace;
+}
+
+function rag3Date(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function rag3StatusLabel(status) {
+  const map = { ready: "已就绪", processing: "处理中", pending: "待索引", failed: "失败" };
+  return map[String(status || "").toLowerCase()] || String(status || "未知");
+}
+
+function renderRagSettingsView() {
+  const root = document.getElementById("viewRoot");
+  if (!root) return;
+  const workspace = rag3State();
+  const activePanel = state.llmSettings.activePanel || "rag";
+  root.innerHTML = `
+    <section class="ai-config-shell">
+      <header class="ai-config-header">
+        <div>
+          <span class="section-eyebrow">AI CONFIGURATION</span>
+          <h2>大模型配置</h2>
+          <p>管理研判提示词与检索增强知识。云端 API 仅承担向量化和重排，攻击报告仍由现有本地模型生成。</p>
+        </div>
+        <div class="ai-config-health" id="rag3_health">
+          <i></i><span>正在检查 RAG 服务</span>
+        </div>
+      </header>
+      <nav class="ai-config-tabs" aria-label="AI 配置分类">
+        <button class="${activePanel === "rag" ? "active" : ""}" data-ai-panel="rag">知识库管理</button>
+        <button class="${activePanel === "prompt" ? "active" : ""}" data-ai-panel="prompt">研判提示词</button>
+      </nav>
+      <div id="ai_config_content"></div>
+    </section>
+    <div id="rag3_modal_root"></div>
+  `;
+  root.querySelectorAll("[data-ai-panel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.llmSettings.activePanel = button.dataset.aiPanel === "prompt" ? "prompt" : "rag";
+      renderRagSettingsView();
+    });
+  });
+  if (activePanel === "prompt") {
+    rag3RenderPrompt();
+  } else {
+    rag3RenderKbList();
+  }
+  rag3LoadStatus().catch((err) => rag3SetHealth(false, err.message));
+}
+
+function rag3SetHealth(ok, message) {
+  const el = document.getElementById("rag3_health");
+  if (!el) return;
+  el.classList.toggle("error", !ok);
+  const text = el.querySelector("span");
+  if (text) text.textContent = message;
+}
+
+async function rag3LoadStatus() {
+  const workspace = rag3State();
+  workspace.status = await api("/api/v3/rag/status");
+  rag3SetHealth(
+    workspace.status.cloud_configured,
+    workspace.status.cloud_configured
+      ? `${workspace.status.embedding_model} · ${workspace.status.rerank_model}`
+      : "云端向量 API 尚未配置"
+  );
+  rag3UpdateStats();
+}
+
+function rag3UpdateStats() {
+  const status = rag3State().status;
+  if (!status) return;
+  const fields = {
+    rag3_stat_kb: status.knowledge_base_count,
+    rag3_stat_doc: status.document_count,
+    rag3_stat_chunk: status.chunk_count,
+  };
+  Object.entries(fields).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(value || 0);
+  });
+}
+
+function rag3RenderPrompt() {
+  const content = document.getElementById("ai_config_content");
+  if (!content) return;
+  content.innerHTML = `
+    <section class="ai-prompt-workspace">
+      <div class="ai-prompt-copy">
+        <span class="section-eyebrow">SYSTEM PROMPT</span>
+        <h3>态势研判提示词</h3>
+        <p>控制攻击类型、判定依据、风险等级和处置建议的输出口径。修改只影响后续新任务，不会改写历史报告。</p>
+        <dl>
+          <div><dt>提示词文件</dt><dd id="llm_prompt_path">-</dd></div>
+          <div><dt>最后更新</dt><dd id="llm_prompt_updated">-</dd></div>
+          <div><dt>字符数量</dt><dd id="llm_prompt_chars">0</dd></div>
+        </dl>
+      </div>
+      <div class="ai-prompt-editor-card">
+        <textarea id="llm_prompt_editor" rows="22" spellcheck="false" placeholder="正在读取提示词..."></textarea>
+        <footer>
+          <button id="llm_prompt_reload" class="btn btn-ghost">重新读取</button>
+          <button id="llm_prompt_save" class="btn btn-primary">保存提示词</button>
+        </footer>
+      </div>
+    </section>
+  `;
+  document.getElementById("llm_prompt_reload")?.addEventListener("click", () => loadLlmPrompt().catch((err) => showToast(err.message)));
+  document.getElementById("llm_prompt_save")?.addEventListener("click", () => saveLlmPrompt().catch((err) => showToast(err.message)));
+  document.getElementById("llm_prompt_editor")?.addEventListener("input", (event) => {
+    const el = document.getElementById("llm_prompt_chars");
+    if (el) el.textContent = `${event.target.value.length} / ${state.llmSettings.promptMaxChars || 30000}`;
+  });
+  loadLlmPrompt().catch((err) => showToast(`读取提示词失败：${err.message}`));
+}
+
+function rag3RenderKbList() {
+  const content = document.getElementById("ai_config_content");
+  if (!content) return;
+  content.innerHTML = `
+    <section class="rag3-overview-strip">
+      <div><span>知识库</span><strong id="rag3_stat_kb">0</strong><small>独立检索空间</small></div>
+      <div><span>知识文档</span><strong id="rag3_stat_doc">0</strong><small>可追溯来源</small></div>
+      <div><span>有效切片</span><strong id="rag3_stat_chunk">0</strong><small>向量与关键词双索引</small></div>
+      <div class="rag3-pipeline"><span>检索链路</span><strong>Vector + BM25 → RRF → Rerank</strong><small>阿里云百炼向量与重排</small></div>
+    </section>
+    <section class="rag3-list-card">
+      <header>
+        <div>
+          <h3>AI 知识库</h3>
+          <p>知识库之间相互隔离，可分别配置切片与召回参数。</p>
+        </div>
+        <div class="rag3-toolbar">
+          <label class="rag3-search"><span>⌕</span><input id="rag3_kb_search" placeholder="搜索知识库名称" /></label>
+          <label class="rag3-toggle"><input id="rag3_show_disabled" type="checkbox" checked /><span>显示停用</span></label>
+          <button id="rag3_refresh" class="btn btn-ghost">刷新</button>
+          <button id="rag3_create" class="btn btn-primary">新建知识库</button>
+        </div>
+      </header>
+      <div class="rag3-table-wrap">
+        <table class="rag3-table">
+          <thead><tr><th>名称</th><th>文档</th><th>切片</th><th>状态</th><th>向量模型</th><th>切片方式</th><th>创建人</th><th>最后修改</th><th>操作</th></tr></thead>
+          <tbody id="rag3_kb_body"><tr><td colspan="9" class="rag3-empty">正在加载知识库...</td></tr></tbody>
+        </table>
+      </div>
+      <footer class="rag3-list-footer"><span id="rag3_kb_total">共 0 个知识库</span><small>点击知识库名称进入文档、切片和召回工作台</small></footer>
+    </section>
+  `;
+  document.getElementById("rag3_create")?.addEventListener("click", () => rag3OpenKbModal());
+  document.getElementById("rag3_refresh")?.addEventListener("click", () => rag3LoadKbs().catch((err) => showToast(err.message)));
+  document.getElementById("rag3_kb_search")?.addEventListener("input", (event) => {
+    rag3State().query = event.target.value;
+    clearTimeout(rag3State().searchTimer);
+    rag3State().searchTimer = setTimeout(() => rag3LoadKbs().catch((err) => showToast(err.message)), 260);
+  });
+  document.getElementById("rag3_show_disabled")?.addEventListener("change", () => rag3LoadKbs().catch((err) => showToast(err.message)));
+  rag3LoadKbs().catch((err) => showToast(`知识库加载失败：${err.message}`));
+  rag3UpdateStats();
+}
+
+async function rag3LoadKbs() {
+  const workspace = rag3State();
+  const query = String(document.getElementById("rag3_kb_search")?.value ?? workspace.query ?? "").trim();
+  const includeDisabled = document.getElementById("rag3_show_disabled")?.checked !== false;
+  const params = new URLSearchParams({ q: query, include_disabled: includeDisabled ? "1" : "0" });
+  const data = await api(`/api/v3/rag/knowledge-bases?${params}`);
+  workspace.kbs = Array.isArray(data.items) ? data.items : [];
+  rag3RenderKbRows();
+  await rag3LoadStatus();
+}
+
+function rag3RenderKbRows() {
+  const workspace = rag3State();
+  const body = document.getElementById("rag3_kb_body");
+  const total = document.getElementById("rag3_kb_total");
+  if (total) total.textContent = `共 ${workspace.kbs.length} 个知识库`;
+  if (!body) return;
+  if (!workspace.kbs.length) {
+    body.innerHTML = `<tr><td colspan="9"><div class="rag3-empty-state"><b>尚无匹配的知识库</b><span>新建知识库后即可上传安全文档并执行召回测试。</span></div></td></tr>`;
+    return;
+  }
+  body.innerHTML = workspace.kbs.map((kb) => `
+    <tr>
+      <td><button class="rag3-kb-name" data-rag3-open="${kb.id}"><i>▰</i><span><strong>${escapeHtml(kb.name)}</strong><small>${escapeHtml(kb.description || "未填写描述")}</small></span></button></td>
+      <td><b>${Number(kb.document_count || 0)}</b></td>
+      <td><b>${Number(kb.chunk_count || 0)}</b></td>
+      <td><span class="rag3-status ${kb.enabled ? "ready" : "disabled"}">${kb.enabled ? "启用" : "停用"}</span></td>
+      <td>${escapeHtml(kb.embedding_model || "-")}</td>
+      <td>${kb.chunk_method === "fixed" ? "固定长度" : "语义结构"}</td>
+      <td>${escapeHtml(kb.created_by || "-")}</td>
+      <td>${escapeHtml(rag3Date(kb.updated_at))}</td>
+      <td><button class="rag3-more" data-rag3-more="${kb.id}" aria-label="知识库操作">•••</button></td>
+    </tr>
+  `).join("");
+  body.querySelectorAll("[data-rag3-open]").forEach((button) => button.addEventListener("click", () => rag3OpenWorkspace(Number(button.dataset.rag3Open))));
+  body.querySelectorAll("[data-rag3-more]").forEach((button) => button.addEventListener("click", (event) => rag3OpenActionMenu(event, Number(button.dataset.rag3More))));
+}
+
+function rag3OpenActionMenu(event, kbId) {
+  event.stopPropagation();
+  document.querySelectorAll(".rag3-action-menu").forEach((el) => el.remove());
+  const kb = rag3State().kbs.find((item) => Number(item.id) === kbId);
+  if (!kb) return;
+  const menu = document.createElement("div");
+  menu.className = "rag3-action-menu";
+  menu.innerHTML = `
+    <button data-action="open">进入工作台</button>
+    <button data-action="edit">编辑配置</button>
+    <button data-action="toggle">${kb.enabled ? "停用" : "启用"}</button>
+    <button data-action="recall">召回测试</button>
+    <button data-action="delete" class="danger">删除知识库</button>
+  `;
+  event.currentTarget.parentElement.appendChild(menu);
+  menu.querySelectorAll("button").forEach((button) => button.addEventListener("click", async () => {
+    menu.remove();
+    if (button.dataset.action === "open") return rag3OpenWorkspace(kbId);
+    if (button.dataset.action === "edit") return rag3OpenKbModal(kb);
+    if (button.dataset.action === "recall") return rag3OpenWorkspace(kbId, "recall");
+    if (button.dataset.action === "toggle") {
+      await api(`/api/v3/rag/knowledge-bases/${kbId}/toggle`, { method: "POST", body: { enabled: !kb.enabled } });
+      showToast(kb.enabled ? "知识库已停用" : "知识库已启用");
+      return rag3LoadKbs();
+    }
+    if (button.dataset.action === "delete") {
+      if (!confirm(`确定删除知识库“${kb.name}”及其全部文档和向量吗？`)) return;
+      await api(`/api/v3/rag/knowledge-bases/${kbId}/delete`, { method: "POST", body: {} });
+      showToast("知识库已删除");
+      return rag3LoadKbs();
+    }
+  }));
+  setTimeout(() => document.addEventListener("click", () => menu.remove(), { once: true }), 0);
+}
+
+function rag3OpenKbModal(kb = null) {
+  const root = document.getElementById("rag3_modal_root");
+  if (!root) return;
+  root.innerHTML = `
+    <div class="rag3-modal-backdrop">
+      <form class="rag3-modal" id="rag3_kb_form">
+        <header><div><span class="section-eyebrow">KNOWLEDGE BASE</span><h3>${kb ? "编辑知识库" : "新建知识库"}</h3></div><button type="button" data-close>×</button></header>
+        <div class="rag3-modal-body">
+          <label class="full"><span>知识库名称 *</span><input name="name" maxlength="160" value="${escapeHtml(kb?.name || "")}" placeholder="例如：Web 漏洞防护知识库" required /></label>
+          <label class="full"><span>用途描述</span><textarea name="description" rows="3" maxlength="1000" placeholder="说明知识来源和适用范围">${escapeHtml(kb?.description || "")}</textarea></label>
+          <label><span>向量模型 *</span><select name="embedding_model"><option value="text-embedding-v4">text-embedding-v4（1024维）</option></select></label>
+          <label><span>重排模型 *</span><select name="rerank_model"><option value="qwen3-rerank">qwen3-rerank</option></select></label>
+          <label><span>切片方式 *</span><select name="chunk_method"><option value="semantic" ${kb?.chunk_method !== "fixed" ? "selected" : ""}>语义结构切片</option><option value="fixed" ${kb?.chunk_method === "fixed" ? "selected" : ""}>固定长度切片</option></select></label>
+          <label><span>切片长度</span><input name="chunk_size" type="number" min="200" max="4000" value="${Number(kb?.chunk_size || 900)}" /></label>
+          <label><span>重叠字符</span><input name="chunk_overlap" type="number" min="0" max="1000" value="${Number(kb?.chunk_overlap || 120)}" /></label>
+          <label><span>最终召回数</span><input name="final_top_k" type="number" min="1" max="20" value="${Number(kb?.final_top_k || 5)}" /></label>
+          <label><span>向量候选数</span><input name="vector_top_k" type="number" min="1" max="100" value="${Number(kb?.vector_top_k || 20)}" /></label>
+          <label><span>关键词候选数</span><input name="keyword_top_k" type="number" min="1" max="100" value="${Number(kb?.keyword_top_k || 20)}" /></label>
+          <label><span>重排阈值</span><input name="score_threshold" type="number" min="0" max="1" step="0.01" value="${Number(kb?.score_threshold ?? 0.1)}" /></label>
+          <label class="rag3-check"><input name="enabled" type="checkbox" ${kb?.enabled === 0 ? "" : "checked"} /><span>创建后立即启用</span></label>
+        </div>
+        <footer><button type="button" class="btn btn-ghost" data-close>取消</button><button type="submit" class="btn btn-primary">保存配置</button></footer>
+      </form>
+    </div>
+  `;
+  root.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => (root.innerHTML = "")));
+  document.getElementById("rag3_kb_form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      name: form.get("name"), description: form.get("description"), embedding_model: form.get("embedding_model"),
+      rerank_model: form.get("rerank_model"), chunk_method: form.get("chunk_method"), chunk_size: Number(form.get("chunk_size")),
+      chunk_overlap: Number(form.get("chunk_overlap")), final_top_k: Number(form.get("final_top_k")),
+      vector_top_k: Number(form.get("vector_top_k")), keyword_top_k: Number(form.get("keyword_top_k")),
+      score_threshold: Number(form.get("score_threshold")), enabled: form.get("enabled") === "on",
+    };
+    try {
+      await api(kb ? `/api/v3/rag/knowledge-bases/${kb.id}` : "/api/v3/rag/knowledge-bases", { method: kb ? "PUT" : "POST", body: payload });
+      root.innerHTML = "";
+      showToast(kb ? "知识库配置已保存" : "知识库创建成功");
+      await rag3LoadKbs();
+    } catch (err) { showToast(`保存失败：${err.message}`); }
+  });
+}
+
+async function rag3OpenWorkspace(kbId, tab = "documents") {
+  const workspace = rag3State();
+  const data = await api(`/api/v3/rag/knowledge-bases/${kbId}`);
+  workspace.selectedKb = data.item;
+  workspace.detailTab = tab;
+  await rag3LoadWorkspaceData();
+  rag3RenderWorkspace();
+}
+
+async function rag3LoadWorkspaceData() {
+  const workspace = rag3State();
+  const kbId = workspace.selectedKb?.id;
+  if (!kbId) return;
+  const [documents, chunks, history, evalCases, evalRuns] = await Promise.all([
+    api(`/api/v3/rag/knowledge-bases/${kbId}/documents`),
+    api(`/api/v3/rag/knowledge-bases/${kbId}/chunks`),
+    api(`/api/v3/rag/knowledge-bases/${kbId}/recall-history`),
+    api(`/api/v3/rag/knowledge-bases/${kbId}/eval-cases`),
+    api(`/api/v3/rag/knowledge-bases/${kbId}/eval-runs`),
+  ]);
+  workspace.documents = documents.items || [];
+  workspace.chunks = chunks.items || [];
+  workspace.recallHistory = history.items || [];
+  workspace.evalCases = evalCases.items || [];
+  workspace.evalRuns = evalRuns.items || [];
+  if (!workspace.evalResult && workspace.evalRuns.length) {
+    const latest = workspace.evalRuns[0];
+    workspace.evalResult = {
+      run_id: latest.id,
+      total_cases: latest.total_cases,
+      passed_cases: latest.passed_cases,
+      pass_rate: latest.pass_rate,
+      average_duration_ms: latest.average_duration_ms,
+      items: latest.items || [],
+    };
+  }
+}
+
+function rag3RenderWorkspace() {
+  const root = document.getElementById("viewRoot");
+  const workspace = rag3State();
+  const kb = workspace.selectedKb;
+  if (!root || !kb) return;
+  root.innerHTML = `
+    <section class="rag3-workspace">
+      <header class="rag3-workspace-head">
+        <button id="rag3_back" class="rag3-back">←</button>
+        <div class="rag3-workspace-title"><i>▰</i><span><strong>${escapeHtml(kb.name)}</strong><small>${escapeHtml(kb.description || "未填写描述")}</small></span></div>
+        <nav>
+          <button data-rag3-tab="documents" class="${workspace.detailTab === "documents" ? "active" : ""}">知识文档</button>
+          <button data-rag3-tab="chunks" class="${workspace.detailTab === "chunks" ? "active" : ""}">分段管理</button>
+          <button data-rag3-tab="recall" class="${workspace.detailTab === "recall" ? "active" : ""}">召回测试</button>
+          <button data-rag3-tab="evaluation" class="${workspace.detailTab === "evaluation" ? "active" : ""}">回归评估</button>
+        </nav>
+        <button id="rag3_edit_current" class="btn btn-ghost">编辑配置</button>
+      </header>
+      <main id="rag3_workspace_body"></main>
+    </section>
+    <div id="rag3_modal_root"></div>
+  `;
+  document.getElementById("rag3_back")?.addEventListener("click", () => { workspace.selectedKb = null; renderRagSettingsView(); });
+  document.getElementById("rag3_edit_current")?.addEventListener("click", () => rag3OpenKbModal(kb));
+  root.querySelectorAll("[data-rag3-tab]").forEach((button) => button.addEventListener("click", () => {
+    workspace.detailTab = button.dataset.rag3Tab;
+    rag3RenderWorkspace();
+  }));
+  if (workspace.detailTab === "chunks") rag3RenderChunks();
+  else if (workspace.detailTab === "recall") rag3RenderRecall();
+  else if (workspace.detailTab === "evaluation") rag3RenderEvaluation();
+  else rag3RenderDocuments();
+}
+
+function rag3RenderDocuments() {
+  const body = document.getElementById("rag3_workspace_body");
+  const workspace = rag3State();
+  if (!body) return;
+  body.innerHTML = `
+    <section class="rag3-detail-toolbar"><div><h3>知识文档</h3><p>${workspace.documents.length} 个文档，${workspace.chunks.length} 个有效切片</p></div><div><button id="rag3_add_text" class="btn btn-ghost">添加文本</button><button id="rag3_upload_file" class="btn btn-primary">上传附件</button><input id="rag3_file_input" type="file" hidden accept=".txt,.md,.json,.jsonl,.csv,.pdf,.docx,.pptx,.xlsx" /></div></section>
+    <div class="rag3-doc-grid">
+      ${workspace.documents.length ? workspace.documents.map((doc) => `
+        <article class="rag3-doc-card">
+          <div class="rag3-doc-icon">${escapeHtml((doc.mime_type || "TXT").slice(0, 4).toUpperCase())}</div>
+          <div class="rag3-doc-copy"><span class="rag3-status ${doc.status}">${rag3StatusLabel(doc.status)}</span><h4>${escapeHtml(doc.name)}</h4><p>${Number(doc.chunk_count || 0)} 个切片 · ${Number(doc.char_count || 0).toLocaleString()} 字符</p><small>${escapeHtml(rag3Date(doc.updated_at))}</small>${doc.error_message ? `<em>${escapeHtml(doc.error_message)}</em>` : ""}</div>
+          <div class="rag3-doc-actions">${doc.status === "pending" ? `<button data-rag3-index="${doc.id}" class="btn btn-ghost">建立向量</button>` : ""}<button data-rag3-doc-chunks="${doc.id}" class="btn btn-ghost">查看切片</button><button data-rag3-doc-delete="${doc.id}" class="btn btn-danger">删除</button></div>
+        </article>
+      `).join("") : `<div class="rag3-empty-state wide"><b>还没有知识文档</b><span>支持 PDF、Word、PPT、Excel、Markdown、JSON、CSV 和纯文本，单文件最大 30MB。</span></div>`}
+    </div>
+  `;
+  document.getElementById("rag3_upload_file")?.addEventListener("click", () => document.getElementById("rag3_file_input")?.click());
+  document.getElementById("rag3_file_input")?.addEventListener("change", (event) => rag3UploadFile(event.target.files?.[0]));
+  document.getElementById("rag3_add_text")?.addEventListener("click", rag3OpenTextModal);
+  body.querySelectorAll("[data-rag3-doc-chunks]").forEach((button) => button.addEventListener("click", () => { workspace.chunkDocumentId = Number(button.dataset.rag3DocChunks); workspace.detailTab = "chunks"; rag3RenderWorkspace(); }));
+  body.querySelectorAll("[data-rag3-index]").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true; showToast("正在建立向量索引，请稍候...");
+    try { await api(`/api/v3/rag/documents/${button.dataset.rag3Index}/index`, { method: "POST", body: {} }); await rag3ReloadWorkspace("索引建立完成"); }
+    catch (err) { showToast(`索引失败：${err.message}`); button.disabled = false; }
+  }));
+  body.querySelectorAll("[data-rag3-doc-delete]").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确定删除该文档及其全部切片吗？")) return;
+    await api(`/api/v3/rag/documents/${button.dataset.rag3DocDelete}/delete`, { method: "POST", body: {} });
+    await rag3ReloadWorkspace("文档已删除");
+  }));
+}
+
+async function rag3UploadFile(file) {
+  if (!file) return;
+  if (file.size > 30 * 1024 * 1024) return showToast("文件不能超过 30MB");
+  const form = new FormData(); form.append("file", file);
+  showToast("正在解析、切片并建立向量，请勿关闭页面...");
+  try {
+    const result = await apiForm(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/documents/upload`, form);
+    await rag3ReloadWorkspace(`已生成 ${result.item?.chunk_count || 0} 个切片`);
+  } catch (err) { showToast(`上传失败：${err.message}`); }
+}
+
+function rag3OpenTextModal() {
+  const root = document.getElementById("rag3_modal_root");
+  if (!root) return;
+  root.innerHTML = `<div class="rag3-modal-backdrop"><form class="rag3-modal compact" id="rag3_text_form"><header><div><span class="section-eyebrow">DIRECT INPUT</span><h3>添加文本知识</h3></div><button type="button" data-close>×</button></header><div class="rag3-modal-body"><label class="full"><span>文档标题 *</span><input name="title" placeholder="例如：SQL 注入应急处置指南" required /></label><label class="full"><span>知识正文 *</span><textarea name="content" rows="12" placeholder="粘贴经过核验的安全知识正文" required></textarea></label></div><footer><button type="button" class="btn btn-ghost" data-close>取消</button><button type="submit" class="btn btn-primary">解析并入库</button></footer></form></div>`;
+  root.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => (root.innerHTML = "")));
+  document.getElementById("rag3_text_form")?.addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    try { await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/documents/text`, { method: "POST", body: { title: form.get("title"), content: form.get("content") } }); root.innerHTML = ""; await rag3ReloadWorkspace("文本知识已入库"); }
+    catch (err) { showToast(`入库失败：${err.message}`); }
+  });
+}
+
+function rag3RenderChunks() {
+  const body = document.getElementById("rag3_workspace_body");
+  const workspace = rag3State();
+  if (!body) return;
+  const docs = workspace.documents;
+  const visible = workspace.chunkDocumentId ? workspace.chunks.filter((item) => Number(item.document_id) === Number(workspace.chunkDocumentId)) : workspace.chunks;
+  body.innerHTML = `
+    <section class="rag3-chunk-layout">
+      <aside><label class="rag3-search"><span>⌕</span><input id="rag3_doc_filter" placeholder="筛选文档" /></label><button class="${workspace.chunkDocumentId ? "" : "active"}" data-doc-filter="0"><span>全部文档</span><b>${workspace.chunks.length}</b></button>${docs.map((doc) => `<button class="${Number(workspace.chunkDocumentId) === Number(doc.id) ? "active" : ""}" data-doc-filter="${doc.id}"><span>${escapeHtml(doc.name)}</span><b>${Number(doc.chunk_count || 0)}</b></button>`).join("")}</aside>
+      <section><header><div><h3>分段列表</h3><p>共 ${visible.length} 段，点击切片可查看与修改完整正文。</p></div><button id="rag3_recall_from_chunks" class="btn btn-primary">召回测试</button></header><div class="rag3-chunk-list">${visible.length ? visible.map((chunk, index) => `<article data-rag3-chunk="${chunk.id}"><div><span>${index + 1}/${visible.length}</span><small>${Number(chunk.token_count || 0)} 估算 tokens · 召回 ${Number(chunk.retrieval_count || 0)} 次</small><i class="rag3-status ${chunk.enabled ? "ready" : "disabled"}">${chunk.enabled ? "启用" : "停用"}</i></div><h4>${escapeHtml(chunk.title_path || "正文")}</h4><p>${escapeHtml(String(chunk.content || "").slice(0, 420))}${String(chunk.content || "").length > 420 ? "…" : ""}</p><footer>${escapeHtml(chunk.document_name || "-")} · 更新于 ${escapeHtml(rag3Date(chunk.updated_at))}</footer></article>`).join("") : `<div class="rag3-empty-state"><b>暂无切片</b><span>请先上传并成功解析知识文档。</span></div>`}</div></section>
+    </section>
+  `;
+  body.querySelectorAll("[data-doc-filter]").forEach((button) => button.addEventListener("click", () => { workspace.chunkDocumentId = Number(button.dataset.docFilter) || 0; rag3RenderChunks(); }));
+  body.querySelectorAll("[data-rag3-chunk]").forEach((article) => article.addEventListener("click", () => rag3OpenChunkModal(workspace.chunks.find((item) => Number(item.id) === Number(article.dataset.rag3Chunk)))));
+  document.getElementById("rag3_recall_from_chunks")?.addEventListener("click", () => { workspace.detailTab = "recall"; rag3RenderWorkspace(); });
+  document.getElementById("rag3_doc_filter")?.addEventListener("input", (event) => { const q = event.target.value.toLowerCase(); body.querySelectorAll("aside [data-doc-filter]").forEach((button) => button.classList.toggle("hidden", !button.textContent.toLowerCase().includes(q))); });
+}
+
+function rag3OpenChunkModal(chunk) {
+  if (!chunk) return;
+  const root = document.getElementById("rag3_modal_root");
+  root.innerHTML = `<div class="rag3-modal-backdrop"><form class="rag3-modal" id="rag3_chunk_form"><header><div><span class="section-eyebrow">CHUNK ${chunk.chunk_index + 1}</span><h3>${escapeHtml(chunk.title_path || "切片详情")}</h3></div><button type="button" data-close>×</button></header><div class="rag3-modal-body"><label class="full"><span>来源文档</span><input value="${escapeHtml(chunk.document_name || "-")}" disabled /></label><label class="full"><span>切片正文 *</span><textarea name="content" rows="17" required>${escapeHtml(chunk.content)}</textarea></label><label class="rag3-check"><input name="enabled" type="checkbox" ${chunk.enabled ? "checked" : ""}/><span>参与后续召回</span></label></div><footer><button type="button" class="btn btn-ghost" data-close>取消</button><button type="submit" class="btn btn-primary">保存并重建向量</button></footer></form></div>`;
+  root.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => (root.innerHTML = "")));
+  document.getElementById("rag3_chunk_form")?.addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api(`/api/v3/rag/chunks/${chunk.id}`, { method: "PUT", body: { content: form.get("content"), enabled: form.get("enabled") === "on" } }); root.innerHTML = ""; await rag3ReloadWorkspace("切片与向量已更新"); } catch (err) { showToast(`保存失败：${err.message}`); } });
+}
+
+function rag3RenderRecall() {
+  const body = document.getElementById("rag3_workspace_body");
+  const workspace = rag3State();
+  if (!body) return;
+  body.innerHTML = `
+    <section class="rag3-recall-layout">
+      <main><header><div><h3>召回测试结果</h3><p>检查 Vector + BM25 + RRF + qwen3-rerank 的真实检索效果。</p></div>${workspace.recallItems.length ? `<span>${workspace.recallItems.length} 个切片</span>` : ""}</header><div class="rag3-recall-results">${workspace.recallItems.length ? workspace.recallItems.map((item, index) => `<article><div class="rag3-score"><strong>${Math.round(Number(item.score || 0) * 100)}</strong><span>相关度</span></div><div><span class="section-eyebrow">TOP ${index + 1} · ${escapeHtml(item.document_name || "未知文档")}</span><h4>${escapeHtml(item.title_path || "正文")}</h4><p>${escapeHtml(item.content)}</p><footer>切片 #${Number(item.chunk_index || 0) + 1} · RRF ${Number(item.rrf_score || 0).toFixed(4)}</footer></div></article>`).join("") : `<div class="rag3-recall-empty"><b>输入一段攻击证据开始召回</b><span>建议使用真实请求路径、Payload、响应特征与行为描述组合测试。</span></div>`}</div></main>
+      <aside><div><span class="section-eyebrow">RETRIEVAL TEST</span><h3>召回测试</h3><p>${escapeHtml(workspace.selectedKb.name)}</p><textarea id="rag3_recall_query" rows="9" placeholder="例如：POST /login 的 password 参数出现单引号、OR 1=1 与注释符，应该如何判断和处置？"></textarea><button id="rag3_run_recall" class="btn btn-primary">运行混合召回</button></div><section><h4>最近测试</h4>${workspace.recallHistory.length ? workspace.recallHistory.map((item) => `<button data-history-query="${escapeHtml(item.query_text)}"><span>${escapeHtml(String(item.query_text).slice(0, 58))}</span><small>${item.duration_ms}ms · ${item.result_count} 条 · ${escapeHtml(rag3Date(item.created_at))}</small></button>`).join("") : `<p>暂无测试记录</p>`}</section></aside>
+    </section>
+  `;
+  document.getElementById("rag3_run_recall")?.addEventListener("click", rag3RunRecall);
+  body.querySelectorAll("[data-history-query]").forEach((button) => button.addEventListener("click", () => { document.getElementById("rag3_recall_query").value = button.dataset.historyQuery; }));
+}
+
+async function rag3RunRecall() {
+  const workspace = rag3State();
+  const query = String(document.getElementById("rag3_recall_query")?.value || "").trim();
+  if (!query) return showToast("请输入召回测试文本");
+  const button = document.getElementById("rag3_run_recall"); if (button) { button.disabled = true; button.textContent = "检索与重排中..."; }
+  try {
+    const data = await api(`/api/v3/rag/knowledge-bases/${workspace.selectedKb.id}/recall`, { method: "POST", body: { query } });
+    workspace.recallItems = data.items || [];
+    await rag3LoadWorkspaceData();
+    rag3RenderRecall();
+    showToast(`召回完成：${workspace.recallItems.length} 条，耗时 ${data.duration_ms || 0}ms`);
+  } catch (err) { showToast(`召回失败：${err.message}`); if (button) { button.disabled = false; button.textContent = "运行混合召回"; } }
+}
+
+function rag3RenderEvaluation() {
+  const body = document.getElementById("rag3_workspace_body");
+  const workspace = rag3State();
+  if (!body) return;
+  const result = workspace.evalResult;
+  body.innerHTML = `
+    <section class="rag3-eval-layout">
+      <main>
+        <header><div><span class="section-eyebrow">REGRESSION EVALUATION</span><h3>知识库回归评估</h3><p>批量验证升级知识、切片参数或向量模型后，关键安全问题仍能召回正确证据。</p></div><button id="rag3_run_eval" class="btn btn-primary" ${workspace.evalCases.length ? "" : "disabled"}>运行全部用例</button></header>
+        ${result ? `<div class="rag3-eval-summary"><article><span>通过率</span><strong>${Math.round(Number(result.pass_rate || 0) * 100)}%</strong></article><article><span>通过用例</span><strong>${result.passed_cases}/${result.total_cases}</strong></article><article><span>平均耗时</span><strong>${result.average_duration_ms}ms</strong></article><article><span>本次编号</span><strong>#${result.run_id}</strong></article></div>` : ""}
+        <div class="rag3-eval-cases">
+          ${workspace.evalCases.length ? workspace.evalCases.map((item, index) => {
+            const row = result?.items?.find((candidate) => Number(candidate.case_id) === Number(item.id));
+            return `<article class="${row ? (row.passed ? "passed" : "failed") : ""}"><div class="rag3-eval-index">${String(index + 1).padStart(2, "0")}</div><div><div class="rag3-eval-title"><h4>${escapeHtml(item.question)}</h4><span>${row ? (row.passed ? "通过" : "失败") : (item.enabled ? "待运行" : "已停用")}</span></div><p>期望关键词：${escapeHtml(item.expected_keywords || "任一有效结果")}</p><p>期望文档：${escapeHtml(item.expected_document || "不限")}</p>${row ? `<footer>${escapeHtml(row.reason)} · ${row.duration_ms}ms · TOP1 ${escapeHtml(row.top_document || "无")}</footer>` : ""}</div><div class="rag3-eval-actions"><button data-eval-edit="${item.id}" class="btn btn-ghost">编辑</button><button data-eval-delete="${item.id}" class="btn btn-danger">删除</button></div></article>`;
+          }).join("") : `<div class="rag3-empty-state wide"><b>还没有回归用例</b><span>添加比赛演示中的典型 SQL 注入、XSS、扫描与爆破问题，建立可重复的质量基线。</span></div>`}
+        </div>
+      </main>
+      <aside>
+        <div><span class="section-eyebrow">TEST CASE</span><h3>新增回归用例</h3><p>关键词支持用逗号分隔，命中任意一个即满足关键词条件。</p></div>
+        <form id="rag3_eval_form">
+          <input type="hidden" name="case_id" />
+          <label><span>测试问题 *</span><textarea name="question" rows="6" required placeholder="例如：登录参数出现单引号、恒真条件和注释符时，应判断为何种攻击？"></textarea></label>
+          <label><span>期望关键词</span><input name="expected_keywords" placeholder="SQL注入, 参数化查询" /></label>
+          <label><span>期望来源文档</span><input name="expected_document" placeholder="例如：OWASP（可留空）" /></label>
+          <label class="rag3-check"><input name="enabled" type="checkbox" checked /><span>纳入批量回归</span></label>
+          <div><button type="button" id="rag3_eval_cancel" class="btn btn-ghost hidden">取消编辑</button><button type="submit" class="btn btn-primary">保存用例</button></div>
+        </form>
+        <section><h4>最近运行</h4>${workspace.evalRuns.length ? workspace.evalRuns.map((run) => `<div class="rag3-eval-run"><span>#${run.id} · ${run.passed_cases}/${run.total_cases} 通过</span><small>${Math.round(Number(run.pass_rate || 0) * 100)}% · ${run.average_duration_ms}ms · ${escapeHtml(rag3Date(run.created_at))}</small></div>`).join("") : `<p>暂无批量运行记录</p>`}</section>
+      </aside>
+    </section>`;
+  document.getElementById("rag3_run_eval")?.addEventListener("click", rag3RunEvaluation);
+  document.getElementById("rag3_eval_form")?.addEventListener("submit", rag3SaveEvalCase);
+  document.getElementById("rag3_eval_cancel")?.addEventListener("click", () => { document.getElementById("rag3_eval_form")?.reset(); document.querySelector('#rag3_eval_form [name="case_id"]').value = ""; document.getElementById("rag3_eval_cancel")?.classList.add("hidden"); });
+  body.querySelectorAll("[data-eval-edit]").forEach((button) => button.addEventListener("click", () => rag3EditEvalCase(Number(button.dataset.evalEdit))));
+  body.querySelectorAll("[data-eval-delete]").forEach((button) => button.addEventListener("click", () => rag3DeleteEvalCase(Number(button.dataset.evalDelete))));
+}
+
+function rag3EditEvalCase(caseId) {
+  const item = rag3State().evalCases.find((row) => Number(row.id) === Number(caseId));
+  const form = document.getElementById("rag3_eval_form");
+  if (!item || !form) return;
+  form.elements.case_id.value = item.id;
+  form.elements.question.value = item.question || "";
+  form.elements.expected_keywords.value = item.expected_keywords || "";
+  form.elements.expected_document.value = item.expected_document || "";
+  form.elements.enabled.checked = Boolean(Number(item.enabled));
+  document.getElementById("rag3_eval_cancel")?.classList.remove("hidden");
+  form.elements.question.focus();
+}
+
+async function rag3SaveEvalCase(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const caseId = Number(form.get("case_id") || 0);
+  try {
+    await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/eval-cases${caseId ? `/${caseId}` : ""}`, { method: caseId ? "PUT" : "POST", body: { question: form.get("question"), expected_keywords: form.get("expected_keywords"), expected_document: form.get("expected_document"), enabled: form.get("enabled") === "on" } });
+    rag3State().evalResult = null;
+    await rag3ReloadWorkspace(caseId ? "回归用例已更新" : "回归用例已添加");
+  } catch (err) { showToast(`保存失败：${err.message}`); }
+}
+
+async function rag3DeleteEvalCase(caseId) {
+  if (!confirm("确定删除这条回归用例吗？")) return;
+  try { await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/eval-cases/${caseId}`, { method: "POST", body: { action: "delete" } }); rag3State().evalResult = null; await rag3ReloadWorkspace("回归用例已删除"); }
+  catch (err) { showToast(`删除失败：${err.message}`); }
+}
+
+async function rag3RunEvaluation() {
+  const button = document.getElementById("rag3_run_eval");
+  if (button) { button.disabled = true; button.textContent = "批量检索中..."; }
+  try {
+    rag3State().evalResult = await api(`/api/v3/rag/knowledge-bases/${rag3State().selectedKb.id}/eval-runs`, { method: "POST", body: {} });
+    await rag3LoadWorkspaceData();
+    rag3RenderEvaluation();
+    showToast(`回归完成：${rag3State().evalResult.passed_cases}/${rag3State().evalResult.total_cases} 通过`);
+  } catch (err) { showToast(`回归评估失败：${err.message}`); if (button) { button.disabled = false; button.textContent = "运行全部用例"; } }
+}
+
+async function rag3ReloadWorkspace(message) {
+  await rag3LoadWorkspaceData();
+  rag3RenderWorkspace();
+  if (message) showToast(message);
 }

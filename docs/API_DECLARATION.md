@@ -141,7 +141,28 @@
   - 约束：`url` 必须以 `http://` 或 `https://` 开头
   - 返回字段：`action`, `verdict`, `confidence`, `reason`, `evidence[]`
 
-### 4.2.2 RAG 知识库（v2）
+### 4.2.2 高级 RAG 工作台（v3，管理员）
+
+- `GET /api/v3/rag/status`：云模型、数据目录、支持格式及知识库/文档/切片统计。
+- `GET /api/v3/rag/knowledge-bases`：知识库列表，支持 `q` 与 `include_disabled`。
+- `POST /api/v3/rag/knowledge-bases`：创建知识库。
+- `GET /api/v3/rag/knowledge-bases/{kb_id}`：知识库详情。
+- `PUT /api/v3/rag/knowledge-bases/{kb_id}`：更新模型、切片和召回参数。
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/toggle`：启用或停用。
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/delete`：删除知识库及其文档和向量。
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/documents`：文档列表。
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/documents/upload`：`multipart/form-data` 上传附件，字段名 `file`，最大 30MB。
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/documents/text`：提交 `{title, content}` 在线知识。
+- `POST /api/v3/rag/documents/{document_id}/index`：为迁移文档建立向量。
+- `POST /api/v3/rag/documents/{document_id}/delete`：删除文档和切片。
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/chunks`：切片列表，可传 `document_id`。
+- `PUT /api/v3/rag/chunks/{chunk_id}`：更新 `{content, enabled}` 并重建该切片向量。
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/recall`：提交 `{query}`，执行 Vector + BM25 + RRF + Rerank。
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/recall-history`：召回测试历史。
+
+所有 v3 接口均使用现有 JWT/Cookie 鉴权，未返回或记录 API Key。
+
+### 4.2.3 RAG 知识库（v2，兼容）
 
 - `GET /api/v2/rag/docs?page=1&page_size=20&q=&attack_type=`
   - 鉴权：`admin`
@@ -366,6 +387,29 @@
 - `request-body` / `response-body` 必须提供：
   - `case_id`
   - 或 `file_id + seq_id`
+
+### 4.7 高级 RAG（v3，管理员）
+
+- `GET /api/v3/rag/status`
+- `GET|POST /api/v3/rag/knowledge-bases`
+- `GET|PUT /api/v3/rag/knowledge-bases/{kb_id}`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/toggle`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/delete`
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/documents`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/documents/upload`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/documents/text`
+- `POST /api/v3/rag/documents/{document_id}/index`
+- `POST /api/v3/rag/documents/{document_id}/delete`
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/chunks`
+- `PUT /api/v3/rag/chunks/{chunk_id}`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/recall`
+- `GET /api/v3/rag/knowledge-bases/{kb_id}/recall-history`
+- `GET|POST /api/v3/rag/knowledge-bases/{kb_id}/eval-cases`
+- `PUT /api/v3/rag/knowledge-bases/{kb_id}/eval-cases/{case_id}`
+- `POST /api/v3/rag/knowledge-bases/{kb_id}/eval-cases/{case_id}`，body 为 `{"action":"delete"}` 时删除
+- `GET|POST /api/v3/rag/knowledge-bases/{kb_id}/eval-runs`，`POST` 执行全部已启用用例
+
+所有 v3 接口要求管理员 JWT。上传接口使用 `multipart/form-data`，单文件最大 `30MB`；支持 `txt/md/json/jsonl/csv/pdf/docx/pptx/xlsx`。
 
 ## 5. CORS 与预检
 
