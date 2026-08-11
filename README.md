@@ -6,7 +6,7 @@
 
 - 监听指定网卡和端口，抓取完整 HTTP 请求/响应
 - 生成标准化批次文件（`input/1.1.n.txt`）
-- Detection V2 先区分原始日志 / 候选事件 / 攻击事件，再导出高置信攻击（`result/b.n`）
+- Detection V2 通过 Payload 模型、POC 规则和行为窗口形成融合候选，再由 LLM 完成最终攻击判定
 - Ollama 本地研判 + 百炼向量模型 + LanceDB/BM25/RRF/qwen3-rerank 混合 RAG
 - MySQL 持久化（兼容旧三表，并新增 raw/candidate/event/model/rule/behavior 分层表）
 - Flask API（3049）+ Node 前端大屏（1145）
@@ -14,7 +14,13 @@
 - AI 态势报告：对完整攻击链给出时间线、技术路径、证据强度、影响、失陷判断、结论、调查步骤和分阶段处置建议
 - 静默快速防御：开启自动防御后，高置信典型攻击在抓包入口以确定性规则异步写入 Windows 双向防火墙；请求仍完整进入原有检测与 AI 链路
 
-## 最新发布（2026-08-10）
+## 最新发布（2026-08-11）
+
+- RAW 数据库原生链路成为实时主链路：三层检测只负责筛选，未经 LLM 确认的候选不得进入正式大屏和态势关联。
+- 新增 MySQL 持久化 `llm_review_jobs` 队列，进程重启不丢任务；新候选每秒轮询并优先于历史 `result/b.*` 兼容任务。
+- 详情页新增 LLM 最终结论、模型、置信度、证据、RAG 命中数和研判耗时，右侧详情使用卡片内独立滚动。
+- Ollama 资源调度改为实时事件优先；态势长报告在候选队列存在时主动让路，避免历史报告积压拖慢单包研判。
+- 服务器 `qwen2.5:1.5b` 双样本实测：XSS 与正常登录单条推理分别约 9.6 秒和 9.3 秒；仅 XSS 被发布为正式事件。
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
@@ -139,12 +145,15 @@ python app.py --neo4j-url http://127.0.0.1:7474 --neo4j-user neo4j --neo4j-passw
  -> POC 规则引擎
  -> 行为窗口分析
  -> 融合评分
- -> raw_only / candidate / attack_event
+ -> raw_only（直接留痕）/ candidate（进入 LLM 队列）
+ -> Ollama 最终研判
+ -> attack：attack_event + MySQL + 大屏 + 态势关联
+ -> benign/unknown：不进入正式攻击展示
 ```
 
 - `raw_only`：仅作为原始日志保留，不进入大屏告警。
-- `candidate`：低/中置信候选，可后续进入复核队列。
-- `attack_event`：高置信攻击事件，进入 result、LLM、MySQL 和大屏。
+- `candidate`：三层融合筛出的待研判流量，写入持久化 LLM 队列，但此时不进入正式大屏。
+- `attack_event`：仅指 LLM 最终确认的攻击事件，进入 MySQL 正式事件表、大屏和态势关联。
 
 当前已内置：
 
@@ -155,7 +164,7 @@ python app.py --neo4j-url http://127.0.0.1:7474 --neo4j-user neo4j --neo4j-passw
 - `scripts/sync_raw_http_logs.py`
 - `scripts/sync_detection_v2_db.py`
 
-详情页已接入 v2 证据链，可查看融合评分、Payload 模型置信度、POC 命中、行为窗口和原始请求/响应。
+详情页已接入完整证据链，可查看融合评分、Payload 模型置信度、POC 命中、行为窗口、LLM/RAG 最终研判和原始请求/响应。历史 `result/b.*` 数据仍可读取，但常驻守护默认不再处理其重试积压；需要兼容处理时可单独执行 `llm_analyzer_daemon.py --legacy-result-review`。
 
 2026-07-01 重构补齐项：
 

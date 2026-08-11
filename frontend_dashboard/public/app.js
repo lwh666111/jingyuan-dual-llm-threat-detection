@@ -151,7 +151,7 @@ const state = {
       time_range: "24h",
       risk_level: "all",
       attack_type: "all",
-      target_node: "all",
+      target_port: "all",
       process_status: "all",
       keyword: "",
       start_time: "",
@@ -1216,6 +1216,8 @@ function speakMechanicalWarning() {
 function updateClock() {
   const el = document.getElementById("statusClock");
   if (!el) return;
+  // The platform is deployed in Beijing; do not let a remote browser's host
+  // timezone shift the status clock or situation timestamps.
   el.textContent = formatDateTime(new Date(), false);
 }
 
@@ -1267,8 +1269,8 @@ function renderScreenView() {
     <section class="grid-6 dashboard-kpi-grid">
       <article class="kpi-card"><div class="kpi-label">今日遭遇攻击总数</div><div id="kpi_today_attack" class="kpi-value">0</div><div id="kpi_yoy" class="kpi-label">同比：-</div></article>
       <article class="kpi-card"><div class="kpi-label">当前活跃高危告警数</div><div id="kpi_high_alert" class="kpi-value">0</div></article>
-      <article class="kpi-card"><div class="kpi-label">攻击拦截成功率</div><div id="kpi_intercept" class="kpi-value">0%</div></article>
-      <article class="kpi-card"><div class="kpi-label">平均攻击响应时间</div><div id="kpi_response_ms" class="kpi-value">0ms</div></article>
+      <article class="kpi-card"><div class="kpi-label">今日识别态势数</div><div id="kpi_situations" class="kpi-value">0</div></article>
+      <article class="kpi-card"><div class="kpi-label">自动防御平均封禁时间</div><div id="kpi_defense_seconds" class="kpi-value">0s</div></article>
       <article class="kpi-card"><div class="kpi-label">今日异常检测数</div><div id="kpi_anomaly" class="kpi-value">0</div></article>
       <article class="kpi-card"><div class="kpi-label">在线防护节点数</div><div id="kpi_nodes" class="kpi-value">0</div></article>
     </section>
@@ -1310,6 +1312,9 @@ function renderScreenView() {
     </section>
   `;
   document.getElementById("btnAttackMapShow")?.addEventListener("click", () => openAttackMapModal());
+  // Re-entering the dashboard should feel instant: paint the last successful
+  // snapshot first, then reconcile it with fresh server data in the background.
+  if (state.screenData) applyScreenData(state.screenData);
   refreshScreenData().catch((err) => showToast(`加载大屏失败：${err.message}`));
 }
 
@@ -1324,10 +1329,17 @@ async function refreshScreenData() {
     api("/api/v2/common/alerts/ticker?limit=3"),
   ]);
 
+  const snapshot = { kpis, trend7d, topTypes, sourceDist, heatmap, methodShare, ticker };
+  state.screenData = snapshot;
+  applyScreenData(snapshot);
+}
+
+function applyScreenData(snapshot) {
+  const { kpis, trend7d, topTypes, sourceDist, heatmap, methodShare, ticker } = snapshot;
   animateTextNumber("kpi_today_attack", Number(kpis.today_attack_total || 0), "");
   animateTextNumber("kpi_high_alert", Number(kpis.active_high_alerts || 0), "");
-  animateTextNumber("kpi_intercept", Number(kpis.intercept_success_rate || 0), "%");
-  animateTextNumber("kpi_response_ms", Number(kpis.avg_attack_response_ms || 0), "ms");
+  animateTextNumber("kpi_situations", Number(kpis.today_situation_total || 0), "");
+  animateTextNumber("kpi_defense_seconds", Number(kpis.avg_auto_defense_block_seconds || 0), "s");
   animateTextNumber("kpi_anomaly", Number(kpis.today_anomaly_detected || 0), "");
   animateTextNumber("kpi_nodes", Number(kpis.online_protection_nodes || 0), "");
 
@@ -1343,7 +1355,6 @@ async function refreshScreenData() {
 
   renderTrendChart("chartTrend7d", Array.isArray(trend7d.items) ? trend7d.items : []);
   renderTopTypeBarChart("chartTopTypes", Array.isArray(topTypes.items) ? topTypes.items : []);
-  state.screenData = { kpis, trend7d, topTypes, sourceDist, heatmap, methodShare, ticker };
   renderPieChart("chartSourcePie", Array.isArray(sourceDist.items) ? sourceDist.items : [], "source_region", "total");
   renderHeatmapChart("chartHeatmap", Array.isArray(heatmap.items) ? heatmap.items : []);
   renderDonutChart("chartMethodDonut", Array.isArray(methodShare.items) ? methodShare.items : [], "attack_type", "ratio_percent");
@@ -1745,7 +1756,7 @@ function renderTicker(items) {
   const text = items
     .map(
       (x) =>
-        `【${x.occurred_at || "-"}】${x.event_id || "-"} ${x.attack_type || "-"} 来源IP ${x.source_ip || "-"} 目标 ${x.target_node || "-"}`
+        `【${x.occurred_at || "-"}】${x.event_id || "-"} ${x.attack_type || "-"} 来源IP ${x.source_ip || "-"} 攻击端口 ${x.target_port || "-"}`
     )
     .join("  |  ");
   el.textContent = `${text}      ${text}`;
@@ -2054,38 +2065,48 @@ function renderSituationAiReport(detail) {
   container.innerHTML = `
     <header class="situation-report-lead">
       <span>执行摘要</span>
-      <p>${escapeHtml(report.executive_summary || report.narrative || "暂无摘要")}</p>
-      <div class="situation-report-intent"><b>可能意图</b><span>${escapeHtml(report.likely_intent || "待确认")}</span></div>
+      <p>${escapeHtml(normalizeSituationReportTime(report.executive_summary || report.narrative || "暂无摘要", report))}</p>
+      <div class="situation-report-intent"><b>可能意图</b><span>${escapeHtml(normalizeSituationReportTime(report.likely_intent || "待确认", report))}</span></div>
     </header>
     <div class="situation-report-reading">
-      ${renderSituationReportSection("事件叙述", report.narrative)}
-      ${renderSituationReportSection("时间线分析", report.timeline_analysis)}
-      ${renderSituationReportSection("技术手法分析", report.technique_analysis)}
-      ${renderSituationReportSection("证据强度", report.evidence_assessment || report.analysis)}
-      ${renderSituationReportSection("影响评估", report.impact_assessment)}
-      ${renderSituationReportSection("失陷判断", report.compromise_assessment || report.conclusion, "critical")}
-      ${renderSituationReportSection("综合结论", report.conclusion, "conclusion")}
+      ${renderSituationReportSection("事件叙述", report.narrative, "", report)}
+      ${renderSituationReportSection("时间线分析", report.timeline_analysis, "", report)}
+      ${renderSituationReportSection("技术手法分析", report.technique_analysis, "", report)}
+      ${renderSituationReportSection("证据强度", report.evidence_assessment || report.analysis, "", report)}
+      ${renderSituationReportSection("影响评估", report.impact_assessment, "", report)}
+      ${renderSituationReportSection("失陷判断", report.compromise_assessment || report.conclusion, "critical", report)}
+      ${renderSituationReportSection("综合结论", report.conclusion, "conclusion", report)}
     </div>
     <div class="situation-response-plan">
-      <section><h4>调查步骤</h4>${renderSituationAdvice(report.investigation_steps)}</section>
-      <section><h4>即时防护</h4>${renderSituationAdvice(report.protection_measures)}</section>
-      <section><h4>检测优化</h4>${renderSituationAdvice(report.detection_improvements)}</section>
-      <section><h4>长期改进</h4>${renderSituationAdvice(report.improvement_suggestions)}</section>
+      <section><h4>调查步骤</h4>${renderSituationAdvice(report.investigation_steps, report)}</section>
+      <section><h4>即时防护</h4>${renderSituationAdvice(report.protection_measures, report)}</section>
+      <section><h4>检测优化</h4>${renderSituationAdvice(report.detection_improvements, report)}</section>
+      <section><h4>长期改进</h4>${renderSituationAdvice(report.improvement_suggestions, report)}</section>
     </div>
     <details class="situation-evidence-limits">
       <summary>证据边界与不确定性</summary>
-      ${renderSituationAdvice(report.evidence_limitations)}
+      ${renderSituationAdvice(report.evidence_limitations, report)}
     </details>`;
 }
 
-function renderSituationReportSection(title, content, className = "") {
-  if (!content) return "";
-  return `<section class="${escapeHtml(className)}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(content)}</p></section>`;
+function normalizeSituationReportTime(value, report = {}) {
+  const text = String(value || "");
+  if (String(report.time_zone || report.timezone || "").toLowerCase() === "asia/shanghai") return text;
+  return text.replace(/\b(20\d{2}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|\+00:00)?\b/g, (_, date, time) => {
+    const parsed = new Date(`${date}T${time}Z`);
+    if (Number.isNaN(parsed.getTime())) return `${date} ${time}`;
+    return parsed.toLocaleString("sv-SE", { hour12: false, timeZone: "Asia/Shanghai" });
+  });
 }
 
-function renderSituationAdvice(items) {
+function renderSituationReportSection(title, content, className = "", report = {}) {
+  if (!content) return "";
+  return `<section class="${escapeHtml(className)}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(normalizeSituationReportTime(content, report))}</p></section>`;
+}
+
+function renderSituationAdvice(items, report = {}) {
   const rows = Array.isArray(items) ? items : [];
-  return rows.length ? `<ol>${rows.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>` : `<p>暂无建议</p>`;
+  return rows.length ? `<ol>${rows.map((item) => `<li>${escapeHtml(normalizeSituationReportTime(item, report))}</li>`).join("")}</ol>` : `<p>暂无建议</p>`;
 }
 
 function renderSituationEvidence(actions) {
@@ -2106,46 +2127,60 @@ function renderSituationEvidence(actions) {
 }
 
 function aggregateSituationNodes(nodes, maxNodes = 10) {
-  const groups = [];
-  nodes.forEach((node) => {
-    const previous = groups[groups.length - 1];
-    const key = `${node.stage || "unknown"}|${node.action_type || node.name || "unknown"}`;
-    if (previous && previous.aggregateKey === key) {
-      previous.members.push(node);
-      previous.count += Number(node.count || 1);
-      previous.confidence = Math.max(previous.confidence, Number(node.confidence || 0));
-      previous.last_seen_at = node.last_seen_at || node.occurred_at || previous.last_seen_at;
+  const byAction = new Map();
+  nodes.forEach((node, index) => {
+    const stage = node.stage || "unknown";
+    const key = `${stage}|${node.action_type || node.name || "unknown"}`;
+    const existing = byAction.get(key);
+    if (existing) {
+      existing.members.push(node);
+      existing.count += Number(node.count || 1);
+      existing.confidence = Math.max(existing.confidence, Number(node.confidence || 0));
+      existing.last_seen_at = node.last_seen_at || node.occurred_at || existing.last_seen_at;
       return;
     }
-    groups.push({
+    byAction.set(key, {
       ...node,
+      stage,
       aggregateKey: key,
+      firstIndex: index,
       members: [node],
       count: Number(node.count || 1),
       confidence: Number(node.confidence || 0),
       last_seen_at: node.last_seen_at || node.occurred_at,
     });
   });
-  if (groups.length <= maxNodes) return groups;
 
-  const compacted = [];
-  const chunkSize = Math.ceil(groups.length / maxNodes);
-  for (let index = 0; index < groups.length; index += chunkSize) {
-    const chunk = groups.slice(index, index + chunkSize);
-    const names = [...new Set(chunk.map((item) => item.name).filter(Boolean))];
-    const members = chunk.flatMap((item) => item.members || [item]);
-    compacted.push({
-      ...chunk[0],
-      id: `aggregate-${index}`,
+  const groups = [...byAction.values()];
+  // If there are still too many unique actions, only merge actions in the
+  // same attack stage. Cross-stage merging destroys the swimlane semantics.
+  while (groups.length > maxNodes) {
+    let bestPair = null;
+    for (let left = 0; left < groups.length; left += 1) {
+      for (let right = left + 1; right < groups.length; right += 1) {
+        if (groups[left].stage !== groups[right].stage) continue;
+        const score = Number(groups[left].count || 0) + Number(groups[right].count || 0);
+        if (!bestPair || score < bestPair.score) bestPair = { left, right, score };
+      }
+    }
+    if (!bestPair) break;
+    const first = groups[bestPair.left];
+    const second = groups[bestPair.right];
+    const names = [...new Set([first.name, second.name].filter(Boolean))];
+    groups[bestPair.left] = {
+      ...first,
+      firstIndex: Math.min(first.firstIndex, second.firstIndex),
       name: names.length <= 2 ? names.join(" / ") : `${names.slice(0, 2).join(" / ")} 等`,
-      count: chunk.reduce((sum, item) => sum + Number(item.count || 1), 0),
-      confidence: Math.max(...chunk.map((item) => Number(item.confidence || 0))),
-      last_seen_at: chunk[chunk.length - 1].last_seen_at || chunk[chunk.length - 1].occurred_at,
-      members,
-      mixedStages: new Set(chunk.map((item) => item.stage)).size > 1,
-    });
+      count: Number(first.count || 0) + Number(second.count || 0),
+      confidence: Math.max(Number(first.confidence || 0), Number(second.confidence || 0)),
+      last_seen_at: second.last_seen_at || second.occurred_at || first.last_seen_at,
+      members: [...(first.members || [first]), ...(second.members || [second])],
+    };
+    groups.splice(bestPair.right, 1);
   }
-  return compacted;
+  return groups
+    .sort((a, b) => a.firstIndex - b.firstIndex)
+    .map((group, index) => ({ ...group, id: `aggregate-${index}` }));
 }
 
 function buildSituationGraphView(graph) {
@@ -2374,7 +2409,7 @@ function renderProQueryView() {
             <option value="low">低危</option>
           </select>
           <select id="pro_attack_type"><option value="all">全部攻击类型</option></select>
-          <select id="pro_target_node"><option value="all">全部防护节点</option></select>
+          <select id="pro_target_port"><option value="all">全部攻击端口</option></select>
           <input id="pro_keyword" placeholder="关键词（事件ID/IP/接口）" />
         </div>
         <div class="ops-group">
@@ -2407,8 +2442,8 @@ function renderProQueryView() {
                 <th>风险等级</th>
                 <th>攻击类型</th>
                 <th>来源IP</th>
-                <th>目标节点</th>
-                <th>攻击结果</th>
+                <th>攻击端口</th>
+                <th>IP封禁情况</th>
                 <th>处理状态</th>
                 <th>操作</th>
               </tr>
@@ -2445,8 +2480,8 @@ function renderProQueryView() {
           <textarea id="pro_note_text" rows="3" placeholder="处理备注" ${canHandle ? "" : "disabled"}></textarea>
           <button id="pro_save_note" class="btn btn-success" ${canHandle ? "" : "disabled"}>保存备注</button>
         </div>
-        <div class="panel-head pro-node-head"><h3 class="panel-title">节点详情</h3></div>
-        <div id="pro_node_detail" class="detail-card">点击目标节点名称查看</div>
+        <div class="panel-head pro-node-head"><h3 class="panel-title">本机防护说明</h3></div>
+        <div id="pro_node_detail" class="detail-card">本系统按单台服务器部署，事件中的攻击端口均为本机实际监听端口。</div>
       </article>
     </section>
 
@@ -2573,7 +2608,7 @@ function renderProQueryView() {
     "pro_time_range",
     "pro_risk_level",
     "pro_attack_type",
-    "pro_target_node",
+    "pro_target_port",
     "pro_keyword",
     "pro_start_time",
     "pro_end_time",
@@ -2664,9 +2699,9 @@ async function initProOptions() {
     api("/api/v2/pro/events?time_range=30d&page=1&page_size=200"),
   ]);
   const attackTypes = Array.from(new Set((typeObj.items || []).map((x) => x.attack_type))).filter(Boolean);
-  const nodes = Array.from(new Set((eventObj.items || []).map((x) => x.target_node))).filter(Boolean);
+  const ports = Array.from(new Set((eventObj.items || []).map((x) => x.target_port))).filter(Boolean).sort((a, b) => Number(a) - Number(b));
   state.pro.options.attackTypes = attackTypes;
-  state.pro.options.nodes = nodes;
+  state.pro.options.ports = ports;
 
   const typeSelect = document.getElementById("pro_attack_type");
   if (typeSelect) {
@@ -2674,9 +2709,9 @@ async function initProOptions() {
       .map((x) => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`)
       .join("")}`;
   }
-  const nodeSelect = document.getElementById("pro_target_node");
-  if (nodeSelect) {
-    nodeSelect.innerHTML = `<option value="all">全部防护节点</option>${nodes
+  const portSelect = document.getElementById("pro_target_port");
+  if (portSelect) {
+    portSelect.innerHTML = `<option value="all">全部攻击端口</option>${ports
       .map((x) => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`)
       .join("")}`;
   }
@@ -2686,7 +2721,7 @@ function collectProFilters() {
   state.pro.filters.time_range = String(document.getElementById("pro_time_range")?.value || "24h");
   state.pro.filters.risk_level = String(document.getElementById("pro_risk_level")?.value || "all");
   state.pro.filters.attack_type = String(document.getElementById("pro_attack_type")?.value || "all");
-  state.pro.filters.target_node = String(document.getElementById("pro_target_node")?.value || "all");
+  state.pro.filters.target_port = String(document.getElementById("pro_target_port")?.value || "all");
   state.pro.filters.keyword = String(document.getElementById("pro_keyword")?.value || "").trim();
   state.pro.filters.start_time = String(document.getElementById("pro_start_time")?.value || "");
   state.pro.filters.end_time = String(document.getElementById("pro_end_time")?.value || "");
@@ -2702,7 +2737,7 @@ async function loadProEvents(forcePageOne = false) {
   params.set("time_range", f.time_range);
   params.set("risk_level", f.risk_level);
   params.set("attack_type", f.attack_type);
-  params.set("target_node", f.target_node);
+  params.set("target_port", f.target_port);
   params.set("process_status", f.process_status);
   if (f.keyword) params.set("keyword", f.keyword);
   if (f.time_range === "custom") {
@@ -2749,8 +2784,8 @@ function renderProTable() {
             <td>${riskBadge(row.risk_level)}</td>
             <td>${escapeHtml(formatAttackType(row.attack_type || "-"))}</td>
             <td>${escapeHtml(row.source_ip || "-")}</td>
-            <td><span class="link-btn" data-pro-node="${escapeHtml(row.target_node || "")}">${escapeHtml(row.target_node || "-")}</span></td>
-            <td>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</td>
+            <td>${escapeHtml(row.target_port == null ? "-" : String(row.target_port))}</td>
+            <td>${ipBlocked ? "已封禁" : "未封禁"}</td>
             <td>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</td>
             <td><button type="button" class="btn ${ipBlocked ? "btn-ghost" : "btn-danger"}" data-pro-ipaction="${escapeHtml(row.event_id)}" data-pro-ipblocked="${ipBlocked ? "1" : "0"}">${ipBlocked ? "解封IP" : "封禁IP"}</button></td>
           </tr>
@@ -3048,6 +3083,10 @@ function renderV2DetectionDetail(row) {
   const pocs = Array.isArray(v2.poc_matches) ? v2.poc_matches : [];
   const windows = Array.isArray(v2.behavior_windows) ? v2.behavior_windows : [];
   const raw = v2.raw_http || {};
+  const llm = v2.llm_review || {};
+  const llmEvidence = Array.isArray(llm.evidence) ? llm.evidence : [];
+  const llmStatusMap = { pending: "等待研判", processing: "正在研判", done: "研判完成", failed: "研判失败" };
+  const llmVerdictMap = { attack: "确认攻击", benign: "正常流量", suspicious: "仍需复核", unknown: "无法确定" };
   return `
     <section class="v2-section">
       <div class="v2-section-head">
@@ -3136,6 +3175,28 @@ function renderV2DetectionDetail(row) {
       <div class="v2-subtitle">融合证据摘要</div>
       ${renderEvidenceList(v2.evidence)}
 
+      <div class="v2-subtitle">大模型最终研判</div>
+      <div class="llm-review-card ${escapeHtml(String(llm.verdict || llm.llm_status || "pending"))}">
+        <div class="llm-review-head">
+          <div>
+            <span>LLM FINAL REVIEW</span>
+            <strong>${escapeHtml(llmVerdictMap[String(llm.verdict || "").toLowerCase()] || llmStatusMap[String(llm.llm_status || "pending").toLowerCase()] || "等待研判")}</strong>
+          </div>
+          <em>${escapeHtml(llm.model_name || "模型队列")}</em>
+        </div>
+        <div class="llm-review-metrics">
+          <div><span>风险等级</span><b>${escapeHtml(formatRiskLevel(llm.severity || "-"))}</b></div>
+          <div><span>研判置信度</span><b>${escapeHtml(formatPercentScore(llm.confidence))}</b></div>
+          <div><span>RAG 知识增强</span><b>${Number(llm.rag_enabled || 0) === 1 ? `已启用 · ${Number(llm.rag_hits || 0)} 条` : "未启用"}</b></div>
+          <div><span>研判耗时</span><b>${llm.review_latency_ms == null ? "-" : `${escapeHtml(String(llm.review_latency_ms))} ms`}</b></div>
+        </div>
+        <div class="llm-review-summary">${escapeHtml(llm.summary || llm.llm_error || "候选事件已进入大模型研判队列，完成前不会发布为正式攻击事件。")}</div>
+        <div class="llm-review-evidence">
+          <span>大模型判定依据</span>
+          ${renderEvidenceList(llmEvidence)}
+        </div>
+      </div>
+
       <details class="v2-raw-detail">
         <summary>查看原始请求/响应</summary>
         <div class="v2-raw-grid">
@@ -3168,10 +3229,9 @@ function renderProEventDetail() {
       <div class="kv"><strong>风险等级：</strong>${riskBadge(row.risk_level)}</div>
       <div class="kv"><strong>攻击类型：</strong>${escapeHtml(formatAttackType(row.attack_type || "-"))}</div>
       <div class="kv"><strong>来源IP：</strong>${escapeHtml(row.source_ip || "-")} (${escapeHtml(row.source_region || "-")})</div>
-      <div class="kv"><strong>IP\u5c01\u7981\u72b6\u6001\uff1a</strong>${Number(row.ip_blocked || 0) === 1 ? "\u5df2\u5c01\u7981" : "\u672a\u5c01\u7981"}</div>
-      <div class="kv"><strong>目标节点：</strong>${escapeHtml(row.target_node || "-")}</div>
+      <div class="kv"><strong>攻击端口：</strong>${escapeHtml(row.target_port == null ? "-" : String(row.target_port))}</div>
       <div class="kv"><strong>目标接口：</strong>${escapeHtml(row.target_interface || "-")}</div>
-      <div class="kv"><strong>攻击结果：</strong>${escapeHtml(formatAttackResult(row.attack_result || "-"))}</div>
+      <div class="kv"><strong>IP封禁情况：</strong>${Number(row.ip_blocked || 0) === 1 ? "已封禁" : "未封禁"}</div>
       <div class="kv"><strong>处理状态：</strong>${escapeHtml(formatProcessStatus(row.process_status || "-"))}</div>
       <div class="kv"><strong>响应耗时：</strong>${escapeHtml(String(row.response_ms || 0))} ms</div>
     </div>
@@ -3325,8 +3385,8 @@ function exportProEventsCsv() {
     risk_level: x.risk_level,
     attack_type: x.attack_type,
     source_ip: x.source_ip,
-    target_node: x.target_node,
-    attack_result: x.attack_result,
+    target_port: x.target_port,
+    ip_blocked: Number(x.ip_blocked || 0) === 1 ? "已封禁" : "未封禁",
     process_status: x.process_status,
   }));
   downloadCsv("pro_events_export.csv", rows);
@@ -5459,7 +5519,7 @@ function parseApiError(text, status) {
 function formatDateTime(dt, withMs = true) {
   const d = dt instanceof Date ? dt : new Date(dt);
   if (Number.isNaN(d.getTime())) return "-";
-  const base = d.toLocaleString("zh-CN", { hour12: false });
+  const base = d.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
   if (!withMs) return base;
   const ms = String(d.getMilliseconds()).padStart(3, "0");
   return `${base}.${ms}`;
@@ -5545,8 +5605,14 @@ function renderRagSettingsView() {
           <h2>大模型配置</h2>
           <p>管理研判提示词与检索增强知识。云端 API 仅承担向量化和重排，攻击报告仍由现有本地模型生成。</p>
         </div>
-        <div class="ai-config-health" id="rag3_health">
-          <i></i><span>正在检查 RAG 服务</span>
+        <div class="ops-group">
+          <label class="rag3-toggle" title="关闭后停止向量化、召回、重排和 RAG 上下文注入">
+            <input id="rag3_master_enabled" type="checkbox" />
+            <span>启用 RAG</span>
+          </label>
+          <div class="ai-config-health" id="rag3_health">
+            <i></i><span>正在检查 RAG 服务</span>
+          </div>
         </div>
       </header>
       <nav class="ai-config-tabs" aria-label="AI 配置分类">
@@ -5562,6 +5628,20 @@ function renderRagSettingsView() {
       state.llmSettings.activePanel = button.dataset.aiPanel === "prompt" ? "prompt" : "rag";
       renderRagSettingsView();
     });
+  });
+  document.getElementById("rag3_master_enabled")?.addEventListener("change", async (event) => {
+    const input = event.currentTarget;
+    input.disabled = true;
+    try {
+      const result = await api("/api/v3/rag/enabled", { method: "PUT", body: { enabled: input.checked } });
+      showToast(result.enabled ? "RAG 已开启，研判进程将自动启用检索增强" : "RAG 已关闭，不再调用云端向量与重排 API");
+      await rag3LoadStatus();
+    } catch (err) {
+      input.checked = !input.checked;
+      showToast(`RAG 开关保存失败：${err.message}`);
+    } finally {
+      input.disabled = false;
+    }
   });
   if (activePanel === "prompt") {
     rag3RenderPrompt();
@@ -5582,9 +5662,13 @@ function rag3SetHealth(ok, message) {
 async function rag3LoadStatus() {
   const workspace = rag3State();
   workspace.status = await api("/api/v3/rag/status");
+  const toggle = document.getElementById("rag3_master_enabled");
+  if (toggle) toggle.checked = workspace.status.enabled !== false;
   rag3SetHealth(
-    workspace.status.cloud_configured,
-    workspace.status.cloud_configured
+    workspace.status.enabled === false || workspace.status.cloud_configured,
+    workspace.status.enabled === false
+      ? "RAG 已关闭 · 不产生云端检索费用"
+      : workspace.status.cloud_configured
       ? `${workspace.status.embedding_model} · ${workspace.status.rerank_model}`
       : "云端向量 API 尚未配置"
   );

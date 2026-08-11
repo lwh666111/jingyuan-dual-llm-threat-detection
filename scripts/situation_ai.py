@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.request
 from datetime import datetime
@@ -242,6 +243,7 @@ def call_ollama(ollama_url: str, model: str, prompt: str, timeout_sec: int = 120
         "model": model,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "5m"),
         "format": "json",
         "options": {"temperature": 0.15, "num_ctx": 6144, "num_predict": 2000},
     }
@@ -265,6 +267,7 @@ def analyze_situation(
     rag_mysql_conf: Optional[Dict[str, Any]] = None,
     rag_data_dir: Optional[Path] = None,
     rag_api_config: Optional[Path] = None,
+    rag_enabled: bool = True,
     rag_top_k: int = 4,
     timeout_sec: int = 120,
 ) -> Tuple[Dict[str, Any], str]:
@@ -274,7 +277,7 @@ def analyze_situation(
     )
     rag_rows: List[Dict[str, Any]] = []
     try:
-        if rag_mysql_conf and rag_data_dir and rag_api_config:
+        if rag_enabled and rag_mysql_conf and rag_data_dir and rag_api_config:
             from rag_service import hybrid_search, list_kbs, load_api_config, mysql_connect
 
             with mysql_connect(rag_mysql_conf, autocommit=False) as conn:
@@ -298,7 +301,7 @@ def analyze_situation(
                         }
                         for item in (result.get("items") or [])[: max(1, rag_top_k)]
                     ]
-        if not rag_rows and rag_db_path.exists():
+        if rag_enabled and not rag_rows and rag_db_path.exists():
             rag_rows = retrieve_rag_docs(rag_db_path, query_text=query, top_k=max(1, rag_top_k))
     except Exception:
         rag_rows = []

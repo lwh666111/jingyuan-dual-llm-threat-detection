@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS demo_fast_defense_audit (
   decision VARCHAR(32) NOT NULL,
   firewall_success TINYINT(1) NOT NULL DEFAULT 0,
   firewall_detail TEXT NOT NULL,
+  defense_latency_ms DOUBLE NULL,
   request_time DATETIME(3) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_fast_ip_time (source_ip, created_at),
@@ -181,6 +182,7 @@ class FastDefenseGuard:
         self._pending_ips: set[str] = set()
         self._lock = threading.Lock()
         self._closed = False
+        self._schema_ready = False
         self._worker = threading.Thread(target=self._worker_loop, name="fast-defense", daemon=True)
         self._worker.start()
 
@@ -249,22 +251,42 @@ class FastDefenseGuard:
         cur.execute("SELECT id FROM demo_blocked_ips WHERE ip_address=%s LIMIT 1", (ip_address,))
         return bool(cur.fetchone()) and bool(firewall_status(ip_address).get("active"))
 
+    def _ensure_schema(self, cur: Any) -> None:
+        if getattr(self, "_schema_ready", False):
+            return
+        cur.execute("SHOW COLUMNS FROM demo_fast_defense_audit LIKE 'defense_latency_ms'")
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE demo_fast_defense_audit "
+                "ADD COLUMN defense_latency_ms DOUBLE NULL AFTER firewall_detail"
+            )
+        cur.execute("SHOW COLUMNS FROM demo_blocked_ips LIKE 'defense_latency_ms'")
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE demo_blocked_ips "
+                "ADD COLUMN defense_latency_ms DOUBLE NULL AFTER blocked_role"
+            )
+        self._schema_ready = True
+
     def _enforce(self, decision: FastDecision) -> None:
         conn = self._connect(autocommit=False)
         try:
             with conn.cursor() as cur:
                 cur.execute(AUDIT_DDL)
+                self._ensure_schema(cur)
                 already_blocked = self._already_blocked(cur, decision.source_ip)
                 if already_blocked:
-                    firewall_ok, firewall_detail = True, "already_blocked"
+                    firewall_ok, firewall_detail, defense_latency_ms = True, "already_blocked", None
                 else:
+                    defense_started = time.perf_counter()
                     firewall_ok, firewall_detail = firewall_block_ip(decision.source_ip)
+                    defense_latency_ms = (time.perf_counter() - defense_started) * 1000.0
                 cur.execute(
                     """
                     INSERT INTO demo_fast_defense_audit(
                       request_fingerprint,source_ip,destination_ip,method,uri,category,score,
-                      rule_ids_json,decision,firewall_success,firewall_detail,request_time
-                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                      rule_ids_json,decision,firewall_success,firewall_detail,defense_latency_ms,request_time
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         decision.fingerprint,
@@ -278,6 +300,7 @@ class FastDefenseGuard:
                         "silent_block" if firewall_ok else "block_failed",
                         1 if firewall_ok else 0,
                         firewall_detail[:4000],
+                        defense_latency_ms,
                         decision.request_time,
                     ),
                 )
@@ -285,12 +308,14 @@ class FastDefenseGuard:
                     cur.execute("DELETE FROM demo_auto_defense_releases WHERE ip_address=%s", (decision.source_ip,))
                     cur.execute(
                         """
-                        INSERT INTO demo_blocked_ips(ip_address,source_event_id,reason,blocked_by,blocked_role)
-                        VALUES(%s,'','automatic_protection','auto-defense','system')
+                        INSERT INTO demo_blocked_ips(
+                          ip_address,source_event_id,reason,blocked_by,blocked_role,defense_latency_ms
+                        ) VALUES(%s,'','automatic_protection','auto-defense','system',%s)
                         ON DUPLICATE KEY UPDATE source_event_id='',reason='automatic_protection',
-                          blocked_by='auto-defense',blocked_role='system',blocked_at=CURRENT_TIMESTAMP
+                          blocked_by='auto-defense',blocked_role='system',
+                          defense_latency_ms=VALUES(defense_latency_ms),blocked_at=CURRENT_TIMESTAMP
                         """,
-                        (decision.source_ip,),
+                        (decision.source_ip, defense_latency_ms),
                     )
             conn.commit()
             self._log(

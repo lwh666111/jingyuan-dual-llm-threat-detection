@@ -269,10 +269,10 @@ def resolve_source_region_mysql(conn: Any, source_ip: str) -> str:
 
 def normalize_attack_event_time(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) -> str | None:
     val = first_non_none(
+        case_obj.get("export_time"),
         analysis_obj.get("attack_time"),
         analysis_obj.get("analyzed_at"),
         case_obj.get("analyzed_at"),
-        case_obj.get("export_time"),
     )
     if val is None:
         return None
@@ -282,8 +282,8 @@ def normalize_attack_event_time(case_obj: Dict[str, Any], analysis_obj: Dict[str
 
 def normalize_attack_ip(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) -> str | None:
     val = first_non_none(
-        analysis_obj.get("source_ip"),
         case_obj.get("source_ip"),
+        analysis_obj.get("source_ip"),
     )
     if val is None:
         return None
@@ -293,8 +293,8 @@ def normalize_attack_ip(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) 
 
 def normalize_target_interface(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) -> str | None:
     val = first_non_none(
-        analysis_obj.get("attack_interface"),
         case_obj.get("uri"),
+        analysis_obj.get("attack_interface"),
     )
     if val is None:
         return None
@@ -302,14 +302,19 @@ def normalize_target_interface(case_obj: Dict[str, Any], analysis_obj: Dict[str,
     return text or None
 
 
-def normalize_attack_type(analysis_obj: Dict[str, Any]) -> str | None:
+def normalize_attack_type(analysis_obj: Dict[str, Any], case_obj: Dict[str, Any] | None = None) -> str | None:
+    case_obj = case_obj or {}
     val = first_non_none(
+        case_obj.get("attack_type"),
+        case_obj.get("v2_payload_label"),
         analysis_obj.get("attack_method"),
         analysis_obj.get("verdict"),
     )
     if val is None:
         return None
     text = str(val).strip()
+    if "\ufffd" in text:
+        return None
     return text or None
 
 
@@ -688,6 +693,7 @@ def ensure_schema_mysql(conn: Any) -> None:
           source_ip VARCHAR(64) NOT NULL,
           source_region VARCHAR(64) NOT NULL,
           target_node VARCHAR(64) NOT NULL,
+          target_port INT NULL,
           target_interface TEXT NOT NULL,
           attack_result VARCHAR(16) NOT NULL,
           process_status VARCHAR(16) NOT NULL DEFAULT 'unprocessed',
@@ -748,6 +754,8 @@ def ensure_schema_mysql(conn: Any) -> None:
             cur.execute("ALTER TABLE analyses MODIFY COLUMN target_interface TEXT NULL")
         cur.execute("SHOW COLUMNS FROM demo_attack_events")
         event_columns = {str(row["Field"]): row for row in cur.fetchall()}
+        if "target_port" not in event_columns:
+            cur.execute("ALTER TABLE demo_attack_events ADD COLUMN target_port INT NULL AFTER target_node")
         event_target_type = str(event_columns.get("target_interface", {}).get("Type") or "").lower()
         if event_target_type.startswith("varchar"):
             cur.execute("ALTER TABLE demo_attack_events MODIFY COLUMN target_interface TEXT NOT NULL")
@@ -947,12 +955,12 @@ def upsert_demo_attack_event_mysql(conn: Any, row: Dict[str, Any]) -> None:
             """
             INSERT INTO demo_attack_events(
               event_id, occurred_at, risk_level, attack_type, source_ip, source_region,
-              target_node, target_interface, attack_result, process_status, acked,
+              target_node, target_port, target_interface, attack_result, process_status, acked,
               attack_payload, request_log, protection_action, handling_suggestion, note,
               response_ms, anomaly_detected, machine_id
             ) VALUES (
               %(event_id)s, %(occurred_at)s, %(risk_level)s, %(attack_type)s, %(source_ip)s, %(source_region)s,
-              %(target_node)s, %(target_interface)s, %(attack_result)s, %(process_status)s, %(acked)s,
+              %(target_node)s, %(target_port)s, %(target_interface)s, %(attack_result)s, %(process_status)s, %(acked)s,
               %(attack_payload)s, %(request_log)s, %(protection_action)s, %(handling_suggestion)s, %(note)s,
               %(response_ms)s, %(anomaly_detected)s, %(machine_id)s
             )
@@ -963,6 +971,7 @@ def upsert_demo_attack_event_mysql(conn: Any, row: Dict[str, Any]) -> None:
               source_ip=VALUES(source_ip),
               source_region=VALUES(source_region),
               target_node=VALUES(target_node),
+              target_port=VALUES(target_port),
               target_interface=VALUES(target_interface),
               attack_result=VALUES(attack_result),
               attack_payload=VALUES(attack_payload),
@@ -975,6 +984,13 @@ def upsert_demo_attack_event_mysql(conn: Any, row: Dict[str, Any]) -> None:
             """,
             row,
         )
+
+
+def llm_verdict_is_attack(case_obj: Dict[str, Any], analysis_obj: Dict[str, Any]) -> bool:
+    if str(case_obj.get("llm_status") or "").strip().lower() != "done":
+        return False
+    verdict = str(analysis_obj.get("verdict") or "").strip().lower()
+    return verdict in {"attack", "malicious", "攻击", "恶意"}
 
 
 def count_rows(conn: Any, backend: Backend, table: str) -> int:
@@ -1094,7 +1110,7 @@ def sync_result_to_db(
         inferred_attack_type = infer_attack_type_text(analysis_obj, request_row, request_content)
         resolved_attack_type = normalize_attack_type_label(
             (
-                normalize_attack_type(analysis_obj)
+                normalize_attack_type(analysis_obj, case_obj)
                 or str(case_obj.get("attack_type") or "").strip()
                 or inferred_attack_type
             )
@@ -1163,6 +1179,7 @@ def sync_result_to_db(
                 "source_ip": str(source_ip)[:64],
                 "source_region": str(source_region)[:64],
                 "target_node": str(machine.get("machine_name") or "node-local-01")[:64],
+                "target_port": to_int(case_obj.get("destination_port")),
                 "target_interface": str(target_interface)[:255],
                 "attack_result": infer_attack_result(status_code),
                 "process_status": "unprocessed",
@@ -1176,7 +1193,26 @@ def sync_result_to_db(
                 "anomaly_detected": 1 if risk_level == "high" else 0,
                 "machine_id": machine.get("id"),
             }
-            upsert_demo_attack_event_mysql(conn, event_row)
+            raw_canonical_exists = False
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM detection_candidates
+                        WHERE case_id LIKE 'raw:%' AND file_id=%s AND seq_id=%s
+                        LIMIT 1
+                        """,
+                        (file_id, seq_id),
+                    )
+                    raw_canonical_exists = bool(cur.fetchone())
+            except Exception:
+                # A fresh database creates the v2 tables immediately after the legacy import.
+                raw_canonical_exists = False
+            if llm_verdict_is_attack(case_obj, analysis_obj) and not raw_canonical_exists:
+                upsert_demo_attack_event_mysql(conn, event_row)
+            else:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM demo_attack_events WHERE event_id=%s", (str(case_id)[:40],))
 
         total += 1
         if analysis_obj:

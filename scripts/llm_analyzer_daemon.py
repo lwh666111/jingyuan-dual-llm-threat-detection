@@ -1,5 +1,6 @@
 ﻿import argparse
 import json
+import os
 import re
 import sqlite3
 import time
@@ -97,6 +98,7 @@ def build_user_payload(
     src_ip: str,
     dst_ip: str,
     rag_context: str = "",
+    detection_context: Optional[Dict] = None,
 ) -> str:
     safe_case = {
         "case_id": case_obj.get("case_id"),
@@ -112,8 +114,11 @@ def build_user_payload(
 
     body = {
         "meta": safe_case,
-        "request_block": request_text[:12000],
-        "response_block": response_text[:12000],
+        # The deterministic layers already retain the full packet. Keep the
+        # semantic review payload compact so CPU-only Ollama can answer fast.
+        "request_block": request_text[:3000],
+        "response_block": response_text[:1200],
+        "detection_context": detection_context or {},
         "retrieved_knowledge": rag_context[:6000] if rag_context else "",
     }
     return json.dumps(body, ensure_ascii=False)
@@ -282,6 +287,7 @@ def call_ollama_chat(
     req_obj = {
         "model": model,
         "stream": False,
+        "keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "5m"),
         "format": schema_obj,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -291,6 +297,7 @@ def call_ollama_chat(
             "num_ctx": num_ctx,
             "num_gpu": num_gpu,
             "temperature": temperature,
+            "num_predict": 384,
         },
     }
 
@@ -376,25 +383,75 @@ def resolve_model_name(base_url: str, preferred_model: str, timeout_sec: int = 1
     return fallback
 
 
+def infer_trusted_attack_type(case_obj: Dict, parsed: Dict) -> str:
+    for key in ("attack_type", "v2_payload_label"):
+        label = str(case_obj.get(key) or "").strip()
+        if label and "\ufffd" not in label:
+            return label
+
+    text = "\n".join(
+        str(case_obj.get(key) or "") for key in ("uri", "request_text", "rule_reason")
+    ).lower()
+    rules = [
+        (r"(?:union\s+select|information_schema|sleep\s*\(|\bor\s+1\s*=\s*1)", "SQL注入"),
+        (r"(?:<script|javascript:|onerror\s*=|onload\s*=)", "XSS"),
+        (r"(?:\.\./|%2e%2e|/etc/passwd|windows[\\/]system32)", "路径遍历"),
+        (r"(?:cmd\.exe|/bin/sh|powershell|runtime\.getruntime|processbuilder)", "命令注入"),
+        (r"(?:multipart/form-data|\.php\b|\.jsp\b|\.aspx\b)", "文件上传"),
+    ]
+    for pattern, label in rules:
+        if re.search(pattern, text, re.I):
+            return label
+
+    parsed_label = str(parsed.get("attack_method") or "").strip()
+    return parsed_label if parsed_label and "\ufffd" not in parsed_label else "可疑流量"
+
+
 def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, model_name: str) -> Dict:
     uri = str(case_obj.get("uri") or "unknown")
     method = str(case_obj.get("method") or "")
+    trusted_source_ip = str(case_obj.get("source_ip") or src_ip or "unknown")
+    trusted_destination_ip = str(case_obj.get("destination_ip") or dst_ip or "unknown")
+    trusted_attack_type = infer_trusted_attack_type(case_obj, parsed)
+    trusted_attack_path = f"{method} {uri}".strip() or uri
+    trusted_attack_time = str(case_obj.get("export_time") or now_iso())
+    verdict_raw = str(parsed.get("verdict") or "unknown").strip().lower()
+    if any(token in verdict_raw for token in ("attack", "malicious", "攻击", "恶意")):
+        verdict = "attack"
+    elif any(token in verdict_raw for token in ("benign", "normal", "safe", "正常", "安全")):
+        verdict = "benign"
+    else:
+        verdict = "unknown"
+    severity = str(parsed.get("severity") or case_obj.get("v2_risk_level") or "unknown")
+    confidence = float(parsed.get("confidence", 0.0) or 0.0)
+    if 1 < confidence <= 100:
+        confidence /= 100.0
+    confidence = max(0.0, min(1.0, confidence))
+    confidence_percent = confidence * 100
+    trusted_summary = (
+        f"检测到来源 {trusted_source_ip} 对 {uri} 发起疑似{trusted_attack_type}行为，"
+        f"请求方法为 {method or 'unknown'}。LLM研判结论为 {verdict}，"
+        f"风险等级为 {severity}，置信度约 {confidence_percent:.1f}%。"
+    )
 
     return {
         "case_id": str(case_obj.get("case_id") or ""),
         "file_id": str(case_obj.get("file_id") or ""),
         "seq_id": int(case_obj.get("seq_id") or 0),
-        "source_ip": parsed.get("source_ip") or src_ip or "unknown",
-        "destination_ip": parsed.get("destination_ip") or dst_ip or "unknown",
-        "attack_interface": parsed.get("attack_interface") or uri,
-        "attack_method": parsed.get("attack_method") or "unknown",
-        "attack_path": parsed.get("attack_path") or f"{method} {uri}".strip(),
-        "attack_time": parsed.get("attack_time") or now_iso(),
-        "severity": parsed.get("severity") or "unknown",
-        "confidence": float(parsed.get("confidence", 0.0) or 0.0),
-        "verdict": parsed.get("verdict") or "unknown",
+        # Network facts come from packet capture and the deterministic detector.
+        # A small LLM may hallucinate these fields, so it must not overwrite them.
+        "source_ip": trusted_source_ip,
+        "destination_ip": trusted_destination_ip,
+        "attack_interface": uri,
+        "attack_method": trusted_attack_type,
+        "attack_path": trusted_attack_path,
+        "attack_time": trusted_attack_time,
+        "severity": severity,
+        "confidence": confidence,
+        "verdict": verdict,
         "evidence": parsed.get("evidence") if isinstance(parsed.get("evidence"), list) else [],
-        "summary": parsed.get("summary") or "",
+        "summary": trusted_summary,
+        "llm_explanation": parsed.get("summary") or "",
         "model_name": model_name,
         "analyzed_at": now_iso(),
     }
@@ -525,6 +582,144 @@ def process_case(
     return f"failed({last_exc})"
 
 
+def open_review_conn(args):
+    from build_result_db import MySQLConfig
+    from sync_detection_v2_db import mysql_connect
+
+    return mysql_connect(
+        MySQLConfig(
+            args.rag_mysql_host,
+            args.rag_mysql_port,
+            args.rag_mysql_user,
+            args.rag_mysql_password,
+            args.rag_mysql_database,
+        )
+    )
+
+
+def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optional[str]:
+    from raw_llm_review import (
+        claim_next_review,
+        complete_review,
+        detection_context,
+        ensure_review_schema,
+        fail_review,
+    )
+
+    conn = open_review_conn(args)
+    try:
+        ensure_review_schema(conn)
+        row = claim_next_review(conn, max_attempts=args.raw_review_max_attempts)
+        if not row:
+            return None
+
+        event_id = str(row.get("event_id") or "")
+        case_id = str(row.get("case_id") or "")
+        started = time.perf_counter()
+        case_obj = {
+            "case_id": case_id,
+            "file_id": row.get("file_id"),
+            "seq_id": row.get("seq_id"),
+            "method": row.get("method"),
+            "uri": row.get("uri"),
+            "host": row.get("host"),
+            "status_code": row.get("status_code"),
+            "source_ip": row.get("source_ip"),
+            "destination_ip": row.get("destination_ip"),
+            "attack_type": row.get("attack_type"),
+            "v2_risk_level": row.get("risk_level"),
+            "export_time": row.get("event_time"),
+        }
+        request_text = str(row.get("request_text") or "")
+        response_text = str(row.get("response_text") or "")
+        context = detection_context(row)
+
+        rag_rows: List[Dict] = []
+        rag_context = ""
+        if args.rag_enable:
+            query_text = "\n".join(
+                [
+                    str(row.get("attack_type") or ""),
+                    str(row.get("method") or ""),
+                    str(row.get("uri") or ""),
+                    request_text[:2500],
+                    response_text[:1200],
+                    json.dumps(context, ensure_ascii=False)[:2500],
+                ]
+            )
+            rag_rows = retrieve_advanced_rag(args, query_text=query_text)
+            if not rag_rows:
+                rag_rows = retrieve_rag_docs(args.rag_db_path, query_text=query_text, top_k=args.rag_top_k)
+            rag_context = format_rag_context(rag_rows, max_chars=args.rag_max_chars)
+
+        user_payload = build_user_payload(
+            case_obj,
+            request_text,
+            response_text,
+            str(row.get("source_ip") or "unknown"),
+            str(row.get("destination_ip") or "unknown"),
+            rag_context=rag_context,
+            detection_context=context,
+        )
+        models_to_try = [args.model]
+        fallback_model = str(getattr(args, "fallback_model_resolved", "") or "").strip()
+        if fallback_model and fallback_model not in models_to_try:
+            models_to_try.append(fallback_model)
+
+        last_exc: Optional[Exception] = None
+        for idx, model_name in enumerate(models_to_try):
+            try:
+                parsed, raw_content = call_ollama_chat(
+                    base_url=args.ollama_url,
+                    model=model_name,
+                    system_prompt=system_prompt,
+                    user_payload=user_payload,
+                    schema_obj=schema_obj,
+                    timeout_sec=args.timeout_sec,
+                    num_ctx=args.num_ctx,
+                    num_gpu=args.num_gpu,
+                    temperature=args.temperature,
+                )
+                analysis = normalize_analysis(
+                    parsed,
+                    case_obj,
+                    str(row.get("source_ip") or "unknown"),
+                    str(row.get("destination_ip") or "unknown"),
+                    model_name,
+                )
+                latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+                confirmed = complete_review(
+                    conn,
+                    row=row,
+                    analysis=analysis,
+                    raw_content=raw_content,
+                    model_name=model_name,
+                    rag_enabled=bool(args.rag_enable),
+                    rag_hits=len(rag_rows),
+                    latency_ms=latency_ms,
+                )
+                return (
+                    f"{event_id}: done verdict={analysis.get('verdict')} "
+                    f"published={int(confirmed)} latency_ms={latency_ms}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if idx < len(models_to_try) - 1 and should_retry_llm_error(str(exc)):
+                    continue
+                break
+
+        fail_review(
+            conn,
+            event_id=event_id,
+            case_id=case_id,
+            error=str(last_exc or "unknown_error"),
+            max_attempts=args.raw_review_max_attempts,
+        )
+        return f"{event_id}: failed({last_exc})"
+    finally:
+        conn.close()
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parent.parent
 
@@ -542,6 +737,11 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--once", action="store_true", help="仅扫描一次并处理后退出")
     parser.add_argument("--max-cases", type=int, default=0, help="每轮最多处理多少条，0=不限制")
+    parser.add_argument(
+        "--legacy-result-review",
+        action="store_true",
+        help="兼容处理历史 result/b.* 队列；默认关闭以保证 RAW 实时候选优先",
+    )
     parser.add_argument("--fallback-model", default="", help="主模型失败时的回退模型，留空则自动选择已安装的其他模型")
     parser.add_argument(
         "--processing-timeout-sec",
@@ -561,6 +761,7 @@ def main() -> None:
     parser.add_argument("--rag-mysql-user", default="root")
     parser.add_argument("--rag-mysql-password", default="123456")
     parser.add_argument("--rag-mysql-database", default="traffic_pipeline")
+    parser.add_argument("--raw-review-max-attempts", type=int, default=3)
     parser.add_argument("--rag-top-k", type=int, default=3, help="RAG 每次检索条数")
     parser.add_argument("--rag-max-chars", type=int, default=3200, help="注入 LLM 的 RAG 上下文最大字符数")
     parser.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="若 RAG db 不存在则自动构建")
@@ -583,6 +784,7 @@ def main() -> None:
     system_prompt = read_text(prompt_path)
     if not system_prompt.strip():
         raise RuntimeError(f"prompt 为空: {prompt_path}")
+    prompt_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else 0.0
 
     schema_obj = read_json(schema_path, default={})
     if not schema_obj:
@@ -611,6 +813,18 @@ def main() -> None:
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
     log(f"result_dir={result_dir}")
 
+    try:
+        review_conn = open_review_conn(args)
+        try:
+            from raw_llm_review import ensure_review_schema
+
+            ensure_review_schema(review_conn)
+        finally:
+            review_conn.close()
+        log("RAW LLM review queue enabled")
+    except Exception as exc:
+        log(f"RAW LLM review queue unavailable: {exc}")
+
     while True:
         processed = 0
         try:
@@ -620,6 +834,28 @@ def main() -> None:
                 log(f"prompt reloaded: {prompt_path}")
         except Exception as exc:
             log(f"prompt reload skipped: {exc}")
+
+        try:
+            raw_result = process_next_raw_review(system_prompt, schema_obj, args)
+        except Exception as exc:
+            raw_result = None
+            log(f"RAW LLM review cycle failed: {exc}")
+        if raw_result:
+            processed += 1
+            log(raw_result)
+            if args.once:
+                log(f"once done processed={processed}")
+                break
+            # Prioritize new suspicious traffic instead of waiting behind the
+            # historical result/b.* retry backlog.
+            continue
+
+        if not args.legacy_result_review:
+            if args.once:
+                log(f"once done processed={processed}")
+                break
+            time.sleep(max(1, args.poll_seconds))
+            continue
 
         case_dirs = find_case_dirs(result_dir)
 

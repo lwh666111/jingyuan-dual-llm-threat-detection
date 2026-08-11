@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -267,15 +268,16 @@ def write_ssh_event(
             """
             INSERT INTO demo_attack_events(
               event_id, occurred_at, risk_level, attack_type, source_ip, source_region,
-              target_node, target_interface, attack_result, process_status,
+              target_node, target_port, target_interface, attack_result, process_status,
               attack_payload, request_log, protection_action, handling_suggestion,
               response_ms, anomaly_detected
             )
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON DUPLICATE KEY UPDATE
               occurred_at=VALUES(occurred_at),
               risk_level=VALUES(risk_level),
               source_ip=VALUES(source_ip),
+              target_port=VALUES(target_port),
               attack_payload=VALUES(attack_payload),
               request_log=VALUES(request_log),
               handling_suggestion=VALUES(handling_suggestion),
@@ -288,7 +290,8 @@ def write_ssh_event(
                 "SSH爆破",
                 ip,
                 "未知地区",
-                "本机节点",
+                socket.gethostname(),
+                22,
                 "ssh:22",
                 "已拦截",
                 "unprocessed",

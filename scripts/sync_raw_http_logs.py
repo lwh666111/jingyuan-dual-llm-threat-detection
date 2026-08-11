@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
 from build_result_db import MySQLConfig
 from extract_old_model_features_from_txt import build_request_text, parse_records, read_text_file
 from security_detection_v2 import DetectionEngineV2
+from raw_llm_review import enqueue_review, ensure_review_schema, remove_review
 from sync_detection_v2_db import ensure_mysql, mysql_connect, upsert_mysql
 
 BEHAVIOR_AGG_BUCKET_MINUTES = 10
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS demo_attack_events (
   source_ip VARCHAR(64) NOT NULL,
   source_region VARCHAR(64) NOT NULL,
   target_node VARCHAR(64) NOT NULL,
+  target_port INT NULL,
   target_interface VARCHAR(255) NOT NULL,
   attack_result VARCHAR(16) NOT NULL,
   process_status VARCHAR(16) NOT NULL,
@@ -103,6 +105,9 @@ def clean_layered_case_rows(conn: Any, case_id: str) -> None:
 def ensure_demo_attack_events(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(DEMO_ATTACK_EVENTS_DDL)
+        cur.execute("SHOW COLUMNS FROM demo_attack_events LIKE 'target_port'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE demo_attack_events ADD COLUMN target_port INT NULL AFTER target_node")
 
 
 def mysql_datetime(value: Any) -> str:
@@ -261,6 +266,7 @@ def sync_detection_rows_mysql(
         with conn.cursor() as cur:
             cur.execute("DELETE FROM detection_candidates WHERE event_id=%s", (event_id,))
             cur.execute("DELETE FROM attack_events WHERE event_id=%s", (event_id,))
+        remove_review(conn, event_id, case_id)
         delete_demo_event(conn, event_id)
         return {"candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
 
@@ -281,6 +287,11 @@ def sync_detection_rows_mysql(
             cur.execute("DELETE FROM attack_events WHERE event_id=%s", (raw_event_id,))
         delete_demo_event(conn, raw_event_id)
 
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM llm_review_jobs WHERE event_id=%s LIMIT 1", (event_id,))
+        existing_review = cur.fetchone() or {}
+    review_done = str(existing_review.get("status") or "") == "done"
+
     upsert_mysql(
         conn,
         "detection_candidates",
@@ -289,7 +300,9 @@ def sync_detection_rows_mysql(
             "case_id": case_id,
             "file_id": record.get("file_id"),
             "seq_id": record.get("seq_id"),
-            "decision": decision,
+            # A suspicious RAW event remains a candidate until the LLM returns
+            # verdict=attack. The preliminary fusion decision is kept in the job.
+            "decision": decision if review_done else "candidate",
             "final_score": final_score,
             "risk_level": risk_level,
             "attack_type": attack_type,
@@ -348,30 +361,18 @@ def sync_detection_rows_mysql(
             )
         behavior_count = 1
 
-    attack_count = 0
-    if decision == "attack_event":
-        upsert_mysql(
-            conn,
-            "attack_events",
-            {
-                "event_id": event_id,
-                "case_id": case_id,
-                "occurred_at": record.get("event_time"),
-                "source_ip": record.get("source_ip"),
-                "target_interface": record.get("target_interface_override") or record.get("uri"),
-                "attack_type": attack_type,
-                "risk_level": risk_level,
-                "confidence": final_score,
-                "status": "unprocessed",
-                "evidence_json": json.dumps(evidence, ensure_ascii=False),
-            },
-        )
-        upsert_demo_event(conn, event_id, record, attack_type, risk_level, evidence)
-        attack_count = 1
-    else:
+    attack_count = 1 if decision == "attack_event" else 0
+    if not review_done:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM attack_events WHERE event_id=%s", (event_id,))
         delete_demo_event(conn, event_id)
+        enqueue_review(
+            conn,
+            event_id=event_id,
+            case_id=case_id,
+            preliminary_decision=decision,
+            final_score=final_score,
+        )
 
     return {"candidate": 1, "attack": attack_count, "model": 1, "poc": poc_count, "behavior": behavior_count}
 
@@ -422,7 +423,7 @@ def sync_input_file_mysql(conn: Any, input_file: Path, engine: DetectionEngineV2
                 "destination_ip": record.get("destination_ip"),
                 "method": record.get("method"),
                 "uri": record.get("uri"),
-                "host": record.get("host"),
+                "host": str(record.get("host") or "")[:255],
                 "status_code": record.get("status_code"),
                 "request_text": request_text,
                 "response_text": response_text,
@@ -441,6 +442,7 @@ def sync_input_file_mysql(conn: Any, input_file: Path, engine: DetectionEngineV2
 def sync_input_dir_mysql(conn: Any, input_dir: Path) -> Dict[str, int]:
     ensure_mysql(conn)
     ensure_demo_attack_events(conn)
+    ensure_review_schema(conn)
     engine = DetectionEngineV2()
     totals = {"files": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0, "errors": 0}
     for input_file in iter_input_files(input_dir):

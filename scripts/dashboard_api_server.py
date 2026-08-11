@@ -33,9 +33,9 @@ from situation_ai import analyze_situation
 from situation_cluster import build_proxy_clusters
 from situation_core import ACTION_CATALOG, STAGE_LABELS, STAGE_ORDER
 from situation_store import MySQLSettings, MySQLSituationStore
+from raw_llm_review import ensure_review_schema
 from firewall_control import (
     firewall_block_ip as verified_firewall_block_ip,
-    firewall_status as verified_firewall_status,
     firewall_status_many as verified_firewall_status_many,
     firewall_unblock_ip as verified_firewall_unblock_ip,
 )
@@ -513,6 +513,35 @@ def load_v2_detection_detail(cur: Any, event_id: str) -> Optional[Dict[str, Any]
     if not evidence and attack_event:
         evidence = sanitize_evidence_value(safe_json_loads(attack_event.get("evidence_json"), []))
 
+    llm_review: Dict[str, Any] = {}
+    if db_table_exists(cur, "analyses"):
+        cur.execute(
+            """
+            SELECT llm_status,llm_error,analyzed_at,model_name,verdict,severity,confidence,
+                   summary,evidence_json,rag_enabled,rag_hits,review_latency_ms,handling_suggestion
+            FROM analyses WHERE case_id=%s LIMIT 1
+            """,
+            (case_id,),
+        )
+        llm_review = normalize_row(cur.fetchone() or {})
+        if llm_review:
+            llm_review["evidence"] = sanitize_evidence_value(
+                safe_json_loads(llm_review.pop("evidence_json", None), [])
+            )
+    if db_table_exists(cur, "llm_review_jobs"):
+        cur.execute(
+            """
+            SELECT status,preliminary_decision,attempts,error_message,created_at,started_at,completed_at
+            FROM llm_review_jobs WHERE case_id=%s LIMIT 1
+            """,
+            (case_id,),
+        )
+        job = normalize_row(cur.fetchone() or {})
+        if job:
+            llm_review["queue"] = job
+            if not llm_review.get("llm_status"):
+                llm_review["llm_status"] = job.get("status")
+
     item: Dict[str, Any] = {
         "case_id": case_id,
         "event_id": str((candidate or attack_event or {}).get("event_id") or event_id),
@@ -531,6 +560,7 @@ def load_v2_detection_detail(cur: Any, event_id: str) -> Optional[Dict[str, Any]
         "model_predictions": model_predictions,
         "poc_matches": poc_matches,
         "behavior_windows": behavior_windows,
+        "llm_review": llm_review or None,
     }
     if item["candidate"]:
         item["candidate"]["evidence_json"] = None
@@ -879,9 +909,17 @@ def collect_local_system_status() -> Dict[str, Any]:
     os_name = f"{platform.system()} {platform.release()}".strip()
     local_ip = ""
     try:
-        local_ip = socket.gethostbyname(host)
+        # The address selected by the default route represents the NIC that
+        # actually carries protected traffic; hostname lookup often returns a
+        # VirtualBox/Hyper-V host-only adapter on Windows servers.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route_probe:
+            route_probe.connect(("1.1.1.1", 80))
+            local_ip = str(route_probe.getsockname()[0])
     except Exception:
-        local_ip = ""
+        try:
+            local_ip = socket.gethostbyname(host)
+        except Exception:
+            local_ip = ""
 
     cpu_percent: Optional[float] = None
     mem_total = mem_used = mem_free = 0
@@ -889,7 +927,9 @@ def collect_local_system_status() -> Dict[str, Any]:
 
     if psutil is not None:
         try:
-            cpu_percent = round(float(psutil.cpu_percent(interval=0.3)), 2)
+            # Dashboard refreshes must not block while sampling CPU. psutil keeps
+            # the previous sample internally, so interval=None is instantaneous.
+            cpu_percent = round(float(psutil.cpu_percent(interval=None)), 2)
         except Exception:
             cpu_percent = None
         try:
@@ -1588,6 +1628,7 @@ def ensure_schema(conn: Any) -> None:
           source_ip VARCHAR(64) NOT NULL,
           source_region VARCHAR(64) NOT NULL,
           target_node VARCHAR(64) NOT NULL,
+          target_port INT NULL,
           target_interface VARCHAR(255) NOT NULL,
           attack_result VARCHAR(16) NOT NULL,
           process_status VARCHAR(16) NOT NULL,
@@ -1637,6 +1678,7 @@ def ensure_schema(conn: Any) -> None:
           reason VARCHAR(255) NOT NULL DEFAULT '',
           blocked_by VARCHAR(64) NOT NULL DEFAULT '',
           blocked_role VARCHAR(16) NOT NULL DEFAULT '',
+          defense_latency_ms DOUBLE NULL,
           blocked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           KEY idx_blocked_at (blocked_at)
@@ -1665,6 +1707,7 @@ def ensure_schema(conn: Any) -> None:
           decision VARCHAR(32) NOT NULL,
           firewall_success TINYINT(1) NOT NULL DEFAULT 0,
           firewall_detail TEXT NOT NULL,
+          defense_latency_ms DOUBLE NULL,
           request_time DATETIME(3) NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           KEY idx_fast_ip_time (source_ip, created_at),
@@ -1699,6 +1742,14 @@ def ensure_schema(conn: Any) -> None:
             cur.execute("ALTER TABLE demo_users ADD COLUMN nickname VARCHAR(64) NOT NULL DEFAULT '' AFTER display_name")
         if not db_column_exists(cur, "demo_users", "avatar_url"):
             cur.execute("ALTER TABLE demo_users ADD COLUMN avatar_url VARCHAR(512) NOT NULL DEFAULT '' AFTER nickname")
+        if not db_column_exists(cur, "demo_blocked_ips", "defense_latency_ms"):
+            cur.execute("ALTER TABLE demo_blocked_ips ADD COLUMN defense_latency_ms DOUBLE NULL AFTER blocked_role")
+        if not db_column_exists(cur, "demo_fast_defense_audit", "defense_latency_ms"):
+            cur.execute(
+                "ALTER TABLE demo_fast_defense_audit ADD COLUMN defense_latency_ms DOUBLE NULL AFTER firewall_detail"
+            )
+        if not db_column_exists(cur, "demo_attack_events", "target_port"):
+            cur.execute("ALTER TABLE demo_attack_events ADD COLUMN target_port INT NULL AFTER target_node")
         cur.execute(
             """
             UPDATE demo_users
@@ -1781,6 +1832,7 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "monitor_ports": "80,443,8080",
             "capture_interface": "auto",
             "llm_model": "qwen3:8b",
+            "rag_enabled": "1",
             "situation_minimum_actions": "3",
             "situation_window_minutes": "30",
             "situation_inactivity_minutes": "15",
@@ -1802,36 +1854,29 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
                 (k, v),
             )
 
-        machines = [
-            ("node-bj-01", "10.30.1.11", "北京机房A", "online"),
-            ("node-sh-01", "10.30.2.11", "上海机房B", "online"),
-            ("node-gz-01", "10.30.3.11", "广州机房C", "online"),
-            ("node-hz-01", "10.30.4.11", "杭州机房D", "online"),
-            ("node-cd-01", "10.30.5.11", "成都机房E", "online"),
-            ("node-sg-01", "10.30.6.11", "新加坡机房F", "online"),
-            ("node-us-01", "10.30.7.11", "美国西部", "online"),
-            ("node-de-01", "10.30.8.11", "德国法兰克福", "online"),
-        ]
-        for machine_name, ip_addr, location, online_status in machines:
+        system = collect_local_system_status()
+        machine_name = str(system.get("hostname") or socket.gethostname() or "local-server")[:64]
+        ip_addr = str(system.get("local_ip") or "127.0.0.1")[:64]
+        cpu_usage = float(system.get("cpu_percent") or 0)
+        memory_usage = float((system.get("memory") or {}).get("used_percent") or 0)
+        cur.execute(
+            """
+            INSERT INTO demo_machines(machine_name, ip_address, deploy_location, online_status, cpu_usage, memory_usage, gpu_usage, model_status)
+            VALUES (%s, %s, '本机服务器', 'online', %s, %s, 0, 'running')
+            ON DUPLICATE KEY UPDATE
+              ip_address=VALUES(ip_address), deploy_location=VALUES(deploy_location),
+              online_status='online', cpu_usage=VALUES(cpu_usage), memory_usage=VALUES(memory_usage), gpu_usage=0
+            """,
+            (machine_name, ip_addr, cpu_usage, memory_usage),
+        )
+        cur.execute("SELECT id FROM demo_machines WHERE machine_name=%s LIMIT 1", (machine_name,))
+        local_machine_id = int((cur.fetchone() or {}).get("id") or 0)
+        if local_machine_id:
             cur.execute(
-                """
-                INSERT INTO demo_machines(machine_name, ip_address, deploy_location, online_status, cpu_usage, memory_usage, gpu_usage, model_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'running')
-                ON DUPLICATE KEY UPDATE
-                  ip_address=VALUES(ip_address),
-                  deploy_location=VALUES(deploy_location),
-                  online_status=VALUES(online_status)
-                """,
-                (
-                    machine_name,
-                    ip_addr,
-                    location,
-                    online_status,
-                    round(random.uniform(10, 70), 2),
-                    round(random.uniform(20, 75), 2),
-                    round(random.uniform(10, 70), 2),
-                ),
+                "UPDATE demo_attack_events SET machine_id=%s, target_node=%s",
+                (local_machine_id, machine_name),
             )
+            cur.execute("DELETE FROM demo_machines WHERE id<>%s", (local_machine_id,))
 
         if force_seed:
             cur.execute("DELETE FROM demo_attack_events")
@@ -1966,31 +2011,21 @@ def demo_payload_by_type(attack_type: str) -> str:
 
 def refresh_machine_stats(conn: Any) -> None:
     visible_sql = visible_attack_event_clause()
+    system = collect_local_system_status()
+    machine_name = str(system.get("hostname") or socket.gethostname() or "local-server")[:64]
+    ip_addr = str(system.get("local_ip") or "127.0.0.1")[:64]
+    cpu_usage = float(system.get("cpu_percent") or 0)
+    memory_usage = float((system.get("memory") or {}).get("used_percent") or 0)
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            UPDATE demo_machines m
-            LEFT JOIN (
-              SELECT
-                target_node,
-                SUM(CASE WHEN DATE(occurred_at)=CURDATE() THEN 1 ELSE 0 END) AS today_cnt,
-                SUM(CASE WHEN DATE(occurred_at)=CURDATE() AND risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing') THEN 1 ELSE 0 END) AS alert_cnt,
-                MAX(occurred_at) AS last_attack_time
-              FROM demo_attack_events
-              WHERE {visible_sql}
-              GROUP BY target_node
-            ) s ON m.machine_name = s.target_node
-            SET
-              m.today_attack_count = COALESCE(s.today_cnt, 0),
-              m.current_alert_count = COALESCE(s.alert_cnt, 0),
-              m.last_heartbeat = CASE
-                WHEN m.online_status='online' THEN DATE_SUB(NOW(), INTERVAL FLOOR(RAND()*90) SECOND)
-                ELSE DATE_SUB(NOW(), INTERVAL FLOOR(300 + RAND()*1800) SECOND)
-              END,
-              m.cpu_usage = CASE WHEN m.online_status='online' THEN ROUND(15 + RAND()*70, 2) ELSE 0 END,
-              m.memory_usage = CASE WHEN m.online_status='online' THEN ROUND(20 + RAND()*65, 2) ELSE 0 END,
-              m.gpu_usage = CASE WHEN m.online_status='online' THEN ROUND(5 + RAND()*80, 2) ELSE 0 END
+            UPDATE demo_machines
+            SET machine_name=%s, ip_address=%s, deploy_location='本机服务器', online_status='online',
+                today_attack_count=(SELECT COUNT(*) FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}),
+                current_alert_count=(SELECT COUNT(*) FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND risk_level IN ('critical','high') AND process_status IN ('unprocessed','processing') AND {visible_sql}),
+                last_heartbeat=NOW(), cpu_usage=%s, memory_usage=%s, gpu_usage=0
             """
+            , (machine_name, ip_addr, cpu_usage, memory_usage)
         )
 
 
@@ -2300,6 +2335,7 @@ def create_app(
 
     with closing(get_conn(mysql_conf, autocommit=False)) as conn:
         ensure_schema(conn)
+        ensure_review_schema(conn)
         rag2_ensure_schema(conn)
         rag2_ensure_default_kb(conn)
         MySQLSituationStore(MySQLSettings(**mysql_conf), connection=conn).ensure_schema()
@@ -2695,15 +2731,22 @@ def create_app(
     def rag2_runtime() -> Tuple[Path, Dict[str, Any]]:
         return Path(app.config["RAG_DATA_DIR"]), rag2_load_api_config(Path(app.config["RAG_API_CONFIG_PATH"]))
 
+    def rag2_is_enabled() -> bool:
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            config_map = load_system_config_map(conn)
+        return str(config_map.get("rag_enabled", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
     @app.route("/api/v3/rag/status", methods=["GET"])
     @require_roles(ROLE_ADMIN)
     def rag2_status():
         data_dir, api_config = rag2_runtime()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             kbs = rag2_list_kbs(conn)
+            config_map = load_system_config_map(conn)
         return jsonify(
             {
                 "ok": True,
+                "enabled": str(config_map.get("rag_enabled", "1")).strip().lower() in {"1", "true", "yes", "on"},
                 "cloud_configured": bool(api_config.get("api_key")),
                 "embedding_model": api_config["embedding_model"],
                 "rerank_model": api_config["rerank_model"],
@@ -2800,6 +2843,8 @@ def create_app(
     @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/documents/upload", methods=["POST"])
     @require_roles(ROLE_ADMIN)
     def rag2_upload(kb_id: int):
+        if not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端向量 API"}), 409
         upload = request.files.get("file")
         if not upload or not upload.filename:
             return jsonify({"error": "file_required", "message": "请选择要上传的文件"}), 400
@@ -2821,6 +2866,8 @@ def create_app(
     @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/documents/text", methods=["POST"])
     @require_roles(ROLE_ADMIN)
     def rag2_add_text(kb_id: int):
+        if not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端向量 API"}), 409
         body = request.get_json(silent=True) or {}
         title = str(body.get("title") or "在线知识.txt").strip()
         content = str(body.get("content") or "").strip()
@@ -2854,6 +2901,8 @@ def create_app(
     @app.route("/api/v3/rag/documents/<int:document_id>/index", methods=["POST"])
     @require_roles(ROLE_ADMIN)
     def rag2_document_index(document_id: int):
+        if not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端向量 API"}), 409
         data_dir, api_config = rag2_runtime()
         try:
             with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
@@ -2873,6 +2922,8 @@ def create_app(
     @app.route("/api/v3/rag/chunks/<int:chunk_id>", methods=["PUT"])
     @require_roles(ROLE_ADMIN)
     def rag2_chunk_update(chunk_id: int):
+        if not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端向量 API"}), 409
         body = request.get_json(silent=True) or {}
         data_dir, api_config = rag2_runtime()
         try:
@@ -2885,6 +2936,8 @@ def create_app(
     @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/recall", methods=["POST"])
     @require_roles(ROLE_ADMIN)
     def rag2_recall(kb_id: int):
+        if not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端召回 API"}), 409
         body = request.get_json(silent=True) or {}
         data_dir, api_config = rag2_runtime()
         try:
@@ -2933,6 +2986,8 @@ def create_app(
     @app.route("/api/v3/rag/knowledge-bases/<int:kb_id>/eval-runs", methods=["GET", "POST"])
     @require_roles(ROLE_ADMIN)
     def rag2_eval_runs(kb_id: int):
+        if request.method == "POST" and not rag2_is_enabled():
+            return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端评估 API"}), 409
         data_dir, api_config = rag2_runtime()
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=request.method == "GET")) as conn:
             if request.method == "GET":
@@ -3228,22 +3283,24 @@ def create_app(
                     """
                 )
                 high_active = int((cur.fetchone() or {}).get("c", 0))
+                today_situations = 0
+                if db_table_exists(cur, "attack_situations"):
+                    cur.execute("SELECT COUNT(*) AS c FROM attack_situations WHERE DATE(created_at)=CURDATE()")
+                    today_situations = int((cur.fetchone() or {}).get("c") or 0)
                 cur.execute(
-                    f"""
-                    SELECT
-                      SUM(CASE WHEN attack_result='blocked' THEN 1 ELSE 0 END) AS blocked_cnt,
-                      COUNT(*) AS total_cnt
-                    FROM demo_attack_events
-                    WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}
+                    """
+                    SELECT AVG(defense_latency_ms) / 1000.0 AS avg_seconds, COUNT(*) AS sample_count
+                    FROM demo_fast_defense_audit
+                    WHERE DATE(created_at)=CURDATE()
+                      AND decision='silent_block'
+                      AND firewall_success=1
+                      AND defense_latency_ms IS NOT NULL
+                      AND defense_latency_ms >= 0
                     """
                 )
-                rate_obj = cur.fetchone() or {}
-                blocked_cnt = int(rate_obj.get("blocked_cnt") or 0)
-                total_cnt = int(rate_obj.get("total_cnt") or 0)
-                cur.execute(
-                    f"SELECT AVG(response_ms) AS avg_ms FROM demo_attack_events WHERE DATE(occurred_at)=CURDATE() AND {visible_sql}"
-                )
-                avg_response_ms = float((cur.fetchone() or {}).get("avg_ms") or 0)
+                defense_obj = cur.fetchone() or {}
+                avg_defense_seconds = float(defense_obj.get("avg_seconds") or 0)
+                defense_samples = int(defense_obj.get("sample_count") or 0)
                 cur.execute(
                     f"""
                     SELECT COUNT(*) AS c
@@ -3257,14 +3314,14 @@ def create_app(
             conn.commit()
 
         yoy = 0.0 if yesterday_total == 0 else ((today_total - yesterday_total) / yesterday_total) * 100.0
-        success_rate = 0.0 if total_cnt == 0 else (blocked_cnt / total_cnt) * 100.0
         return jsonify(
             {
                 "today_attack_total": today_total,
                 "yoy_percent": round(yoy, 2),
                 "active_high_alerts": high_active,
-                "intercept_success_rate": round(success_rate, 2),
-                "avg_attack_response_ms": round(avg_response_ms, 2),
+                "today_situation_total": today_situations,
+                "avg_auto_defense_block_seconds": round(avg_defense_seconds, 2),
+                "auto_defense_block_samples": defense_samples,
                 "today_anomaly_detected": anomaly_cnt,
                 "online_protection_nodes": online_nodes,
             }
@@ -3497,6 +3554,25 @@ def create_app(
                 "correlation_rule": "same_target + time_window + multiple_ips + at_least_3_action_types",
             }
         )
+
+    @app.route("/api/v3/rag/enabled", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def rag2_enabled_update():
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled", False))
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO demo_system_config(config_key, config_value)
+                    VALUES ('rag_enabled', %s)
+                    ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)
+                    """,
+                    ("1" if enabled else "0",),
+                )
+                log_action(conn, g.session["username"], g.session["role"], "rag_toggle", "rag", "enabled" if enabled else "disabled")
+            conn.commit()
+        return jsonify({"ok": True, "enabled": enabled})
     @app.route("/api/v2/situation-clusters/<cluster_id>", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
     def situation_cluster_detail(cluster_id: str):
@@ -3538,6 +3614,7 @@ def create_app(
             rag_mysql_conf=app.config["MYSQL_CONF"],
             rag_data_dir=Path(app.config["RAG_DATA_DIR"]),
             rag_api_config=Path(app.config["RAG_API_CONFIG_PATH"]),
+            rag_enabled=str(config_map.get("rag_enabled", "1")).strip().lower() in {"1", "true", "yes", "on"},
             rag_top_k=4,
             timeout_sec=120,
         )
@@ -3690,6 +3767,7 @@ def create_app(
                 rag_mysql_conf=app.config["MYSQL_CONF"],
                 rag_data_dir=Path(app.config["RAG_DATA_DIR"]),
                 rag_api_config=Path(app.config["RAG_API_CONFIG_PATH"]),
+                rag_enabled=str(config_map.get("rag_enabled", "1")).strip().lower() in {"1", "true", "yes", "on"},
                 rag_top_k=4,
                 timeout_sec=120,
             )
@@ -3735,7 +3813,7 @@ def create_app(
 
         risk_level = request.args.get("risk_level", "all").strip().lower()
         attack_type = request.args.get("attack_type", "all").strip()
-        target_node = request.args.get("target_node", "all").strip()
+        target_port = request.args.get("target_port", "all").strip()
         process_status = request.args.get("process_status", "all").strip().lower()
         keyword = request.args.get("keyword", "").strip()
         page = max(1, int(request.args.get("page", "1")))
@@ -3752,9 +3830,11 @@ def create_app(
             placeholders = ", ".join(["%s"] * len(aliases))
             where.append(f"e.attack_type IN ({placeholders})")
             params.extend(aliases)
-        if target_node != "all":
-            where.append("e.target_node=%s")
-            params.append(target_node)
+        if target_port != "all":
+            if not target_port.isdigit() or not 1 <= int(target_port) <= 65535:
+                return jsonify({"error": "invalid_target_port"}), 400
+            where.append("e.target_port=%s")
+            params.append(int(target_port))
         if process_status != "all":
             where.append("e.process_status=%s")
             params.append(process_status)
@@ -3776,16 +3856,15 @@ def create_app(
                       e.risk_level,
                       e.attack_type,
                       e.source_ip,
-                      e.target_node,
-                      e.attack_result,
+                      e.target_port,
                       e.process_status,
-                      CASE WHEN b.source_event_id IS NULL THEN 0 ELSE 1 END AS ip_blocked
+                      CASE WHEN b.ip_address IS NULL THEN 0 ELSE 1 END AS ip_blocked
                     FROM demo_attack_events e
                     LEFT JOIN (
-                      SELECT source_event_id, MAX(blocked_at) AS blocked_at
+                      SELECT ip_address, MAX(blocked_at) AS blocked_at
                       FROM demo_blocked_ips
-                      GROUP BY source_event_id
-                    ) b ON b.source_event_id = e.event_id
+                      GROUP BY ip_address
+                    ) b ON b.ip_address = e.source_ip
                     WHERE {where_sql}
                     ORDER BY e.occurred_at DESC
                     LIMIT %s OFFSET %s
@@ -3796,6 +3875,7 @@ def create_app(
         items = []
         for row in normalize_rows(rows):
             row["attack_type"] = normalize_attack_type_label(row.get("attack_type"))
+            row["ip_blocked"] = 1 if row.get("ip_blocked") else 0
             items.append(row)
         return jsonify({"items": items, "page": page, "page_size": page_size, "total": total})
 
@@ -3990,16 +4070,16 @@ def create_app(
                     """
                     SELECT
                       e.event_id, e.occurred_at, e.risk_level, e.attack_type, e.source_ip, e.source_region,
-                      e.target_node, e.target_interface, e.attack_result, e.process_status, e.attack_payload,
+                      e.target_port, e.target_interface, e.process_status, e.attack_payload,
                       e.request_log, e.protection_action, e.handling_suggestion, e.note, e.response_ms, e.anomaly_detected,
-                      CASE WHEN b.source_event_id IS NULL THEN 0 ELSE 1 END AS ip_blocked,
+                      CASE WHEN b.ip_address IS NULL THEN 0 ELSE 1 END AS ip_blocked,
                       b.blocked_at AS ip_blocked_at
                     FROM demo_attack_events e
                     LEFT JOIN (
-                      SELECT source_event_id, MAX(blocked_at) AS blocked_at
+                      SELECT ip_address, MAX(blocked_at) AS blocked_at
                       FROM demo_blocked_ips
-                      GROUP BY source_event_id
-                    ) b ON b.source_event_id = e.event_id
+                      GROUP BY ip_address
+                    ) b ON b.ip_address = e.source_ip
                     WHERE e.event_id=%s
                     LIMIT 1
                     """,
@@ -4010,6 +4090,7 @@ def create_app(
             return jsonify({"error": "event_not_found"}), 404
         item = normalize_row(row)
         item["attack_type"] = normalize_attack_type_label(item.get("attack_type"))
+        item["ip_blocked"] = 1 if item.get("ip_blocked") else 0
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             item["source_region"] = resolve_region_for_event(
                 conn,

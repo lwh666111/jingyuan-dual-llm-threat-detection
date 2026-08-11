@@ -11,12 +11,16 @@ from sync_detection_v2_db import ensure_mysql as ensure_v2_mysql
 from sync_detection_v2_db import iter_case_dirs as iter_v2_case_dirs
 from sync_detection_v2_db import mysql_connect as v2_mysql_connect
 from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
-from security_detection_v2 import DetectionEngineV2
-from sync_raw_http_logs import (
-    ensure_demo_attack_events,
-    iter_input_files,
-    sync_input_file_mysql,
-)
+
+
+def iter_raw_input_files(input_dir: Path) -> List[Path]:
+    def sequence(path: Path) -> int:
+        try:
+            return int(path.stem.split(".")[-1])
+        except Exception:
+            return 10**9
+
+    return [path for path in sorted(input_dir.glob("1.1.*.txt"), key=sequence) if path.is_file()]
 
 
 def now_iso() -> str:
@@ -42,17 +46,22 @@ def read_state(path: Path) -> Dict:
 
 def write_state(path: Path, state: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Stream compact JSON to a sibling file.  The old indented json.dumps call
+    # needed a second, contiguous in-memory copy of the complete watch index and
+    # was the final failure point when the host was under memory pressure.
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    with temp_path.open("w", encoding="utf-8") as handle:
+        for chunk in encoder.iterencode(state):
+            handle.write(chunk)
+        handle.flush()
+    temp_path.replace(path)
 
 
 def collect_watch_files(result_dir: Path, input_dir: Path | None = None) -> List[Path]:
     files: List[Path] = []
     if input_dir and input_dir.exists():
         files.extend(sorted(input_dir.glob("1.1.*.txt")))
-
-    manifest = result_dir / "manifest.jsonl"
-    if manifest.exists():
-        files.append(manifest)
 
     case_dirs = [p for p in result_dir.glob("b.*") if p.is_dir()]
     case_dirs.sort(key=lambda p: int(p.name.split(".", 1)[1]) if p.name.split(".", 1)[1].isdigit() else 10**9)
@@ -109,7 +118,6 @@ def changed_work_items(
     changed = {key for key, value in current.items() if previous.get(key) != value}
     case_names: Set[str] = set()
     input_files: List[Path] = []
-    force_all_cases = False
     for key in sorted(changed):
         parts = Path(key).parts
         if len(parts) >= 2 and parts[0] == "input" and parts[-1].startswith("1.1."):
@@ -117,11 +125,11 @@ def changed_work_items(
         elif len(parts) >= 3 and parts[0] == "result" and parts[1].startswith("b."):
             case_names.add(parts[1])
         elif key == "result/manifest.jsonl":
-            force_all_cases = True
-    # A normal export updates both manifest.jsonl and its b.N directory. In that
-    # case the changed directory is sufficient; only a manifest-only change
-    # requires a complete result rescan.
-    return (None if force_all_cases and not case_names else case_names), input_files
+            # Legacy state files may still contain this key.  Case directory
+            # fingerprints are authoritative; a manifest-only write must not
+            # trigger a full scan of every historical result.
+            continue
+    return case_names, input_files
 
 
 def run_sync(
@@ -135,7 +143,7 @@ def run_sync(
     state: Dict,
     case_names: Set[str] | None = None,
     input_files: List[Path] | None = None,
-    raw_engine: DetectionEngineV2 | None = None,
+    raw_engine: object | None = None,
 ) -> Dict[str, str | int]:
     stats = sync_result_to_db(
         result_dir=result_dir,
@@ -148,10 +156,18 @@ def run_sync(
         try:
             conn = v2_mysql_connect(mysql_config)
             ensure_v2_mysql(conn)
-            ensure_demo_attack_events(conn)
-            engine = raw_engine or DetectionEngineV2()
+            from raw_llm_review import ensure_review_schema
+
+            ensure_review_schema(conn)
             raw_totals = {"files": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0, "errors": 0}
-            raw_paths = list(iter_input_files(input_dir)) if input_files is None else input_files
+            raw_paths = iter_raw_input_files(input_dir) if input_files is None else input_files
+            engine = raw_engine
+            if raw_paths and engine is None:
+                from security_detection_v2 import DetectionEngineV2
+
+                engine = DetectionEngineV2()
+            if raw_paths:
+                from sync_raw_http_logs import sync_input_file_mysql
             for input_file in raw_paths:
                 try:
                     row_stats = sync_input_file_mysql(conn, input_file, engine)
@@ -249,7 +265,10 @@ def main() -> None:
     log(f"raw input watch dir={input_dir}", log_file)
     log(f"backend={args.backend} target={state['db_target']}", log_file)
 
-    raw_engine = DetectionEngineV2()
+    # Loading the PyTorch detector costs hundreds of MB.  Most daemon cycles
+    # only synchronize result case files, so load it only when raw input files
+    # actually need classification.
+    raw_engine: object | None = None
     current_index = collect_watch_index(result_dir, input_dir)
     previous_index = state.get("watch_index")
     initial_case_names: Set[str] | None = None
@@ -259,6 +278,10 @@ def main() -> None:
 
     if not isinstance(previous_index, dict) or initial_case_names is None or initial_case_names or initial_input_files:
         try:
+            if (initial_input_files is None or initial_input_files) and raw_engine is None:
+                from security_detection_v2 import DetectionEngineV2
+
+                raw_engine = DetectionEngineV2()
             run_sync(
                 result_dir,
                 input_dir,
@@ -292,20 +315,26 @@ def main() -> None:
 
     while True:
         time.sleep(max(args.poll_seconds, 1))
-        current_index = collect_watch_index(result_dir, input_dir)
-        previous_index = state.get("watch_index")
-        if isinstance(previous_index, dict) and current_index == previous_index:
-            continue
-
-        if isinstance(previous_index, dict):
-            case_names, input_files = changed_work_items(previous_index, current_index, project_root)
-        else:
-            case_names, input_files = None, None
-        changed_cases = "all" if case_names is None else str(len(case_names))
-        changed_inputs = "all" if input_files is None else str(len(input_files))
-        log(f"change detected files={len(current_index)} cases={changed_cases} inputs={changed_inputs}", log_file)
-
         try:
+            current_index = collect_watch_index(result_dir, input_dir)
+            previous_index = state.get("watch_index")
+            if isinstance(previous_index, dict) and current_index == previous_index:
+                continue
+
+            if isinstance(previous_index, dict):
+                case_names, input_files = changed_work_items(previous_index, current_index, project_root)
+            else:
+                case_names, input_files = None, None
+            changed_cases = "all" if case_names is None else str(len(case_names))
+            changed_inputs = "all" if input_files is None else str(len(input_files))
+            log(
+                f"change detected files={len(current_index)} cases={changed_cases} inputs={changed_inputs}",
+                log_file,
+            )
+            if (input_files is None or input_files) and raw_engine is None:
+                from security_detection_v2 import DetectionEngineV2
+
+                raw_engine = DetectionEngineV2()
             run_sync(
                 result_dir,
                 input_dir,
@@ -326,8 +355,13 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             state["last_error"] = str(exc)
             state["last_error_at"] = now_iso()
-            write_state(state_file, state)
-            log(f"sync failed: {exc}", log_file)
+            try:
+                write_state(state_file, state)
+            except Exception as state_exc:  # noqa: BLE001
+                # Keep the daemon alive even when the host temporarily cannot
+                # allocate enough memory or disk space for diagnostic state.
+                log(f"state write skipped after sync failure: {state_exc}", log_file)
+            log(f"sync failed and will retry: {exc}", log_file)
 
 
 if __name__ == "__main__":

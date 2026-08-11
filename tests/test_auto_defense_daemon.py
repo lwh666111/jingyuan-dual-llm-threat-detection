@@ -73,6 +73,8 @@ class AutoDefenseDaemonTests(unittest.TestCase):
             auto_defense_daemon.run_once(self.conn)
         statements = [str(call.args[0]) for call in self.cursor.execute.call_args_list]
         self.assertTrue(any("DELETE FROM demo_auto_defense_releases" in sql for sql in statements))
+        block_insert = next(sql for sql in statements if "INSERT INTO demo_blocked_ips" in sql)
+        self.assertIn("defense_latency_ms", block_insert)
 
 
 if __name__ == "__main__":

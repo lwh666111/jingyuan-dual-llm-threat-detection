@@ -30,14 +30,14 @@ class ResultDbDaemonIncrementalTests(unittest.TestCase):
         self.assertEqual(cases, {"b.1"})
         self.assertEqual(inputs, [root / "input/1.1.1.txt"])
 
-    def test_manifest_only_change_requests_full_case_rescan(self):
+    def test_manifest_only_change_does_not_rescan_historical_cases(self):
         root = Path("C:/project")
         cases, inputs = changed_work_items(
             {"result/manifest.jsonl": "1:10"},
             {"result/manifest.jsonl": "2:11"},
             root,
         )
-        self.assertIsNone(cases)
+        self.assertEqual(cases, set())
         self.assertEqual(inputs, [])
 
     def test_watch_index_detects_file_content_metadata_changes(self):

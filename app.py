@@ -84,7 +84,6 @@ def cleanup_stale_project_processes(project_root: Path, log_path: Path) -> None:
 
     root_text = str(project_root.resolve()).replace("'", "''").lower()
     markers = [
-        "app.py",
         "capture_http_request_batches.py",
         "run_demo_daemon.py",
         "llm_analyzer_daemon.py",
@@ -93,6 +92,7 @@ def cleanup_stale_project_processes(project_root: Path, log_path: Path) -> None:
         "situation_supervisor.py",
         "situation_daemon.py",
         "situation_ai_daemon.py",
+        "auto_defense_daemon.py",
         "port_scan_sensor.py",
         "dashboard_api_server.py",
         "frontend_dashboard\\server.js",
@@ -107,10 +107,7 @@ $targets = Get-CimInstance Win32_Process | Where-Object {{
   $ok = $false
   if ($_.ProcessId -ne $current -and $_.CommandLine -and $_.Name -in @('python.exe','pythonw.exe','node.exe')) {{
     $cmd = $_.CommandLine.ToLowerInvariant()
-    $isAppParent = ($_.Name -in @('python.exe','pythonw.exe') -and $cmd.Contains('app.py'))
-    if ($isAppParent) {{
-      $ok = $true
-    }} elseif ($cmd.Contains($root)) {{
+    if ($cmd.Contains($root)) {{
       foreach ($m in $markers) {{
         if ($cmd.Contains($m)) {{
           $ok = $true
@@ -359,6 +356,7 @@ def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_
 def load_llm_runtime_config(args, fallback_model: str) -> Dict:
     cfg = {
         "model": str(fallback_model or "").strip() or "qwen2.5:3b",
+        "rag_enabled": bool(getattr(args, "rag_enable", True)),
         "source": "cli",
         "error": "",
     }
@@ -385,23 +383,21 @@ def load_llm_runtime_config(args, fallback_model: str) -> Dict:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT config_value
-                    FROM demo_system_config
-                    WHERE config_key='llm_model'
-                    LIMIT 1
-                    """
+                    "SELECT config_key, config_value FROM demo_system_config WHERE config_key IN ('llm_model','rag_enabled')"
                 )
-                row = cur.fetchone() or {}
+                values = {str(row.get("config_key") or ""): str(row.get("config_value") or "") for row in cur.fetchall()}
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
         cfg["error"] = f"mysql_read_failed: {exc}"
         return cfg
 
-    model = str(row.get("config_value", "")).strip()
+    model = str(values.get("llm_model", "")).strip()
     if model:
         cfg["model"] = model
+        cfg["source"] = "db"
+    if "rag_enabled" in values:
+        cfg["rag_enabled"] = values["rag_enabled"].strip().lower() in {"1", "true", "yes", "on"}
         cfg["source"] = "db"
     return cfg
 
@@ -500,7 +496,12 @@ def build_daemon_cmd(args, script_dir: Path, input_dir: Path, output_dir: Path) 
     return cmd
 
 
-def build_llm_cmd(args, script_dir: Path, llm_model: Optional[str] = None) -> List[str]:
+def build_llm_cmd(
+    args,
+    script_dir: Path,
+    llm_model: Optional[str] = None,
+    rag_enabled: Optional[bool] = None,
+) -> List[str]:
     model_name = str(llm_model or args.llm_model).strip() or str(args.llm_model).strip()
     cmd = [
         args.python_exe,
@@ -530,7 +531,8 @@ def build_llm_cmd(args, script_dir: Path, llm_model: Optional[str] = None) -> Li
         "--max-cases",
         str(args.llm_max_cases),
     ]
-    if args.rag_enable:
+    effective_rag_enabled = args.rag_enable if rag_enabled is None else bool(rag_enabled)
+    if effective_rag_enabled:
         cmd.append("--rag-enable")
     else:
         cmd.append("--no-rag")
@@ -896,7 +898,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     llm_group.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama base URL")
     llm_group.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="System prompt file path")
     llm_group.add_argument("--llm-schema", default="llm/schemas/analysis.schema.json", help="JSON schema path")
-    llm_group.add_argument("--llm-poll-seconds", type=int, default=5, help="LLM polling interval")
+    llm_group.add_argument("--llm-poll-seconds", type=int, default=1, help="LLM polling interval")
     llm_group.add_argument("--llm-timeout-sec", type=int, default=300, help="LLM request timeout seconds")
     llm_group.add_argument("--llm-num-ctx", type=int, default=1024, help="Ollama num_ctx")
     llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu, 0 for CPU")
@@ -1235,7 +1237,16 @@ def main() -> None:
         else []
     )
     daemon_cmd = build_daemon_cmd(args, scripts_dir, input_dir, output_dir) if run_daemon else []
-    llm_cmd = build_llm_cmd(args, scripts_dir, llm_model=llm_runtime_cfg.get("model")) if run_llm else []
+    llm_cmd = (
+        build_llm_cmd(
+            args,
+            scripts_dir,
+            llm_model=llm_runtime_cfg.get("model"),
+            rag_enabled=llm_runtime_cfg.get("rag_enabled"),
+        )
+        if run_llm
+        else []
+    )
     db_cmd = build_db_cmd(args, scripts_dir) if run_db else []
     ssh_monitor_cmd = build_ssh_monitor_cmd(args, scripts_dir) if run_ssh_monitor else []
     situation_cmd = (
@@ -1510,12 +1521,18 @@ def main() -> None:
             f"batch={capture_runtime_cfg.get('batch_size')}|"
             f"iface={capture_runtime_cfg.get('interface') or ''}"
         )
-        llm_cfg_key = f"model={llm_runtime_cfg.get('model')}"
+        llm_cfg_key = f"model={llm_runtime_cfg.get('model')}|rag={int(bool(llm_runtime_cfg.get('rag_enabled')))}"
         next_capture_cfg_check_ts = 0.0
         next_llm_cfg_check_ts = 0.0
         capture_cfg_poll_seconds = max(1, int(args.capture_config_poll_seconds))
         capture_restart_count = 0
         last_capture_restart_ts = 0.0
+        db_restart_count = 0
+        last_db_restart_ts = 0.0
+        api_restart_count = 0
+        last_api_restart_ts = 0.0
+        dashboard_restart_count = 0
+        last_dashboard_restart_ts = 0.0
 
         log("workflow is running; press Ctrl+C to stop all", app_log)
 
@@ -1601,9 +1618,14 @@ def main() -> None:
                     llm_config_error_logged = llm_cfg_error
                 else:
                     llm_config_error_logged = ""
-                    new_llm_cfg_key = f"model={updated_llm_cfg.get('model')}"
+                    new_llm_cfg_key = f"model={updated_llm_cfg.get('model')}|rag={int(bool(updated_llm_cfg.get('rag_enabled')))}"
                     if new_llm_cfg_key != llm_cfg_key:
-                        new_llm_cmd = build_llm_cmd(args, scripts_dir, llm_model=updated_llm_cfg.get("model"))
+                        new_llm_cmd = build_llm_cmd(
+                            args,
+                            scripts_dir,
+                            llm_model=updated_llm_cfg.get("model"),
+                            rag_enabled=updated_llm_cfg.get("rag_enabled"),
+                        )
                         log(
                             "llm config changed, restarting llm: "
                             + f"source={updated_llm_cfg.get('source')} model={updated_llm_cfg.get('model')}",
@@ -1743,19 +1765,33 @@ def main() -> None:
 
             if run_db and db_proc and db_rc is not None:
                 log(f"db exited rc={db_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if ssh_monitor_proc:
-                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(db_rc)
+                db_proc = None
+                now = time.time()
+                if now - last_db_restart_ts > 300:
+                    db_restart_count = 0
+                db_restart_count += 1
+                last_db_restart_ts = now
+                restart_delay = min(60, 5 * db_restart_count)
+                log(
+                    "db will restart without stopping capture, API, or dashboard "
+                    + f"in {restart_delay}s (attempt={db_restart_count})",
+                    app_log,
+                )
+                time.sleep(restart_delay)
+                db_proc = subprocess.Popen(
+                    db_cmd,
+                    cwd=str(project_root),
+                    stdout=db_out_f,
+                    stderr=db_err_f,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                runtime_state["db"]["pid"] = db_proc.pid
+                runtime_state["db"]["cmd"] = db_cmd
+                write_runtime_state(state_file, runtime_state)
+                log(f"db restarted pid={db_proc.pid}", app_log)
+                continue
 
             if run_ssh_monitor and ssh_monitor_proc and ssh_monitor_rc is not None:
                 log(f"sshmon exited rc={ssh_monitor_rc}", app_log)
@@ -1775,35 +1811,64 @@ def main() -> None:
 
             if run_api and api_proc and api_rc is not None:
                 log(f"api exited rc={api_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if ssh_monitor_proc:
-                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(api_rc)
+                api_proc = None
+                now = time.time()
+                if now - last_api_restart_ts > 300:
+                    api_restart_count = 0
+                api_restart_count += 1
+                last_api_restart_ts = now
+                restart_delay = min(60, 3 * api_restart_count)
+                log(
+                    "api will restart without stopping capture or dashboard "
+                    + f"in {restart_delay}s (attempt={api_restart_count})",
+                    app_log,
+                )
+                time.sleep(restart_delay)
+                api_proc = subprocess.Popen(
+                    api_cmd,
+                    cwd=str(project_root),
+                    stdout=api_out_f,
+                    stderr=api_err_f,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                runtime_state["api"]["pid"] = api_proc.pid
+                runtime_state["api"]["cmd"] = api_cmd
+                write_runtime_state(state_file, runtime_state)
+                log(f"api restarted pid={api_proc.pid}", app_log)
+                continue
 
             if run_dashboard and dashboard_proc and dashboard_rc is not None:
                 log(f"dashboard exited rc={dashboard_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if ssh_monitor_proc:
-                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                raise SystemExit(dashboard_rc)
+                dashboard_proc = None
+                now = time.time()
+                if now - last_dashboard_restart_ts > 300:
+                    dashboard_restart_count = 0
+                dashboard_restart_count += 1
+                last_dashboard_restart_ts = now
+                restart_delay = min(60, 3 * dashboard_restart_count)
+                log(
+                    "dashboard will restart without stopping detection or API "
+                    + f"in {restart_delay}s (attempt={dashboard_restart_count})",
+                    app_log,
+                )
+                time.sleep(restart_delay)
+                dashboard_proc = subprocess.Popen(
+                    dashboard_cmd,
+                    cwd=str(project_root),
+                    stdout=dashboard_out_f,
+                    stderr=dashboard_err_f,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=dashboard_env,
+                )
+                runtime_state["dashboard"]["pid"] = dashboard_proc.pid
+                runtime_state["dashboard"]["cmd"] = dashboard_cmd
+                write_runtime_state(state_file, runtime_state)
+                log(f"dashboard restarted pid={dashboard_proc.pid}", app_log)
+                continue
 
             if not cap_alive and not dmn_alive and not llm_alive and not db_alive and not ssh_monitor_alive and not situation_alive and not api_alive and not dashboard_alive:
                 break

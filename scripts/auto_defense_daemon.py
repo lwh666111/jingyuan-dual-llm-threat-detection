@@ -21,6 +21,17 @@ def log(message: str, path: Path) -> None:
         handle.write(line + "\n")
 
 
+def ensure_schema(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SHOW COLUMNS FROM demo_blocked_ips LIKE 'defense_latency_ms'")
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE demo_blocked_ips "
+                "ADD COLUMN defense_latency_ms DOUBLE NULL AFTER blocked_role"
+            )
+    conn.commit()
+
+
 def load_policy(conn: Any) -> Dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
@@ -77,18 +88,27 @@ def run_once(conn: Any) -> Dict[str, int]:
         if row.get("blocked_id") and firewall_status(ip_value).get("active"):
             stats["skipped"] += 1
             continue
+        defense_started = time.perf_counter()
         ok, detail = firewall_block_ip(ip_value)
+        defense_latency_ms = (time.perf_counter() - defense_started) * 1000.0
         if not ok:
             stats["failed"] += 1
             continue
         with conn.cursor() as cur:
             cur.execute("DELETE FROM demo_auto_defense_releases WHERE ip_address=%s", (ip_value,))
             cur.execute(
-                """INSERT INTO demo_blocked_ips(ip_address,source_event_id,reason,blocked_by,blocked_role)
-                   VALUES(%s,%s,%s,'auto-defense','system')
+                """INSERT INTO demo_blocked_ips(
+                     ip_address,source_event_id,reason,blocked_by,blocked_role,defense_latency_ms
+                   ) VALUES(%s,%s,%s,'auto-defense','system',%s)
                    ON DUPLICATE KEY UPDATE source_event_id=VALUES(source_event_id),reason=VALUES(reason),
-                     blocked_by='auto-defense',blocked_role='system',blocked_at=CURRENT_TIMESTAMP""",
-                (ip_value, str(row.get("situation_id") or ""), f"auto_{row.get('risk_level')}_situation"),
+                     blocked_by='auto-defense',blocked_role='system',
+                     defense_latency_ms=VALUES(defense_latency_ms),blocked_at=CURRENT_TIMESTAMP""",
+                (
+                    ip_value,
+                    str(row.get("situation_id") or ""),
+                    f"auto_{row.get('risk_level')}_situation",
+                    defense_latency_ms,
+                ),
             )
         conn.commit()
         stats["blocked"] += 1
@@ -117,6 +137,7 @@ def main() -> None:
                         password=args.mysql_password, database=args.mysql_database,
                         charset="utf8mb4", cursorclass=DictCursor, autocommit=False,
                     )
+                    ensure_schema(conn)
                 stats = run_once(conn)
                 if stats["blocked"] or stats["failed"]:
                     log(json.dumps(stats, ensure_ascii=False), log_path)

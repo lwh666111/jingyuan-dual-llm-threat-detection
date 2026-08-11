@@ -33,7 +33,16 @@ def iter_case_dirs(result_dir: Path) -> Iterable[Path]:
 def mysql_connect(cfg: MySQLConfig):
     if pymysql is None:
         raise RuntimeError("PyMySQL is not installed")
-    return pymysql.connect(host=cfg.host, port=cfg.port, user=cfg.user, password=cfg.password, database=cfg.database, charset="utf8mb4", autocommit=True)
+    return pymysql.connect(
+        host=cfg.host,
+        port=cfg.port,
+        user=cfg.user,
+        password=cfg.password,
+        database=cfg.database,
+        charset="utf8mb4",
+        autocommit=True,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
 
 
 MYSQL_DDL = [
@@ -159,6 +168,14 @@ def sync_case_mysql(conn, case_dir: Path) -> Dict[str, int]:
     if not case:
         return {"raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
     case_id = str(case.get("case_id") or case_dir.name)
+    analysis = read_json(case_dir / "analysis.json")
+    llm_verdict = str(analysis.get("verdict") or "").strip().lower()
+    llm_confirmed = str(case.get("llm_status") or "").strip().lower() == "done" and llm_verdict in {
+        "attack",
+        "malicious",
+        "攻击",
+        "恶意",
+    }
     event_id = case_id.replace("b.", "EVT", 1)
     request_text = read_text(case_dir / "request.txt") or str(case.get("request_text") or "")
     response_text = read_text(case_dir / "response.txt")
@@ -197,7 +214,18 @@ def sync_case_mysql(conn, case_dir: Path) -> Dict[str, int]:
         "evidence_json": json.dumps(evidence, ensure_ascii=False),
     })
     attack_count = 0
-    if decision == "attack_event":
+    raw_canonical_exists = False
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM detection_candidates
+            WHERE case_id LIKE 'raw:%' AND file_id=%s AND seq_id=%s
+            LIMIT 1
+            """,
+            (case.get("file_id"), case.get("seq_id")),
+        )
+        raw_canonical_exists = bool(cur.fetchone())
+    if decision == "attack_event" and llm_confirmed and not raw_canonical_exists:
         upsert_mysql(conn, "attack_events", {
             "event_id": event_id,
             "case_id": case_id,
@@ -211,6 +239,9 @@ def sync_case_mysql(conn, case_dir: Path) -> Dict[str, int]:
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
         })
         attack_count = 1
+    else:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM attack_events WHERE event_id=%s", (event_id,))
     upsert_mysql(conn, "model_predictions", {
         "case_id": case_id,
         "model_name": "payload_model_v2",
