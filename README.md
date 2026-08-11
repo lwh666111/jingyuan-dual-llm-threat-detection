@@ -290,7 +290,7 @@ ollama list
 
 ```powershell
 cd C:\JingyuanTrafficPipeline
-python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
+python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4 --auto-start-lab
 ```
 
 说明：
@@ -302,8 +302,12 @@ python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4
 - 默认会同时启动 SSH 爆破监控，读取 Windows 登录失败事件并聚合为 `SSH爆破` 告警。
 - 如测试环境没有 SSH/OpenSSH 日志，监控进程会安静运行，不影响 HTTP 抓包检测。
 - 如需临时关闭 SSH 爆破监控，可追加：`--no-ssh-monitor`。
+- `--auto-start-lab` 会由同一个主进程自动启动 `4000` 端口多漏洞靶场；如果 `4000` 已有靶场运行，会复用现有进程，不会重复启动。主系统停止时，由主进程启动的靶场也会一并停止。
+- 生产环境不需要靶场时省略该参数；仅打开网页不会在操作系统层面创建进程，自动启动入口是统一启动命令/计划任务。
 
 ### 7. 启动靶场（测试用，可选）
+
+正式测试建议直接使用上一节的统一命令和 `--auto-start-lab`。需要单独启动或手动恢复时，再使用下面的脚本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\JingyuanTrafficPipeline\test\start_multivuln_lab_4000.ps1 -PythonExe C:\python\python312\python.exe -BindHost 0.0.0.0 -Port 4000

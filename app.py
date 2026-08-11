@@ -96,6 +96,7 @@ def cleanup_stale_project_processes(project_root: Path, log_path: Path) -> None:
         "port_scan_sensor.py",
         "dashboard_api_server.py",
         "frontend_dashboard\\server.js",
+        "target_multivuln_lab.py",
     ]
     markers_ps = "@(" + ",".join("'" + m.replace("'", "''").lower() + "'" for m in markers) + ")"
     script = f"""
@@ -731,6 +732,32 @@ def build_dashboard_cmd(args, dashboard_server: Path) -> List[str]:
     return cmd
 
 
+def build_test_lab_cmd(args, project_root: Path) -> List[str]:
+    """Start the bundled multi-vulnerability lab under the main supervisor."""
+    lab_script = (project_root / args.test_lab_script).resolve()
+    return [
+        args.python_exe,
+        str(lab_script),
+        "--host", str(args.test_lab_host),
+        "--port", str(args.test_lab_port),
+        "--mysql-host", str(args.mysql_host),
+        "--mysql-port", str(args.mysql_port),
+        "--mysql-user", str(args.mysql_user),
+        "--mysql-password", str(args.mysql_password),
+        "--mysql-database", str(args.mysql_database),
+    ]
+
+
+def tcp_port_in_use(host: str, port: int) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--python-exe",
@@ -1042,6 +1069,28 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Dashboard upstream API base URL, auto uses http://127.0.0.1:<api-port> when empty",
     )
 
+    lab_group = parser.add_argument_group("Test lab")
+    lab_group.add_argument(
+        "--auto-start-lab",
+        dest="auto_start_lab",
+        action="store_true",
+        help="Start the bundled multi-vulnerability test lab with the full workflow",
+    )
+    lab_group.add_argument(
+        "--no-auto-start-lab",
+        dest="auto_start_lab",
+        action="store_false",
+        help="Do not start the bundled test lab",
+    )
+    parser.set_defaults(auto_start_lab=False)
+    lab_group.add_argument("--test-lab-host", default="0.0.0.0", help="Test lab bind host")
+    lab_group.add_argument("--test-lab-port", type=int, default=4000, help="Test lab port")
+    lab_group.add_argument(
+        "--test-lab-script",
+        default="scripts/target_multivuln_lab.py",
+        help="Bundled test lab script",
+    )
+
     model_group = parser.add_argument_group("Model files")
     model_group.add_argument("--preprocessor", default="", help="Optional preprocessor.joblib path")
     model_group.add_argument("--model", default="", help="Optional best_mlp.pth path")
@@ -1111,6 +1160,7 @@ def main() -> None:
     run_situation = args.enable_situation and run_db
     run_api = args.enable_api and not args.only_capture
     run_dashboard = args.enable_dashboard and not args.only_capture
+    run_test_lab = args.auto_start_lab and not args.only_capture
 
     try:
         cli_capture_ports = parse_ports_text(args.ports, [args.port])
@@ -1197,6 +1247,8 @@ def main() -> None:
         ensure_paths([project_root / "rules" / "fast_defense_rules.json"], hint="fast defense rules are required")
     if run_dashboard:
         ensure_paths([dashboard_server], hint="Please ensure frontend_dashboard exists.")
+    if run_test_lab:
+        ensure_paths([(project_root / args.test_lab_script).resolve()], hint="Please ensure the test lab script exists.")
 
     dashboard_api_base = args.dashboard_api_base.strip()
     if not dashboard_api_base:
@@ -1220,6 +1272,8 @@ def main() -> None:
     api_stderr = runtime_dir / "api_stderr.log"
     dashboard_stdout = runtime_dir / "dashboard_stdout.log"
     dashboard_stderr = runtime_dir / "dashboard_stderr.log"
+    test_lab_stdout = runtime_dir / "test_lab_stdout.log"
+    test_lab_stderr = runtime_dir / "test_lab_stderr.log"
 
     if args.cleanup_stale_processes:
         cleanup_stale_project_processes(project_root, app_log)
@@ -1261,6 +1315,7 @@ def main() -> None:
     )
     api_cmd = build_api_cmd(args, scripts_dir) if run_api else []
     dashboard_cmd = build_dashboard_cmd(args, dashboard_server) if run_dashboard else []
+    test_lab_cmd = build_test_lab_cmd(args, project_root) if run_test_lab else []
 
     log("APP start", app_log)
     log(f"project_root={project_root}", app_log)
@@ -1317,11 +1372,14 @@ def main() -> None:
     if run_dashboard:
         log("dashboard cmd: " + " ".join(dashboard_cmd), app_log)
         log(f"dashboard api base: {dashboard_api_base}", app_log)
+    if run_test_lab:
+        log("test lab cmd: " + " ".join(test_lab_cmd), app_log)
 
-    capture_proc = daemon_proc = llm_proc = db_proc = ssh_monitor_proc = situation_proc = api_proc = dashboard_proc = None
+    capture_proc = daemon_proc = llm_proc = db_proc = ssh_monitor_proc = situation_proc = api_proc = dashboard_proc = test_lab_proc = None
     capture_out_f = capture_err_f = daemon_out_f = daemon_err_f = llm_out_f = llm_err_f = None
-    db_out_f = db_err_f = ssh_monitor_out_f = ssh_monitor_err_f = situation_out_f = situation_err_f = api_out_f = api_err_f = dashboard_out_f = dashboard_err_f = None
+    db_out_f = db_err_f = ssh_monitor_out_f = ssh_monitor_err_f = situation_out_f = situation_err_f = api_out_f = api_err_f = dashboard_out_f = dashboard_err_f = test_lab_out_f = test_lab_err_f = None
     dashboard_env = dict()
+    test_lab_external = False
     if run_dashboard:
         dashboard_env = dict(os.environ)
         dashboard_env["DASHBOARD_HOST"] = args.dashboard_host
@@ -1329,6 +1387,28 @@ def main() -> None:
         dashboard_env["API_BASE"] = dashboard_api_base
 
     try:
+        if run_test_lab:
+            test_lab_host = args.test_lab_host if args.test_lab_host not in {"0.0.0.0", "::"} else "127.0.0.1"
+            if tcp_port_in_use(test_lab_host, args.test_lab_port):
+                test_lab_external = True
+                log(
+                    f"test lab already running on {args.test_lab_host}:{args.test_lab_port}; reusing existing process",
+                    app_log,
+                )
+            else:
+                test_lab_out_f = test_lab_stdout.open("a", encoding="utf-8")
+                test_lab_err_f = test_lab_stderr.open("a", encoding="utf-8")
+                test_lab_proc = subprocess.Popen(
+                    test_lab_cmd,
+                    cwd=str(project_root),
+                    stdout=test_lab_out_f,
+                    stderr=test_lab_err_f,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                log(f"test lab started pid={test_lab_proc.pid} port={args.test_lab_port}", app_log)
+
         if run_capture:
             capture_out_f = capture_stdout.open("a", encoding="utf-8")
             capture_err_f = capture_stderr.open("a", encoding="utf-8")
@@ -1455,6 +1535,7 @@ def main() -> None:
                 "dashboard": run_dashboard,
                 "ssh_monitor": run_ssh_monitor,
                 "situation": run_situation,
+                "test_lab": run_test_lab,
             },
             "capture": {
                 "pid": capture_proc.pid if capture_proc else None,
@@ -1512,6 +1593,15 @@ def main() -> None:
                 "url": f"http://127.0.0.1:{args.dashboard_port}",
                 "api_base": dashboard_api_base,
             },
+            "test_lab": {
+                "pid": test_lab_proc.pid if test_lab_proc else None,
+                "cmd": test_lab_cmd,
+                "external": test_lab_external,
+                "host": args.test_lab_host if run_test_lab else None,
+                "port": args.test_lab_port if run_test_lab else None,
+                "stdout": str(test_lab_stdout),
+                "stderr": str(test_lab_stderr),
+            },
             "app_log": str(app_log),
         }
         write_runtime_state(state_file, runtime_state)
@@ -1545,6 +1635,7 @@ def main() -> None:
             situation_rc = situation_proc.poll() if situation_proc else None
             api_rc = api_proc.poll() if api_proc else None
             dashboard_rc = dashboard_proc.poll() if dashboard_proc else None
+            test_lab_rc = test_lab_proc.poll() if test_lab_proc else None
 
             cap_alive = capture_proc is not None and cap_rc is None
             dmn_alive = daemon_proc is not None and dmn_rc is None
@@ -1554,6 +1645,7 @@ def main() -> None:
             situation_alive = situation_proc is not None and situation_rc is None
             api_alive = api_proc is not None and api_rc is None
             dashboard_alive = dashboard_proc is not None and dashboard_rc is None
+            test_lab_alive = test_lab_proc is not None and test_lab_rc is None
 
             if run_capture and capture_proc and cap_rc is None and time.time() >= next_capture_cfg_check_ts:
                 next_capture_cfg_check_ts = time.time() + capture_cfg_poll_seconds
@@ -1870,7 +1962,34 @@ def main() -> None:
                 log(f"dashboard restarted pid={dashboard_proc.pid}", app_log)
                 continue
 
-            if not cap_alive and not dmn_alive and not llm_alive and not db_alive and not ssh_monitor_alive and not situation_alive and not api_alive and not dashboard_alive:
+            if run_test_lab and test_lab_proc and test_lab_rc is not None:
+                log(f"test lab exited rc={test_lab_rc}; restarting in 5s", app_log)
+                test_lab_proc = None
+                time.sleep(5)
+                if not tcp_port_in_use(
+                    args.test_lab_host if args.test_lab_host not in {"0.0.0.0", "::"} else "127.0.0.1",
+                    args.test_lab_port,
+                ):
+                    test_lab_proc = subprocess.Popen(
+                        test_lab_cmd,
+                        cwd=str(project_root),
+                        stdout=test_lab_out_f,
+                        stderr=test_lab_err_f,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    runtime_state["test_lab"]["pid"] = test_lab_proc.pid
+                    write_runtime_state(state_file, runtime_state)
+                    log(f"test lab restarted pid={test_lab_proc.pid}", app_log)
+                else:
+                    test_lab_external = True
+                    runtime_state["test_lab"]["pid"] = None
+                    runtime_state["test_lab"]["external"] = True
+                    write_runtime_state(state_file, runtime_state)
+                continue
+
+            if not cap_alive and not dmn_alive and not llm_alive and not db_alive and not ssh_monitor_alive and not situation_alive and not api_alive and not dashboard_alive and not test_lab_alive:
                 break
 
             time.sleep(1)
@@ -1886,6 +2005,8 @@ def main() -> None:
         terminate_process(situation_proc, "situation", app_log)
         terminate_process(api_proc, "api", app_log)
         terminate_process(dashboard_proc, "dashboard", app_log)
+        if not test_lab_external:
+            terminate_process(test_lab_proc, "test lab", app_log)
 
         if capture_out_f:
             capture_out_f.close()
@@ -1919,6 +2040,10 @@ def main() -> None:
             dashboard_out_f.close()
         if dashboard_err_f:
             dashboard_err_f.close()
+        if test_lab_out_f:
+            test_lab_out_f.close()
+        if test_lab_err_f:
+            test_lab_err_f.close()
 
         log("APP stopped", app_log)
 
