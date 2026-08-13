@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import urllib.parse
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -22,6 +26,22 @@ CREATE TABLE IF NOT EXISTS llm_review_jobs (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_llm_review_case (case_id),
   KEY idx_llm_review_ready (status, next_retry_at, priority, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CACHE_DDL = """
+CREATE TABLE IF NOT EXISTS llm_review_cache (
+  fingerprint CHAR(64) PRIMARY KEY,
+  target_port INT NOT NULL,
+  method VARCHAR(16) NOT NULL,
+  uri TEXT NOT NULL,
+  template_json LONGTEXT NOT NULL,
+  model_name VARCHAR(255) NULL,
+  hit_count INT NOT NULL DEFAULT 0,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_review_cache_port (target_port, enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -75,15 +95,110 @@ def ensure_review_schema(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(ANALYSES_DDL)
         cur.execute(QUEUE_DDL)
+        cur.execute(CACHE_DDL)
         additions = {
             "rag_enabled": "TINYINT(1) NOT NULL DEFAULT 0",
             "rag_hits": "INT NOT NULL DEFAULT 0",
             "review_latency_ms": "INT NULL",
             "handling_suggestion": "LONGTEXT NULL",
+            "review_source": "VARCHAR(32) NULL",
+            "request_fingerprint": "CHAR(64) NULL",
         }
         for column, sql_type in additions.items():
             if not _column_exists(cur, "analyses", column):
                 cur.execute(f"ALTER TABLE analyses ADD COLUMN `{column}` {sql_type}")
+
+
+def request_fingerprint(row: Dict[str, Any]) -> str:
+    """Strict target-lab signature, excluding source identity and capture time."""
+    request_text = str(row.get("request_text") or "")
+    content_type_match = re.search(r"(?m)^CONTENT_TYPE=(.*)$", request_text)
+    request_body_match = re.search(
+        r"(?ms)^REQUEST_BODY=(.*?)(?=^RESPONSE_EXCERPT=|\Z)", request_text
+    )
+    content_type = content_type_match.group(1).rstrip("\r") if content_type_match else ""
+    request_body = request_body_match.group(1).rstrip("\r\n") if request_body_match else ""
+    canonical = "\n".join(
+        [
+            str(_target_port(row) or ""),
+            str(row.get("method") or "").upper(),
+            urllib.parse.unquote(str(row.get("uri") or "")),
+            content_type,
+            request_body,
+        ]
+    )
+    return hashlib.sha256(canonical.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def realtime_llm_enabled(conn: Any) -> bool:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT config_value FROM demo_system_config WHERE config_key='llm_realtime_enabled' LIMIT 1"
+            )
+            row = cur.fetchone() or {}
+        return str(row.get("config_value", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return True
+
+
+def find_cached_review(conn: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if _target_port(row) != 4000:
+        return None
+    fingerprint = request_fingerprint(row)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT fingerprint,template_json,model_name FROM llm_review_cache
+               WHERE fingerprint=%s AND target_port=4000 AND enabled=1 LIMIT 1""",
+            (fingerprint,),
+        )
+        cached = cur.fetchone()
+    if not cached:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT a.request_fingerprint AS fingerprint,
+                          a.analysis_raw AS template_json,a.model_name
+                   FROM analyses a
+                   WHERE a.verdict='attack' AND a.llm_status='done'
+                     AND a.review_source='realtime_llm'
+                     AND a.request_fingerprint IS NOT NULL
+                     AND a.request_fingerprint=%s
+                   ORDER BY a.analyzed_at DESC LIMIT 1""",
+                (fingerprint,),
+            )
+            cached = cur.fetchone()
+        if cached:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT IGNORE INTO llm_review_cache(
+                         fingerprint,target_port,method,uri,template_json,model_name,enabled
+                       ) VALUES(%s,4000,%s,%s,%s,%s,1)""",
+                    (
+                        fingerprint, str(row.get("method") or "")[:16], str(row.get("uri") or ""),
+                        cached.get("template_json"), cached.get("model_name"),
+                    ),
+                )
+    if not cached:
+        return None
+    try:
+        cached["analysis"] = json.loads(str(cached.get("template_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return cached
+
+
+def defer_review(conn: Any, event_id: str, ready_at: datetime) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE llm_review_jobs SET status='pending',started_at=NULL,
+               attempts=GREATEST(0,attempts-1),next_retry_at=%s WHERE event_id=%s""",
+            (ready_at, event_id),
+        )
+
+
+def mark_cache_hit(conn: Any, fingerprint: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE llm_review_cache SET hit_count=hit_count+1 WHERE fingerprint=%s", (fingerprint,))
 
 
 def enqueue_review(
@@ -102,8 +217,8 @@ def enqueue_review(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO llm_review_jobs(event_id, case_id, preliminary_decision, priority, status)
-            VALUES(%s,%s,%s,%s,'pending')
+            INSERT INTO llm_review_jobs(event_id, case_id, preliminary_decision, priority, status, next_retry_at)
+            VALUES(%s,%s,%s,%s,'pending',DATE_ADD(NOW(), INTERVAL 2 SECOND))
             ON DUPLICATE KEY UPDATE
               case_id=VALUES(case_id),
               preliminary_decision=VALUES(preliminary_decision),
@@ -112,7 +227,7 @@ def enqueue_review(
                 WHEN status IN ('processing','done') THEN status
                 ELSE 'pending'
               END,
-              next_retry_at=CASE WHEN status IN ('processing','done') THEN next_retry_at ELSE NULL END,
+              next_retry_at=CASE WHEN status IN ('processing','done') THEN next_retry_at ELSE DATE_ADD(NOW(), INTERVAL 2 SECOND) END,
               error_message=CASE WHEN status IN ('processing','done') THEN error_message ELSE NULL END
             """,
             (event_id, case_id, preliminary_decision, priority),
@@ -133,6 +248,7 @@ def claim_next_review(conn: Any, *, max_attempts: int = 3) -> Optional[Dict[str,
                 """
                 UPDATE llm_review_jobs
                 SET status='pending', started_at=NULL,
+                    attempts=GREATEST(0,attempts-1),
                     error_message=CONCAT(COALESCE(error_message,''), ' [recovered stale job]')
                 WHERE status='processing' AND started_at < NOW() - INTERVAL 10 MINUTE
                 """
@@ -152,7 +268,10 @@ def claim_next_review(conn: Any, *, max_attempts: int = 3) -> Optional[Dict[str,
                 WHERE j.status IN ('pending','failed')
                   AND j.attempts < %s
                   AND (j.next_retry_at IS NULL OR j.next_retry_at <= NOW())
-                ORDER BY j.priority DESC, j.created_at DESC
+                -- Preserve capture order inside a burst. Priority-first made
+                -- reconnaissance packets wait behind later exploit packets,
+                -- delaying completion of an otherwise valid attack chain.
+                ORDER BY j.created_at ASC, j.priority DESC
                 LIMIT 1
                 FOR UPDATE
                 """,
@@ -270,6 +389,41 @@ def _target_port(row: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def normalize_review_evidence(
+    analysis: Dict[str, Any], *, row: Dict[str, Any], summary: str
+) -> List[str]:
+    """Keep LLM evidence visible even when a small model omits the optional-looking field."""
+    values: List[str] = []
+    raw_evidence = analysis.get("evidence")
+    if isinstance(raw_evidence, list):
+        values.extend(str(item).strip() for item in raw_evidence if str(item).strip())
+
+    if not values:
+        fused = row.get("evidence_json")
+        try:
+            fused = json.loads(fused) if isinstance(fused, str) else fused
+        except (TypeError, ValueError, json.JSONDecodeError):
+            fused = []
+        if isinstance(fused, list):
+            values.extend(f"融合证据：{str(item).strip()}" for item in fused if str(item).strip())
+
+    if not values and summary:
+        values.append(f"大模型研判说明：{summary}")
+    return values[:8]
+
+
+@contextmanager
+def _transaction_cursor(conn: Any):
+    conn.begin()
+    try:
+        with conn.cursor() as cur:
+            yield cur
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def complete_review(
     conn: Any,
     *,
@@ -280,17 +434,26 @@ def complete_review(
     rag_enabled: bool,
     rag_hits: int,
     latency_ms: int,
+    review_source: str = "realtime_llm",
 ) -> bool:
     verdict = str(analysis.get("verdict") or "unknown").strip().lower()
     is_attack = verdict == "attack"
-    evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), list) else []
-    summary = str(analysis.get("llm_explanation") or analysis.get("summary") or "").strip()
+    summary = str(analysis.get("summary") or analysis.get("llm_explanation") or "").strip()
+    evidence = normalize_review_evidence(analysis, row=row, summary=summary)
     severity = str(analysis.get("severity") or row.get("risk_level") or "unknown")
     confidence = float(analysis.get("confidence") or 0.0)
     attack_type = str(analysis.get("attack_method") or row.get("attack_type") or "可疑流量")
     analyzed_at = str(analysis.get("analyzed_at") or datetime.now().isoformat(timespec="seconds"))
+    immediate_actions = analysis.get("immediate_actions") if isinstance(analysis.get("immediate_actions"), list) else []
+    hardening_actions = analysis.get("hardening_actions") if isinstance(analysis.get("hardening_actions"), list) else []
+    handling_suggestion = "\n".join(
+        [f"立即处置：{item}" for item in immediate_actions]
+        + [f"长期加固：{item}" for item in hardening_actions]
+    ) or summary
 
-    with conn.cursor() as cur:
+    # Persist the post-validation structure used by the UI, not unchecked model text.
+    validated_raw_content = json.dumps(analysis, ensure_ascii=False)
+    with _transaction_cursor(conn) as cur:
         cur.execute(
             """
             INSERT INTO analyses(
@@ -298,9 +461,10 @@ def complete_review(
               source_ip,destination_ip,attack_interface,attack_method,attack_path,
               attack_time,severity,confidence,summary,evidence_json,analysis_raw,
               attack_event_time,attack_ip,target_interface,attack_type,attack_confidence,
-              rag_enabled,rag_hits,review_latency_ms,handling_suggestion
+              rag_enabled,rag_hits,review_latency_ms,handling_suggestion,
+              review_source,request_fingerprint
             ) VALUES(
-              %s,%s,%s,'done',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+              %s,%s,%s,'done',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
             )
             ON DUPLICATE KEY UPDATE
               llm_status='done',llm_error=NULL,llm_failed_at=NULL,analyzed_at=VALUES(analyzed_at),
@@ -313,18 +477,32 @@ def complete_review(
               target_interface=VALUES(target_interface),attack_type=VALUES(attack_type),
               attack_confidence=VALUES(attack_confidence),rag_enabled=VALUES(rag_enabled),
               rag_hits=VALUES(rag_hits),review_latency_ms=VALUES(review_latency_ms),
-              handling_suggestion=VALUES(handling_suggestion)
+              handling_suggestion=VALUES(handling_suggestion),review_source=VALUES(review_source),
+              request_fingerprint=VALUES(request_fingerprint)
             """,
             (
                 row["case_id"], row.get("file_id"), row.get("seq_id"), analyzed_at, model_name,
                 verdict, row.get("source_ip"), row.get("destination_ip"), row.get("uri"),
                 attack_type, f"{row.get('method') or ''} {row.get('uri') or ''}".strip(),
                 row.get("event_time"), severity, confidence, summary,
-                json.dumps(evidence, ensure_ascii=False), raw_content, row.get("event_time"),
+                json.dumps(evidence, ensure_ascii=False), validated_raw_content, row.get("event_time"),
                 row.get("source_ip"), row.get("uri"), attack_type, confidence,
-                1 if rag_enabled else 0, int(rag_hits), int(latency_ms), summary,
+                1 if rag_enabled else 0, int(rag_hits), int(latency_ms), handling_suggestion,
+                review_source, request_fingerprint(row),
             ),
         )
+        if is_attack and review_source == "realtime_llm" and _target_port(row) == 4000:
+            cur.execute(
+                """INSERT INTO llm_review_cache(
+                     fingerprint,target_port,method,uri,template_json,model_name,enabled
+                   ) VALUES(%s,4000,%s,%s,%s,%s,1)
+                   ON DUPLICATE KEY UPDATE template_json=VALUES(template_json),
+                     model_name=VALUES(model_name),enabled=1""",
+                (
+                    request_fingerprint(row), str(row.get("method") or "")[:16],
+                    str(row.get("uri") or ""), validated_raw_content, model_name,
+                ),
+            )
         cur.execute(
             """
             UPDATE llm_review_jobs
@@ -370,7 +548,7 @@ def complete_review(
                 (
                     row["event_id"][:40], row.get("event_time"), severity, attack_type,
                     row.get("source_ip") or "unknown", _target_port(row), row.get("uri") or "",
-                    row.get("request_text") or "", row.get("request_text") or "", summary,
+                    row.get("request_text") or "", row.get("request_text") or "", handling_suggestion,
                     int(latency_ms),
                 ),
             )

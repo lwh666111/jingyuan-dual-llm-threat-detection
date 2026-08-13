@@ -1,4 +1,4 @@
-﻿{
+{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
@@ -11,20 +11,20 @@
     "attack_time": { "type": "string" },
     "severity": { "type": "string", "enum": ["low", "medium", "high", "critical", "unknown"] },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-    "evidence": {
-      "type": "array",
-      "items": { "type": "string" },
-      "maxItems": 8
-    },
+    "evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 6 },
+    "analysis_reasoning": { "type": "string" },
+    "potential_impact": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 4 },
+    "immediate_actions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 4 },
+    "hardening_actions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 4 },
+    "false_positive_notes": { "type": "string" },
+    "knowledge_references": { "type": "array", "items": { "type": "string" }, "maxItems": 4 },
     "summary": { "type": "string" }
   },
   "required": [
-    "verdict",
-    "source_ip",
-    "attack_interface",
-    "attack_method",
-    "confidence",
-    "summary"
+    "verdict", "source_ip", "destination_ip", "attack_interface", "attack_method",
+    "attack_path", "attack_time", "severity", "confidence", "evidence",
+    "analysis_reasoning", "potential_impact", "immediate_actions", "hardening_actions",
+    "false_positive_notes", "knowledge_references", "summary"
   ],
-  "additionalProperties": true
+  "additionalProperties": false
 }

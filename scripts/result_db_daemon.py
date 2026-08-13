@@ -11,6 +11,7 @@ from sync_detection_v2_db import ensure_mysql as ensure_v2_mysql
 from sync_detection_v2_db import iter_case_dirs as iter_v2_case_dirs
 from sync_detection_v2_db import mysql_connect as v2_mysql_connect
 from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
+from pipeline_events import DB_READY_EVENT, INPUT_QUEUE_NAME, LLM_READY_EVENT, notify_event, read_input_ready, wait_event
 
 
 def iter_raw_input_files(input_dir: Path) -> List[Path]:
@@ -145,13 +146,33 @@ def run_sync(
     input_files: List[Path] | None = None,
     raw_engine: object | None = None,
 ) -> Dict[str, str | int]:
-    stats = sync_result_to_db(
-        result_dir=result_dir,
-        backend=backend,
-        db_path=db_path,
-        mysql_config=mysql_config,
-        case_names=case_names,
-    )
+    sync_started = time.perf_counter()
+    # RAW-only changes are the normal hot path. Running the legacy b.* importer
+    # here needlessly performs schema checks and full-table counts before every
+    # live packet, which can add several seconds on the Windows server.
+    if case_names is not None and not case_names:
+        stats = {
+            "backend": backend,
+            "target": (
+                str(db_path)
+                if backend == "sqlite"
+                else f"mysql://{mysql_config.user}@{mysql_config.host}:{mysql_config.port}/{mysql_config.database}"
+            ),
+            "cases_scanned": 0,
+            "cases_with_analysis_json": 0,
+            "requests_rows": 0,
+            "responses_rows": 0,
+            "analyses_rows": 0,
+            "demo_event_rows": 0,
+        }
+    else:
+        stats = sync_result_to_db(
+            result_dir=result_dir,
+            backend=backend,
+            db_path=db_path,
+            mysql_config=mysql_config,
+            case_names=case_names,
+        )
     if backend == "mysql":
         try:
             conn = v2_mysql_connect(mysql_config)
@@ -169,13 +190,24 @@ def run_sync(
             if raw_paths:
                 from sync_raw_http_logs import sync_input_file_mysql
             for input_file in raw_paths:
-                try:
-                    row_stats = sync_input_file_mysql(conn, input_file, engine)
-                    for key in ("files", "raw", "candidate", "attack", "model", "poc", "behavior"):
-                        raw_totals[key] += int(row_stats.get(key, 0))
-                except Exception as exc:  # noqa: BLE001
-                    raw_totals["errors"] += 1
-                    log(f"raw sync failed file={input_file}: {exc}", log_file)
+                for attempt in range(4):
+                    try:
+                        row_stats = sync_input_file_mysql(conn, input_file, engine)
+                        for key in ("files", "raw", "candidate", "attack", "model", "poc", "behavior"):
+                            raw_totals[key] += int(row_stats.get(key, 0))
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        is_deadlock = getattr(exc, "args", [None])[0] in {1205, 1213}
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        if is_deadlock and attempt < 3:
+                            time.sleep(0.08 * (2**attempt))
+                            continue
+                        raw_totals["errors"] += 1
+                        log(f"raw sync failed file={input_file}: {exc}", log_file)
+                        break
             v2_totals = {"cases": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0}
             for case_dir in iter_v2_case_dirs(result_dir):
                 if case_names is not None and case_dir.name not in case_names:
@@ -185,6 +217,10 @@ def run_sync(
                     v2_totals["cases"] += 1
                 for key in ("raw", "candidate", "attack", "model", "poc", "behavior"):
                     v2_totals[key] += int(row_stats.get(key, 0))
+            # mysql_connect normally uses autocommit, while tests and future
+            # deployments may choose a transactional connection. Keep the
+            # publication boundary explicit before waking the LLM daemon.
+            conn.commit()
             conn.close()
             stats["v2_layered_rows"] = v2_totals
             stats["raw_input_rows"] = raw_totals
@@ -202,6 +238,7 @@ def run_sync(
         + f"req={stats['requests_rows']} "
         + f"rsp={stats['responses_rows']} "
         + f"ana={stats['analyses_rows']} "
+        + f"elapsed_ms={int((time.perf_counter() - sync_started) * 1000)} "
         + f"demo={stats.get('demo_event_rows', 0)} "
         + f"raw_input={stats.get('raw_input_rows', {}).get('raw', 0) if isinstance(stats.get('raw_input_rows'), dict) else 0}",
         log_file,
@@ -227,7 +264,7 @@ def main() -> None:
 
     parser.add_argument("--state-file", default="output/result_db_daemon_state.json", help="state json path")
     parser.add_argument("--log-file", default="output/result_db_daemon.log", help="daemon log path")
-    parser.add_argument("--poll-seconds", type=int, default=5, help="poll interval seconds")
+    parser.add_argument("--poll-seconds", type=int, default=1, help="fallback poll interval seconds")
     parser.add_argument("--once", action="store_true", help="sync once and exit")
     args = parser.parse_args()
 
@@ -264,11 +301,29 @@ def main() -> None:
     log(f"result db daemon started result_dir={result_dir}", log_file)
     log(f"raw input watch dir={input_dir}", log_file)
     log(f"backend={args.backend} target={state['db_target']}", log_file)
+    input_queue = project_root / "output" / INPUT_QUEUE_NAME
+    state.setdefault("input_queue_offset", 0)
 
-    # Loading the PyTorch detector costs hundreds of MB.  Most daemon cycles
-    # only synchronize result case files, so load it only when raw input files
-    # actually need classification.
     raw_engine: object | None = None
+    if args.backend == "mysql":
+        # Pay the PyTorch/model initialization cost during service startup, not
+        # on the first live request.  The engine remains resident after its
+        # first use either way; eager warm-up only moves that latency out of the
+        # detection critical path.
+        try:
+            warm_started = time.perf_counter()
+            from security_detection_v2 import DetectionEngineV2
+
+            raw_engine = DetectionEngineV2()
+            log(
+                f"detection engine ready warmup_seconds={time.perf_counter() - warm_started:.3f}",
+                log_file,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Keep result/database synchronization available.  A later input
+            # event retries engine construction and records a precise error.
+            log(f"detection engine warmup failed; will retry on input: {exc}", log_file)
+
     current_index = collect_watch_index(result_dir, input_dir)
     previous_index = state.get("watch_index")
     initial_case_names: Set[str] | None = None
@@ -313,9 +368,57 @@ def main() -> None:
         log("once done", log_file)
         return
 
+    next_fallback_scan_at = time.monotonic() + 30.0
     while True:
-        time.sleep(max(args.poll_seconds, 1))
+        awakened = wait_event(DB_READY_EVENT, max(args.poll_seconds, 1))
         try:
+            queued_paths, next_queue_offset = read_input_ready(input_queue, int(state.get("input_queue_offset") or 0))
+            if queued_paths:
+                input_root = input_dir.resolve()
+                unique_paths: List[Path] = []
+                seen: Set[str] = set()
+                for path in queued_paths:
+                    resolved = path.resolve()
+                    if input_root not in resolved.parents or not resolved.is_file():
+                        continue
+                    key = str(resolved).lower()
+                    if key not in seen:
+                        seen.add(key)
+                        unique_paths.append(resolved)
+                for start in range(0, len(unique_paths), 100):
+                    batch = unique_paths[start : start + 100]
+                    if not batch:
+                        continue
+                    log(f"durable queue batch inputs={len(batch)} remaining={max(0, len(unique_paths) - start - len(batch))}", log_file)
+                    if raw_engine is None:
+                        from security_detection_v2 import DetectionEngineV2
+
+                        raw_engine = DetectionEngineV2()
+                    batch_stats = run_sync(
+                        result_dir, input_dir, args.backend, db_path, mysql_config,
+                        log_file, state_file, state, case_names=set(),
+                        input_files=batch, raw_engine=raw_engine,
+                    )
+                    raw_stats = batch_stats.get("raw_input_rows")
+                    if not isinstance(raw_stats, dict):
+                        raise RuntimeError(
+                            f"durable queue batch was not committed: {batch_stats.get('v2_layered_error', 'missing raw stats')}"
+                        )
+                    if int(raw_stats.get("errors") or 0) > 0:
+                        raise RuntimeError(
+                            f"durable queue batch has {raw_stats.get('errors')} failed input file(s); cursor retained for retry"
+                        )
+                    notify_event(LLM_READY_EVENT)
+                state["input_queue_offset"] = next_queue_offset
+                write_state(state_file, state)
+                continue
+
+            # Queue delivery is the live path. A low-frequency directory scan
+            # only recovers writes from legacy tools or a damaged event queue.
+            if not awakened and time.monotonic() < next_fallback_scan_at:
+                continue
+            next_fallback_scan_at = time.monotonic() + 30.0
+
             current_index = collect_watch_index(result_dir, input_dir)
             previous_index = state.get("watch_index")
             if isinstance(previous_index, dict) and current_index == previous_index:
@@ -348,10 +451,14 @@ def main() -> None:
                 input_files=input_files,
                 raw_engine=raw_engine,
             )
+            if input_files is None or input_files:
+                notify_event(LLM_READY_EVENT)
             state["watch_index"] = current_index
             state["last_signature"] = calc_signature(result_dir, input_dir)["signature"]
             state["last_file_count"] = len(current_index)
             write_state(state_file, state)
+            if awakened:
+                log("input event processed without waiting for fallback poll", log_file)
         except Exception as exc:  # noqa: BLE001
             state["last_error"] = str(exc)
             state["last_error_at"] = now_iso()

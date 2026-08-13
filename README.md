@@ -478,6 +478,18 @@ Details view:
 - `POST /api/v2/pro/candidates/{event_id}/ignore`
 - `GET /api/v2/pro/nodes/{node_name}/detail`
 
+Situation awareness and professional reports:
+
+- `GET /api/v2/situations`
+- `GET /api/v2/situations/{situation_id}`
+- `POST /api/v2/situations/{situation_id}/professional-report`
+- `GET /api/v2/situations/{situation_id}/professional-report`
+- `GET /api/v2/situations/{situation_id}/professional-report/download?job_id=...`
+- `GET /api/v2/llm/professional-report-prompt` (administrator)
+- `PUT /api/v2/llm/professional-report-prompt` (administrator)
+
+Professional reports run asynchronously. The browser can leave the progress dialog and retrieve the same job later. Report files are stored outside the project runtime directory when `SITUATION_REPORT_DIR` is configured (the server currently uses `D:/JingyuanTrafficPipelineData/reports`).
+
 Admin:
 
 - `GET /api/v2/admin/summary`
@@ -508,6 +520,10 @@ Admin:
 - LLM runtime logs: `output/app_runtime/llm_stdout.log`, `output/app_runtime/llm_stderr.log`
 - DB runtime logs: `output/app_runtime/db_stdout.log`, `output/app_runtime/db_stderr.log`
 - DB daemon state/log: `output/result_db_daemon_state.json`, `output/result_db_daemon.log`
+- Supervisor heartbeat: `output/app_runtime/app_state.json`
+- Durable capture-to-pipeline queue: `output/pipeline_events/input_events.jsonl`
+
+The main supervisor restarts an individual failed capture, database, API, dashboard, LLM, SSH, situation, or lab process without stopping the other healthy services. `install_watchdog.ps1` installs the Windows scheduled health check; `watchdog.ps1` only replaces the full process tree after the supervisor has remained unhealthy for three minutes.
 
 ## LLM Directory
 

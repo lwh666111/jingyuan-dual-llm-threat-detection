@@ -1,5 +1,7 @@
 ﻿import argparse
+import atexit
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -9,6 +11,37 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+_INSTANCE_MUTEX_HANDLE = None
+
+
+def acquire_single_instance_mutex(project_root: Path) -> bool:
+    """Prevent concurrent supervisors from terminating each other's children."""
+    global _INSTANCE_MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    root_hash = hashlib.sha256(str(project_root.resolve()).lower().encode("utf-8")).hexdigest()[:16]
+    mutex_name = f"Global\\JingyuanTrafficPipeline_{root_hash}"
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _INSTANCE_MUTEX_HANDLE = handle
+
+    def close_mutex() -> None:
+        global _INSTANCE_MUTEX_HANDLE
+        if _INSTANCE_MUTEX_HANDLE:
+            kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
+            _INSTANCE_MUTEX_HANDLE = None
+
+    atexit.register(close_mutex)
+    return True
 
 
 def is_windows_admin() -> bool:
@@ -53,14 +86,14 @@ def log(msg: str, log_path: Path) -> None:
 def ensure_scripts(script_dir: Path, script_names: List[str]) -> None:
     missing = [name for name in script_names if not (script_dir / name).exists()]
     if missing:
-        raise FileNotFoundError(f"缂哄皯鑴氭湰: {missing}锛岃纭 scripts 鐩綍瀹屾暣")
+        raise FileNotFoundError(f"缺少脚本: {missing}，请确认 scripts 目录完整")
 
 
 def ensure_paths(paths: List[Path], hint: str = "") -> None:
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         extra = f", {hint}" if hint else ""
-        raise FileNotFoundError(f"缂哄皯鏂囦欢: {missing}{extra}")
+        raise FileNotFoundError(f"缺少文件: {missing}{extra}")
 
 
 def terminate_process(proc: Optional[subprocess.Popen], name: str, log_path: Path) -> None:
@@ -808,6 +841,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Run detection daemon only, do not run packet capture",
     )
 
+    mode_group.add_argument(
+        "--legacy-file-pipeline",
+        action="store_true",
+        help="Also run the legacy file-export demo pipeline (disabled by default to avoid duplicate live reviews)",
+    )
     io_group = parser.add_argument_group("Paths")
     io_group.add_argument("--input-dir", default="input", help="Capture output dir and detection watch dir")
     io_group.add_argument("--output-dir", default="output", help="Pipeline output dir")
@@ -851,8 +889,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(capture_use_db_config=True)
 
     detect_group = parser.add_argument_group("Detect settings")
-    detect_group.add_argument("--poll-seconds", type=int, default=5, help="Daemon polling interval in seconds")
-    detect_group.add_argument("--stable-seconds", type=int, default=3, help="File stable time in seconds")
+    detect_group.add_argument("--poll-seconds", type=int, default=1, help="Detection fallback polling interval")
+    detect_group.add_argument("--stable-seconds", type=int, default=0, help="File stable time in seconds")
     detect_group.add_argument(
         "--detect-file-order",
         choices=["newest", "oldest"],
@@ -930,6 +968,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     llm_group.add_argument("--llm-num-ctx", type=int, default=1024, help="Ollama num_ctx")
     llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu, 0 for CPU")
     llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM temperature")
+    llm_group.add_argument(
+        "--ollama-keep-alive",
+        default="5m",
+        help="Keep an Ollama model loaded between nearby reviews (for example 5m)",
+    )
     llm_group.add_argument("--llm-max-cases", type=int, default=0, help="Max cases per pass, 0 means unlimited")
     llm_group.add_argument("--rag-enable", dest="rag_enable", action="store_true", help="Enable RAG")
     llm_group.add_argument("--no-rag", dest="rag_enable", action="store_false", help="Disable RAG")
@@ -966,7 +1009,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     db_group.add_argument("--mysql-user", default="root", help="MySQL user")
     db_group.add_argument("--mysql-password", default="123456", help="MySQL password")
     db_group.add_argument("--mysql-database", default="traffic_pipeline", help="MySQL database")
-    db_group.add_argument("--db-poll-seconds", type=int, default=5, help="DB polling interval")
+    db_group.add_argument("--db-poll-seconds", type=int, default=1, help="DB fallback polling interval")
     db_group.add_argument("--db-state-file", default="output/result_db_daemon_state.json", help="DB daemon state file")
     db_group.add_argument("--db-log-file", default="output/result_db_daemon.log", help="DB daemon log file")
 
@@ -1004,7 +1047,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     situation_group.add_argument("--situation-window-minutes", type=int, default=30, help="Maximum situation correlation window")
     situation_group.add_argument("--situation-inactivity-minutes", type=int, default=15, help="Inactivity gap that splits situations")
     situation_group.add_argument("--situation-lookback-days", type=int, default=30, help="Historical situation rebuild range")
-    situation_group.add_argument("--situation-poll-seconds", type=int, default=10, help="Situation and AI poll interval")
+    situation_group.add_argument("--situation-poll-seconds", type=int, default=2, help="Situation and AI poll interval")
     situation_group.add_argument("--scan-port-threshold", type=int, default=10, help="Unique destination ports that trigger a scan action")
     situation_group.add_argument("--scan-window-seconds", type=int, default=60, help="Port scan aggregation window")
     situation_group.add_argument("--neo4j-url", default="", help="Optional Neo4j HTTP URL, e.g. http://127.0.0.1:7474")
@@ -1127,6 +1170,9 @@ def main() -> None:
     if args.only_capture and args.only_detect:
         parser.error("--only-capture and --only-detect cannot be used together.")
 
+    if not acquire_single_instance_mutex(project_root):
+        print("[app] Jingyuan Traffic Pipeline is already running; duplicate startup ignored.", flush=True)
+        return
     args.project_root = project_root
 
     scripts_dir = (project_root / args.scripts_dir).resolve()
@@ -1153,7 +1199,7 @@ def main() -> None:
         args.model = default_model.resolve()
 
     run_capture = not args.only_detect
-    run_daemon = not args.only_capture
+    run_daemon = args.legacy_file_pipeline and not args.only_capture
     run_llm = args.enable_llm and not args.only_capture
     run_db = args.enable_db and not args.only_capture
     run_ssh_monitor = args.enable_ssh_monitor and run_db
@@ -1379,6 +1425,10 @@ def main() -> None:
     capture_out_f = capture_err_f = daemon_out_f = daemon_err_f = llm_out_f = llm_err_f = None
     db_out_f = db_err_f = ssh_monitor_out_f = ssh_monitor_err_f = situation_out_f = situation_err_f = api_out_f = api_err_f = dashboard_out_f = dashboard_err_f = test_lab_out_f = test_lab_err_f = None
     dashboard_env = dict()
+    workflow_env = dict(os.environ)
+    workflow_env["OLLAMA_KEEP_ALIVE"] = str(args.ollama_keep_alive or "5m")
+    workflow_env["PYTHONUTF8"] = "1"
+    workflow_env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
     test_lab_external = False
     if run_dashboard:
         dashboard_env = dict(os.environ)
@@ -1420,6 +1470,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"capture started pid={capture_proc.pid}", app_log)
 
@@ -1434,6 +1485,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"daemon  started pid={daemon_proc.pid}", app_log)
 
@@ -1448,6 +1500,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"llm     started pid={llm_proc.pid}", app_log)
 
@@ -1462,6 +1515,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"db      started pid={db_proc.pid}", app_log)
 
@@ -1476,6 +1530,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"sshmon  started pid={ssh_monitor_proc.pid}", app_log)
 
@@ -1490,6 +1545,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"situation started pid={situation_proc.pid}", app_log)
 
@@ -1504,6 +1560,7 @@ def main() -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=workflow_env,
             )
             log(f"api     started pid={api_proc.pid}", app_log)
 
@@ -1617,12 +1674,19 @@ def main() -> None:
         capture_cfg_poll_seconds = max(1, int(args.capture_config_poll_seconds))
         capture_restart_count = 0
         last_capture_restart_ts = 0.0
+        daemon_restart_count = 0
+        last_daemon_restart_ts = 0.0
         db_restart_count = 0
         last_db_restart_ts = 0.0
         api_restart_count = 0
         last_api_restart_ts = 0.0
         dashboard_restart_count = 0
         last_dashboard_restart_ts = 0.0
+        llm_restart_count = 0
+        last_llm_restart_ts = 0.0
+        ssh_restart_count = 0
+        last_ssh_restart_ts = 0.0
+        next_heartbeat_ts = 0.0
 
         log("workflow is running; press Ctrl+C to stop all", app_log)
 
@@ -1646,6 +1710,29 @@ def main() -> None:
             api_alive = api_proc is not None and api_rc is None
             dashboard_alive = dashboard_proc is not None and dashboard_rc is None
             test_lab_alive = test_lab_proc is not None and test_lab_rc is None
+
+            if time.time() >= next_heartbeat_ts:
+                next_heartbeat_ts = time.time() + 5.0
+                runtime_state["heartbeat_at"] = datetime.now().isoformat(timespec="seconds")
+                runtime_state["healthy"] = all(
+                    (
+                        not run_capture or cap_alive,
+                        not run_llm or llm_alive,
+                        not run_db or db_alive,
+                        not run_situation or situation_alive,
+                        not run_api or api_alive,
+                        not run_dashboard or dashboard_alive,
+                    )
+                )
+                for key, alive in (
+                    ("capture", cap_alive), ("daemon", dmn_alive), ("llm", llm_alive),
+                    ("db", db_alive), ("ssh_monitor", ssh_monitor_alive),
+                    ("situation", situation_alive), ("api", api_alive),
+                    ("dashboard", dashboard_alive), ("test_lab", test_lab_alive or test_lab_external),
+                ):
+                    if key in runtime_state:
+                        runtime_state[key]["alive"] = bool(alive)
+                write_runtime_state(state_file, runtime_state)
 
             if run_capture and capture_proc and cap_rc is None and time.time() >= next_capture_cfg_check_ts:
                 next_capture_cfg_check_ts = time.time() + capture_cfg_poll_seconds
@@ -1687,6 +1774,7 @@ def main() -> None:
                             text=True,
                             encoding="utf-8",
                             errors="replace",
+                            env=workflow_env,
                         )
                         capture_cmd = new_capture_cmd
                         capture_runtime_cfg = updated_cfg
@@ -1732,6 +1820,7 @@ def main() -> None:
                             text=True,
                             encoding="utf-8",
                             errors="replace",
+                            env=workflow_env,
                         )
                         llm_cmd = new_llm_cmd
                         llm_runtime_cfg = updated_llm_cfg
@@ -1786,6 +1875,7 @@ def main() -> None:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=workflow_env,
                 )
                 runtime_state["capture"]["pid"] = capture_proc.pid
                 runtime_state["capture"]["cmd"] = capture_cmd
@@ -1816,6 +1906,7 @@ def main() -> None:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=workflow_env,
                 )
                 runtime_state["situation"]["pid"] = situation_proc.pid
                 runtime_state["situation"]["cmd"] = situation_cmd
@@ -1824,36 +1915,50 @@ def main() -> None:
                 continue
 
             if run_daemon and daemon_proc and dmn_rc is not None:
-                log(f"daemon exited rc={dmn_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if ssh_monitor_proc:
-                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(dmn_rc)
+                log(f"legacy daemon exited rc={dmn_rc}", app_log)
+                daemon_proc = None
+                now = time.time()
+                if now - last_daemon_restart_ts > 300:
+                    daemon_restart_count = 0
+                daemon_restart_count += 1
+                last_daemon_restart_ts = now
+                restart_delay = min(60, 3 * daemon_restart_count)
+                log(
+                    f"legacy daemon will restart independently in {restart_delay}s "
+                    f"(attempt={daemon_restart_count})",
+                    app_log,
+                )
+                time.sleep(restart_delay)
+                daemon_proc = subprocess.Popen(
+                    daemon_cmd, cwd=str(project_root), stdout=daemon_out_f, stderr=daemon_err_f,
+                    text=True, encoding="utf-8", errors="replace", env=workflow_env,
+                )
+                runtime_state["daemon"]["pid"] = daemon_proc.pid
+                runtime_state["daemon"]["restart_count"] = daemon_restart_count
+                write_runtime_state(state_file, runtime_state)
+                log(f"legacy daemon restarted pid={daemon_proc.pid}", app_log)
+                continue
 
             if run_llm and llm_proc and llm_rc is not None:
                 log(f"llm exited rc={llm_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if ssh_monitor_proc:
-                    terminate_process(ssh_monitor_proc, "sshmon", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(llm_rc)
+                llm_proc = None
+                now = time.time()
+                if now - last_llm_restart_ts > 300:
+                    llm_restart_count = 0
+                llm_restart_count += 1
+                last_llm_restart_ts = now
+                restart_delay = min(60, 3 * llm_restart_count)
+                log(f"llm will restart independently in {restart_delay}s (attempt={llm_restart_count})", app_log)
+                time.sleep(restart_delay)
+                llm_proc = subprocess.Popen(
+                    llm_cmd, cwd=str(project_root), stdout=llm_out_f, stderr=llm_err_f,
+                    text=True, encoding="utf-8", errors="replace", env=workflow_env,
+                )
+                runtime_state["llm"]["pid"] = llm_proc.pid
+                runtime_state["llm"]["restart_count"] = llm_restart_count
+                write_runtime_state(state_file, runtime_state)
+                log(f"llm restarted pid={llm_proc.pid}", app_log)
+                continue
 
             if run_db and db_proc and db_rc is not None:
                 log(f"db exited rc={db_rc}", app_log)
@@ -1878,6 +1983,7 @@ def main() -> None:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=workflow_env,
                 )
                 runtime_state["db"]["pid"] = db_proc.pid
                 runtime_state["db"]["cmd"] = db_cmd
@@ -1887,19 +1993,24 @@ def main() -> None:
 
             if run_ssh_monitor and ssh_monitor_proc and ssh_monitor_rc is not None:
                 log(f"sshmon exited rc={ssh_monitor_rc}", app_log)
-                if capture_proc:
-                    terminate_process(capture_proc, "capture", app_log)
-                if daemon_proc:
-                    terminate_process(daemon_proc, "daemon", app_log)
-                if llm_proc:
-                    terminate_process(llm_proc, "llm", app_log)
-                if db_proc:
-                    terminate_process(db_proc, "db", app_log)
-                if api_proc:
-                    terminate_process(api_proc, "api", app_log)
-                if dashboard_proc:
-                    terminate_process(dashboard_proc, "dashboard", app_log)
-                raise SystemExit(ssh_monitor_rc)
+                ssh_monitor_proc = None
+                now = time.time()
+                if now - last_ssh_restart_ts > 300:
+                    ssh_restart_count = 0
+                ssh_restart_count += 1
+                last_ssh_restart_ts = now
+                restart_delay = min(60, 5 * ssh_restart_count)
+                log(f"sshmon will restart independently in {restart_delay}s (attempt={ssh_restart_count})", app_log)
+                time.sleep(restart_delay)
+                ssh_monitor_proc = subprocess.Popen(
+                    ssh_monitor_cmd, cwd=str(project_root), stdout=ssh_monitor_out_f,
+                    stderr=ssh_monitor_err_f, text=True, encoding="utf-8", errors="replace", env=workflow_env,
+                )
+                runtime_state["ssh_monitor"]["pid"] = ssh_monitor_proc.pid
+                runtime_state["ssh_monitor"]["restart_count"] = ssh_restart_count
+                write_runtime_state(state_file, runtime_state)
+                log(f"sshmon restarted pid={ssh_monitor_proc.pid}", app_log)
+                continue
 
             if run_api and api_proc and api_rc is not None:
                 log(f"api exited rc={api_rc}", app_log)
@@ -1924,6 +2035,7 @@ def main() -> None:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=workflow_env,
                 )
                 runtime_state["api"]["pid"] = api_proc.pid
                 runtime_state["api"]["cmd"] = api_cmd
@@ -1978,6 +2090,7 @@ def main() -> None:
                         text=True,
                         encoding="utf-8",
                         errors="replace",
+                        env=workflow_env,
                     )
                     runtime_state["test_lab"]["pid"] = test_lab_proc.pid
                     write_runtime_state(state_file, runtime_state)
@@ -2050,6 +2163,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

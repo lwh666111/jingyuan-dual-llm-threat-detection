@@ -22,11 +22,20 @@ def raw_review_waiting(store: MySQLSituationStore) -> bool:
     try:
         with store.connect().cursor() as cur:
             cur.execute(
-                """
-                SELECT COUNT(*) AS c FROM llm_review_jobs
-                WHERE status IN ('pending','processing')
-                """
+                "SELECT config_value FROM demo_system_config WHERE config_key='llm_realtime_enabled' LIMIT 1"
             )
+            config = cur.fetchone() or {}
+            realtime = str(config.get("config_value", "1")).strip().lower() in {"1", "true", "yes", "on"}
+            if realtime:
+                cur.execute(
+                    """SELECT
+                         (SELECT COUNT(*) FROM llm_review_jobs WHERE status IN ('pending','processing'))
+                         + (SELECT COUNT(*) FROM raw_http_logs WHERE event_time >= NOW() - INTERVAL 20 SECOND) AS c"""
+                )
+            else:
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM llm_review_jobs WHERE status IN ('pending','processing')"
+                )
             row = cur.fetchone() or {}
         return int(row.get("c") or 0) > 0
     except Exception:
@@ -47,8 +56,9 @@ def main() -> None:
     parser.add_argument("--timeout-sec", type=int, default=120)
     parser.add_argument("--poll-seconds", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--idle-grace-seconds", type=int, default=20)
-    parser.add_argument("--report-cooldown-seconds", type=int, default=180)
+    parser.add_argument("--idle-grace-seconds", type=int, default=8)
+    parser.add_argument("--report-cooldown-seconds", type=int, default=5)
+    parser.add_argument("--recent-minutes", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--log-file", default="output/situation_ai_daemon.log")
     args = parser.parse_args()
@@ -81,7 +91,13 @@ def main() -> None:
                     break
                 time.sleep(2)
                 continue
-            pending = store.list_pending_ai(args.batch_size)
+            # Do not spend the single CPU-only Ollama worker backfilling old
+            # reports after every restart. Historical situations remain
+            # queryable; only newly formed chains enter the live AI queue.
+            pending = store.list_pending_ai(
+                args.batch_size,
+                recent_minutes=args.recent_minutes,
+            )
             for situation in pending:
                 if raw_review_waiting(store):
                     break

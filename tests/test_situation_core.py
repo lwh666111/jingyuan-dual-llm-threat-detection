@@ -75,11 +75,54 @@ class SituationCoreTests(unittest.TestCase):
         self.assertEqual(result[0].distinct_action_types, 2)
         self.assertEqual(result[0].actions[0].count, 180)
 
+    def test_report_revision_changes_after_material_volume_growth(self) -> None:
+        correlator = SituationCorrelator()
+        before = correlator.correlate([
+            action(0, "PORT_SCAN", count=4),
+            action(1, "SSH_BRUTEFORCE", count=3),
+            action(2, "SQL_INJECTION", count=3),
+        ])[0]
+        after = correlator.correlate([
+            action(0, "PORT_SCAN", count=8),
+            action(1, "SSH_BRUTEFORCE", count=5),
+            action(2, "SQL_INJECTION", count=4),
+        ])[0]
+        self.assertNotEqual(before.sequence_hash, after.sequence_hash)
+
+    def test_report_revision_ignores_one_repeated_packet_in_same_bucket(self) -> None:
+        correlator = SituationCorrelator()
+        before = correlator.correlate([
+            action(0, "PORT_SCAN", count=8),
+            action(1, "SSH_BRUTEFORCE", count=5),
+            action(2, "SQL_INJECTION", count=4),
+        ])[0]
+        after = correlator.correlate([
+            action(0, "PORT_SCAN", count=9),
+            action(1, "SSH_BRUTEFORCE", count=5),
+            action(2, "SQL_INJECTION", count=4),
+        ])[0]
+        self.assertEqual(before.sequence_hash, after.sequence_hash)
+
     def test_inactivity_splits_sessions(self) -> None:
         rows = [action(0, "PORT_SCAN"), action(2, "SSH_BRUTEFORCE"), action(25, "SQL_INJECTION")]
         result = SituationCorrelator(inactivity_minutes=15).correlate(rows)
         self.assertEqual(len(result), 2)
         self.assertTrue(all(x.status == "observing" for x in result))
+        self.assertEqual(len({x.situation_id for x in result}), 2)
+
+    def test_out_of_order_growth_keeps_situation_id(self) -> None:
+        correlator = SituationCorrelator(inactivity_minutes=15)
+        partial = correlator.correlate([
+            action(5, "SSH_BRUTEFORCE"),
+            action(8, "SQL_INJECTION"),
+        ])[0]
+        completed = correlator.correlate([
+            action(1, "PORT_SCAN"),
+            action(5, "SSH_BRUTEFORCE"),
+            action(8, "SQL_INJECTION"),
+        ])[0]
+        self.assertEqual(partial.situation_id, completed.situation_id)
+        self.assertEqual(completed.status, "open")
 
     def test_different_ips_are_isolated(self) -> None:
         rows = [

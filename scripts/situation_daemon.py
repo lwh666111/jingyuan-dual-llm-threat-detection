@@ -24,19 +24,31 @@ def log(message: str, path: Path) -> None:
         handle.write(line + "\n")
 
 
-def load_attack_events(store: MySQLSituationStore, lookback_days: int, target_asset: str) -> List[Any]:
+def load_attack_events(
+    store: MySQLSituationStore,
+    lookback_days: int,
+    target_asset: str,
+    *,
+    lookback_minutes: int = 0,
+) -> List[Any]:
     conn = store.connect()
     with conn.cursor() as cur:
+        if int(lookback_minutes) > 0:
+            where_time = "created_at >= UTC_TIMESTAMP() - INTERVAL %s MINUTE"
+            time_value = max(1, int(lookback_minutes))
+        else:
+            where_time = "created_at >= UTC_TIMESTAMP() - INTERVAL %s DAY"
+            time_value = max(1, int(lookback_days))
         cur.execute(
-            """
+            f"""
             SELECT event_id,case_id,occurred_at,source_ip,target_interface,
                    attack_type,risk_level,confidence,status,evidence_json,created_at
             FROM attack_events
-            WHERE created_at >= UTC_TIMESTAMP() - INTERVAL %s DAY
+            WHERE {where_time}
               AND source_ip IS NOT NULL AND source_ip <> ''
             ORDER BY created_at ASC LIMIT 200000
             """,
-            (max(1, int(lookback_days)),),
+            (time_value,),
         )
         rows: List[Dict[str, Any]] = list(cur.fetchall())
     actions = []
@@ -55,16 +67,26 @@ def run_once(
     *,
     lookback_days: int,
     target_asset: str,
+    lookback_minutes: int = 0,
 ) -> Dict[str, int]:
-    imported = load_attack_events(store, lookback_days, target_asset)
+    imported = load_attack_events(
+        store,
+        lookback_days,
+        target_asset,
+        lookback_minutes=lookback_minutes,
+    )
     store.upsert_actions(imported)
-    actions = store.list_actions(lookback_days=lookback_days)
+    actions = store.list_actions(lookback_days=lookback_days, lookback_minutes=lookback_minutes)
     situations = correlator.correlate(actions, include_observing=True)
     stale_before = datetime.now(timezone.utc) - correlator.inactivity
     for situation in situations:
         if situation.last_action_at < stale_before:
             situation.status = "closed" if situation.distinct_action_types >= correlator.minimum_distinct_actions else "observing"
-    saved = store.save(situations)
+    # Observing fragments are retained as normalized actions and can become a
+    # situation on the next pass. Persisting every one-action SSH fragment
+    # created thousands of pending rows and starved real attack chains.
+    actionable = [item for item in situations if item.status != "observing"]
+    saved = store.save(actionable)
     return {
         "imported_events": len(imported),
         "actions": len(actions),
@@ -102,6 +124,7 @@ def main() -> None:
         log_file,
     )
     try:
+        first_cycle = True
         while True:
             started = time.monotonic()
             try:
@@ -110,7 +133,13 @@ def main() -> None:
                     correlator,
                     lookback_days=args.lookback_days,
                     target_asset=args.target_asset,
+                    lookback_minutes=(
+                        0
+                        if first_cycle
+                        else max(60, args.window_minutes + args.inactivity_minutes + 5)
+                    ),
                 )
+                first_cycle = False
                 log("sync " + json.dumps(stats, ensure_ascii=False), log_file)
             except Exception as exc:
                 log(f"sync failed: {type(exc).__name__}: {exc}", log_file)

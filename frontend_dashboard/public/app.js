@@ -224,6 +224,10 @@ const state = {
     promptPath: "",
     promptUpdatedAt: "",
     promptMaxChars: 0,
+    reportPrompt: "",
+    reportPromptPath: "",
+    reportPromptUpdatedAt: "",
+    reportPromptMaxChars: 0,
   },
   plugins: {
     activeTool: "phishing",
@@ -253,6 +257,8 @@ const state = {
     chainMode: "aggregate",
     scopeMode: "single_ip",
     clusterWindowMinutes: 60,
+    professionalReport: null,
+    professionalReportPoll: null,
     clusterLookbackHours: 720,
   },
 };
@@ -1653,7 +1659,12 @@ function renderAttackMapEcharts(container, items, mapName) {
           shadowColor: "rgba(36, 194, 255, 0.22)",
           shadowBlur: 16,
         },
-        emphasis: { itemStyle: { areaColor: "rgba(48, 119, 169, 0.9)" } },
+        emphasis: {
+          label: { show: false },
+          itemStyle: { areaColor: "rgba(48, 119, 169, 0.9)" },
+        },
+        select: { label: { show: false } },
+        blur: { label: { show: false } },
       },
       series: [
         ...lineSeries,
@@ -1836,7 +1847,10 @@ function renderSituationView() {
       <article class="situation-report-panel">
         <div class="situation-panel-title">
           <div><span>AI 态势报告</span><small id="situationAiMeta">Ollama + RAG 可解释研判</small></div>
-          <button id="btnSituationReanalyze" class="btn btn-ghost btn-mini ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}" type="button">重新研判</button>
+          <div class="situation-report-actions">
+            <button id="btnProfessionalSituationReport" class="btn btn-primary btn-mini" type="button">获取专业态势报告</button>
+            <button id="btnSituationReanalyze" class="btn btn-ghost btn-mini ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}" type="button">重新研判</button>
+          </div>
         </div>
         <div id="situationAiReport" class="situation-ai-report">
           <div class="situation-report-placeholder">报告将在攻击链形成后自动生成</div>
@@ -1871,6 +1885,7 @@ function renderSituationView() {
     await refreshSituationData({ preserveSelection: false });
   });
   document.getElementById("btnSituationReanalyze")?.addEventListener("click", reanalyzeSelectedSituation);
+  document.getElementById("btnProfessionalSituationReport")?.addEventListener("click", startProfessionalSituationReport);
   document.querySelectorAll("[data-chain-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.situations.chainMode = button.dataset.chainMode || "aggregate";
@@ -2014,6 +2029,7 @@ function renderSituationDetail() {
   renderSituationAiReport(detail);
   renderSituationEvidence(detail.actions || []);
   drawSituationChain(graph);
+  refreshProfessionalReportStatus(false).catch(() => {});
 }
 
 function renderSituationStagePills(nodes) {
@@ -2107,6 +2123,117 @@ function renderSituationReportSection(title, content, className = "", report = {
 function renderSituationAdvice(items, report = {}) {
   const rows = Array.isArray(items) ? items : [];
   return rows.length ? `<ol>${rows.map((item) => `<li>${escapeHtml(normalizeSituationReportTime(item, report))}</li>`).join("")}</ol>` : `<p>暂无建议</p>`;
+}
+
+function professionalReportButtonLabel(job) {
+  if (!job) return "获取专业态势报告";
+  if (job.status === "completed") return "查看专业态势报告";
+  if (job.status === "failed") return "重新生成专业报告";
+  return `报告生成中 ${Number(job.progress || 0)}%`;
+}
+
+async function refreshProfessionalReportStatus(openModal = false) {
+  if (state.situations.scopeMode !== "single_ip" || !state.situations.selectedId) return null;
+  const response = await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/professional-report`);
+  state.situations.professionalReport = response.job || null;
+  const button = document.getElementById("btnProfessionalSituationReport");
+  if (button) button.textContent = professionalReportButtonLabel(state.situations.professionalReport);
+  if (openModal && state.situations.professionalReport) renderProfessionalReportModal();
+  return state.situations.professionalReport;
+}
+
+async function startProfessionalSituationReport() {
+  if (state.situations.scopeMode !== "single_ip" || !state.situations.selectedId) {
+    showToast("请先切换到单 IP 态势并选择一条记录");
+    return;
+  }
+  const current = await refreshProfessionalReportStatus(false).catch(() => null);
+  if (current?.status === "completed" || current?.status === "running" || current?.status === "queued") {
+    renderProfessionalReportModal();
+    beginProfessionalReportPolling();
+    return;
+  }
+  const response = await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/professional-report`, { method: "POST", body: {} });
+  state.situations.professionalReport = response.job || null;
+  renderProfessionalReportModal();
+  beginProfessionalReportPolling();
+}
+
+function closeProfessionalReportModal() {
+  document.getElementById("professionalReportOverlay")?.remove();
+  if (state.situations.professionalReportPoll) {
+    clearTimeout(state.situations.professionalReportPoll);
+    state.situations.professionalReportPoll = null;
+  }
+}
+
+function renderProfessionalReportModal() {
+  const job = state.situations.professionalReport || {};
+  let root = document.getElementById("professionalReportOverlay");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "professionalReportOverlay";
+    root.className = "professional-report-overlay";
+    document.body.appendChild(root);
+  }
+  const done = job.status === "completed";
+  const failed = job.status === "failed";
+  const progress = Math.max(2, Math.min(100, Number(job.progress || 2)));
+  root.innerHTML = `
+    <section class="professional-report-modal" role="dialog" aria-modal="true" aria-labelledby="professionalReportTitle">
+      <button class="professional-report-close" type="button" aria-label="关闭">×</button>
+      <span class="section-eyebrow">PROFESSIONAL SITUATION REPORT</span>
+      <div class="professional-report-mark ${done ? "done" : failed ? "failed" : ""}"><i></i><i></i><i></i></div>
+      <h3 id="professionalReportTitle">${done ? "专业态势报告已生成" : failed ? "专业态势报告生成失败" : "正在生成专业态势报告"}</h3>
+      <p>${done ? "报告已完成事实核验、知识增强与 PDF 排版，可以立即下载。" : failed ? escapeHtml(job.error_message || "生成服务暂时不可用，请稍后重试。") : "大约需要一分钟，退出此界面也可以"}</p>
+      <div class="professional-report-progress"><span style="width:${progress}%"></span></div>
+      <div class="professional-report-stage"><span>${escapeHtml(job.stage || "任务已创建")}</span><strong>${progress}%</strong></div>
+      <footer>
+        <button class="btn btn-ghost" data-professional-close type="button">${done || failed ? "关闭" : "退出此界面"}</button>
+        ${done ? `<button class="btn btn-primary" data-professional-download type="button">下载 PDF 报告</button>` : ""}
+        ${failed ? `<button class="btn btn-primary" data-professional-retry type="button">重新生成</button>` : ""}
+      </footer>
+    </section>`;
+  root.querySelector(".professional-report-close")?.addEventListener("click", closeProfessionalReportModal);
+  root.querySelector("[data-professional-close]")?.addEventListener("click", closeProfessionalReportModal);
+  root.querySelector("[data-professional-download]")?.addEventListener("click", downloadProfessionalSituationReport);
+  root.querySelector("[data-professional-retry]")?.addEventListener("click", async () => {
+    closeProfessionalReportModal();
+    await startProfessionalSituationReport();
+  });
+}
+
+function beginProfessionalReportPolling() {
+  if (state.situations.professionalReportPoll) clearTimeout(state.situations.professionalReportPoll);
+  const poll = async () => {
+    if (!document.getElementById("professionalReportOverlay")) return;
+    try {
+      const job = await refreshProfessionalReportStatus(false);
+      renderProfessionalReportModal();
+      if (job && !["completed", "failed"].includes(job.status)) {
+        state.situations.professionalReportPoll = setTimeout(poll, 1500);
+      }
+    } catch (err) {
+      showToast(`报告状态读取失败：${err.message}`);
+      state.situations.professionalReportPoll = setTimeout(poll, 3000);
+    }
+  };
+  state.situations.professionalReportPoll = setTimeout(poll, 900);
+}
+
+async function downloadProfessionalSituationReport() {
+  const job = state.situations.professionalReport;
+  if (!job?.job_id || !state.situations.selectedId) return;
+  const blob = await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/professional-report/download?job_id=${encodeURIComponent(job.job_id)}`, { responseType: "blob" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${state.situations.selectedId}_专业态势感知报告.pdf`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  showToast("专业态势报告下载成功");
 }
 
 function renderSituationEvidence(actions) {
@@ -3085,6 +3212,10 @@ function renderV2DetectionDetail(row) {
   const raw = v2.raw_http || {};
   const llm = v2.llm_review || {};
   const llmEvidence = Array.isArray(llm.evidence) ? llm.evidence : [];
+  const impactItems = Array.isArray(llm.potential_impact) ? llm.potential_impact : [];
+  const immediateItems = Array.isArray(llm.immediate_actions) ? llm.immediate_actions : [];
+  const hardeningItems = Array.isArray(llm.hardening_actions) ? llm.hardening_actions : [];
+  const knowledgeItems = Array.isArray(llm.knowledge_references) ? llm.knowledge_references : [];
   const llmStatusMap = { pending: "等待研判", processing: "正在研判", done: "研判完成", failed: "研判失败" };
   const llmVerdictMap = { attack: "确认攻击", benign: "正常流量", suspicious: "仍需复核", unknown: "无法确定" };
   return `
@@ -3175,7 +3306,7 @@ function renderV2DetectionDetail(row) {
       <div class="v2-subtitle">融合证据摘要</div>
       ${renderEvidenceList(v2.evidence)}
 
-      <div class="v2-subtitle">大模型最终研判</div>
+      <div class="v2-subtitle">最终安全研判</div>
       <div class="llm-review-card ${escapeHtml(String(llm.verdict || llm.llm_status || "pending"))}">
         <div class="llm-review-head">
           <div>
@@ -3192,9 +3323,39 @@ function renderV2DetectionDetail(row) {
         </div>
         <div class="llm-review-summary">${escapeHtml(llm.summary || llm.llm_error || "候选事件已进入大模型研判队列，完成前不会发布为正式攻击事件。")}</div>
         <div class="llm-review-evidence">
-          <span>大模型判定依据</span>
+          <span>最终判定依据</span>
           ${renderEvidenceList(llmEvidence)}
         </div>
+        ${
+          llm.analysis_reasoning
+            ? `<div class="llm-review-block"><span>证据推理与结论</span><p>${escapeHtml(llm.analysis_reasoning)}</p></div>`
+            : ""
+        }
+        ${
+          impactItems.length
+            ? `<div class="llm-review-block"><span>潜在影响</span>${renderEvidenceList(impactItems)}</div>`
+            : ""
+        }
+        ${
+          immediateItems.length
+            ? `<div class="llm-review-block urgent"><span>立即处置</span>${renderEvidenceList(immediateItems)}</div>`
+            : ""
+        }
+        ${
+          hardeningItems.length
+            ? `<div class="llm-review-block"><span>长期加固</span>${renderEvidenceList(hardeningItems)}</div>`
+            : ""
+        }
+        ${
+          llm.false_positive_notes
+            ? `<div class="llm-review-block"><span>误报边界与待核验项</span><p>${escapeHtml(llm.false_positive_notes)}</p></div>`
+            : ""
+        }
+        ${
+          Number(llm.rag_enabled || 0) === 1 && knowledgeItems.length
+            ? `<div class="llm-review-block knowledge"><span>RAG 知识引用</span>${renderEvidenceList(knowledgeItems)}</div>`
+            : ""
+        }
       </div>
 
       <details class="v2-raw-detail">
@@ -4507,6 +4668,17 @@ function renderAdminConfigView() {
           </div>
         </div>
       </div>
+      <div class="background-config-card llm-judgement-config">
+        <div class="config-switch-copy">
+          <h4 class="detail-title">大模型实时研判</h4>
+          <p class="panel-sub">开启后，所有候选事件都进入本地大模型完成最终研判；关闭后，系统使用多模型融合结果，并可复用 4000 靶场中完全一致请求的历史研判。</p>
+        </div>
+        <label class="config-toggle" for="cfg_llm_realtime_enabled">
+          <input id="cfg_llm_realtime_enabled" type="checkbox" />
+          <span class="config-toggle-track"><span></span></span>
+          <b id="cfg_llm_realtime_label">已开启</b>
+        </label>
+      </div>
       <div class="row-actions">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
       </div>
@@ -4521,6 +4693,7 @@ function renderAdminConfigView() {
   document.getElementById("adm_export_report")?.addEventListener("click", () => exportAdminReport());
   document.getElementById("adm_bg_upload")?.addEventListener("click", () => uploadAdminHomepageBackground());
   document.getElementById("adm_bg_reset")?.addEventListener("click", () => resetAdminHomepageBackground());
+  document.getElementById("cfg_llm_realtime_enabled")?.addEventListener("change", updateRealtimeLlmLabel);
   loadAdminConfig()
     .then(async () => {
       await refreshAdminModelOptions(undefined, true);
@@ -4549,6 +4722,9 @@ async function loadAdminConfig() {
   setInputValue("cfg_situation_inactivity_minutes", map.situation_inactivity_minutes || "15");
   setInputValue("cfg_scan_port_threshold", map.scan_port_threshold || "10");
   setInputValue("cfg_scan_window_seconds", map.scan_window_seconds || "60");
+  const realtimeToggle = document.getElementById("cfg_llm_realtime_enabled");
+  if (realtimeToggle) realtimeToggle.checked = String(map.llm_realtime_enabled || "1") === "1";
+  updateRealtimeLlmLabel();
   applyHomepageBackground(map.homepage_background_url || "/assets/bg-main.jpg");
 }
 
@@ -4569,12 +4745,19 @@ async function saveAdminConfig() {
     situation_inactivity_minutes: String(document.getElementById("cfg_situation_inactivity_minutes")?.value || "15"),
     scan_port_threshold: String(document.getElementById("cfg_scan_port_threshold")?.value || "10"),
     scan_window_seconds: String(document.getElementById("cfg_scan_window_seconds")?.value || "60"),
+    llm_realtime_enabled: document.getElementById("cfg_llm_realtime_enabled")?.checked ? "1" : "0",
   };
   await api("/api/v2/admin/config", { method: "PUT", body: payload });
   showToast("配置保存成功");
   await loadAdminConfig();
   await refreshAdminModelOptions(finalModel, true);
   await refreshAdminCaptureInterfaces(payload.capture_interface, true);
+}
+
+function updateRealtimeLlmLabel() {
+  const enabled = Boolean(document.getElementById("cfg_llm_realtime_enabled")?.checked);
+  const label = document.getElementById("cfg_llm_realtime_label");
+  if (label) label.textContent = enabled ? "已开启" : "已关闭";
 }
 
 async function uploadAdminHomepageBackground() {
@@ -5618,6 +5801,7 @@ function renderRagSettingsView() {
       <nav class="ai-config-tabs" aria-label="AI 配置分类">
         <button class="${activePanel === "rag" ? "active" : ""}" data-ai-panel="rag">知识库管理</button>
         <button class="${activePanel === "prompt" ? "active" : ""}" data-ai-panel="prompt">研判提示词</button>
+        <button class="${activePanel === "report_prompt" ? "active" : ""}" data-ai-panel="report_prompt">专业报告提示词</button>
       </nav>
       <div id="ai_config_content"></div>
     </section>
@@ -5625,7 +5809,8 @@ function renderRagSettingsView() {
   `;
   root.querySelectorAll("[data-ai-panel]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.llmSettings.activePanel = button.dataset.aiPanel === "prompt" ? "prompt" : "rag";
+      const target = String(button.dataset.aiPanel || "rag");
+      state.llmSettings.activePanel = ["prompt", "report_prompt"].includes(target) ? target : "rag";
       renderRagSettingsView();
     });
   });
@@ -5645,6 +5830,8 @@ function renderRagSettingsView() {
   });
   if (activePanel === "prompt") {
     rag3RenderPrompt();
+  } else if (activePanel === "report_prompt") {
+    rag3RenderProfessionalReportPrompt();
   } else {
     rag3RenderKbList();
   }
@@ -5720,6 +5907,68 @@ function rag3RenderPrompt() {
     if (el) el.textContent = `${event.target.value.length} / ${state.llmSettings.promptMaxChars || 30000}`;
   });
   loadLlmPrompt().catch((err) => showToast(`读取提示词失败：${err.message}`));
+}
+
+function rag3RenderProfessionalReportPrompt() {
+  const content = document.getElementById("ai_config_content");
+  if (!content) return;
+  content.innerHTML = `
+    <section class="ai-prompt-workspace">
+      <div class="ai-prompt-copy">
+        <span class="section-eyebrow">REPORT PROMPT</span>
+        <h3>专业态势报告提示词</h3>
+        <p>控制专业 PDF 报告的章节、证据边界、分析深度和整改建议。保存后，下一次外部 API 生成任务会立即使用最新版本。</p>
+        <dl>
+          <div><dt>提示词文件</dt><dd id="report_prompt_path">-</dd></div>
+          <div><dt>最后更新</dt><dd id="report_prompt_updated">-</dd></div>
+          <div><dt>字符数量</dt><dd id="report_prompt_chars">0</dd></div>
+        </dl>
+      </div>
+      <div class="ai-prompt-editor-card">
+        <textarea id="report_prompt_editor" rows="22" spellcheck="false" placeholder="正在读取专业报告提示词..."></textarea>
+        <footer>
+          <button id="report_prompt_reload" class="btn btn-ghost">重新读取</button>
+          <button id="report_prompt_save" class="btn btn-primary">保存提示词</button>
+        </footer>
+      </div>
+    </section>`;
+  document.getElementById("report_prompt_reload")?.addEventListener("click", () => loadProfessionalReportPrompt().catch((err) => showToast(err.message)));
+  document.getElementById("report_prompt_save")?.addEventListener("click", () => saveProfessionalReportPrompt().catch((err) => showToast(err.message)));
+  document.getElementById("report_prompt_editor")?.addEventListener("input", (event) => {
+    const el = document.getElementById("report_prompt_chars");
+    if (el) el.textContent = `${event.target.value.length} / ${state.llmSettings.reportPromptMaxChars || 60000}`;
+  });
+  loadProfessionalReportPrompt().catch((err) => showToast(`读取专业报告提示词失败：${err.message}`));
+}
+
+async function loadProfessionalReportPrompt() {
+  const data = await api("/api/v2/llm/professional-report-prompt");
+  state.llmSettings.reportPrompt = String(data.prompt || "");
+  state.llmSettings.reportPromptPath = String(data.path || "-");
+  state.llmSettings.reportPromptUpdatedAt = String(data.updated_at || "-");
+  state.llmSettings.reportPromptMaxChars = Number(data.max_chars || 60000);
+  const editor = document.getElementById("report_prompt_editor");
+  if (editor) editor.value = state.llmSettings.reportPrompt;
+  const path = document.getElementById("report_prompt_path");
+  const updated = document.getElementById("report_prompt_updated");
+  const chars = document.getElementById("report_prompt_chars");
+  if (path) path.textContent = state.llmSettings.reportPromptPath;
+  if (updated) updated.textContent = state.llmSettings.reportPromptUpdatedAt;
+  if (chars) chars.textContent = `${state.llmSettings.reportPrompt.length} / ${state.llmSettings.reportPromptMaxChars}`;
+}
+
+async function saveProfessionalReportPrompt() {
+  const prompt = String(document.getElementById("report_prompt_editor")?.value || "");
+  if (!prompt.trim()) return showToast("专业报告提示词不能为空");
+  const button = document.getElementById("report_prompt_save");
+  if (button) button.disabled = true;
+  try {
+    await api("/api/v2/llm/professional-report-prompt", { method: "PUT", body: { prompt } });
+    await loadProfessionalReportPrompt();
+    showToast("专业报告提示词已保存，后续生成任务将使用新版本");
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function rag3RenderKbList() {

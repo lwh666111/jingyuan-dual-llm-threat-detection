@@ -113,6 +113,7 @@ ATTACK_RULES = [
         "reason": "Uploaded filename uses executable script or system executable extension.",
         "patterns": [
             r"filename\s*=\s*[\"']?[^\"'\r\n]+\.(?:php|jsp|jspx|asp|aspx|exe|bat|cmd|ps1|sh)\b",
+            r"(?s)(?=.*[\"']?filename[\"']?\s*[:=]\s*[\"'][^\"']+\.(?:php|phtml|php[3457]?|phar|jsp|jspx|asp|aspx|ashx|asmx)[\"'])(?=.*(?:<\?php|<%@\s*page|<%\s*(?:eval|runtime)|runtime\.getruntime\(\)\.exec|processbuilder\s*\(|(?:system|exec|passthru|shell_exec)\s*\())",
         ],
     },
 ]

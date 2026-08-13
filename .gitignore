@@ -26,6 +26,7 @@ result/*
 result_threshold_test/
 
 temp_capture/
+tmp/
 
 # Logs
 *.log

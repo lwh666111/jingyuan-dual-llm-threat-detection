@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from pipeline_events import DB_READY_EVENT, DETECTION_READY_EVENT, notify_event, wait_event
+
 FILE_PATTERN = re.compile(r"^1\.1\.(\d+)\.txt$")
 
 
@@ -181,6 +183,7 @@ def process_one(args, state: Dict, path: Path, idx: int, log_file: Path) -> bool
         state.setdefault("failed", {}).pop(key, None)
         save_state(args.state_file, state)
         log(f"DONE #{idx}: {path.name} -> success", log_file)
+        notify_event(DB_READY_EVENT)
         return True
 
     fail_record = state.setdefault("failed", {}).get(key, {})
@@ -315,7 +318,7 @@ def main() -> None:
             log(f"ONCE done. processed_in_round={processed_in_round}", args.log_file)
             break
 
-        time.sleep(max(args.poll_seconds, 1))
+        wait_event(DETECTION_READY_EVENT, max(args.poll_seconds, 1))
 
 
 if __name__ == "__main__":

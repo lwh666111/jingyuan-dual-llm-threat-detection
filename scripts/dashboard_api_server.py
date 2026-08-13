@@ -15,6 +15,8 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import threading
+import time
 import uuid
 import urllib.parse
 import urllib.request
@@ -25,7 +27,7 @@ from pathlib import Path
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple
 
-from flask import Flask, Response, current_app, g, jsonify, request
+from flask import Flask, Response, current_app, g, jsonify, request, send_file
 import pymysql
 from pymysql.cursors import DictCursor
 
@@ -34,6 +36,14 @@ from situation_cluster import build_proxy_clusters
 from situation_core import ACTION_CATALOG, STAGE_LABELS, STAGE_ORDER
 from situation_store import MySQLSettings, MySQLSituationStore
 from raw_llm_review import ensure_review_schema
+from situation_professional_report import (
+    ProfessionalReportManager,
+    create_job as create_professional_report_job,
+    ensure_schema as ensure_professional_report_schema,
+    find_job as find_professional_report_job,
+    get_job as get_professional_report_job,
+    public_job as public_professional_report_job,
+)
 from firewall_control import (
     firewall_block_ip as verified_firewall_block_ip,
     firewall_status_many as verified_firewall_status_many,
@@ -71,6 +81,10 @@ except Exception:
     psutil = None
 
 
+_CPU_SAMPLE_LOCK = threading.Lock()
+_CPU_SAMPLE_CACHE: Dict[str, Any] = {"value": None, "sampled_at": 0.0}
+
+
 ROLE_NORMAL = "normal"
 ROLE_ADMIN = "admin"
 
@@ -94,7 +108,9 @@ ALLOWED_AVATAR_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
 DEFAULT_JWT_SECRET_PATH = PROJECT_ROOT / "config" / "jwt_secret.txt"
 DEFAULT_LLM_PROMPT_PATH = PROJECT_ROOT / "llm" / "prompts" / "system_prompt.txt"
+DEFAULT_PROFESSIONAL_REPORT_PROMPT_PATH = PROJECT_ROOT / "llm" / "prompts" / "professional_situation_report_prompt.txt"
 MAX_LLM_PROMPT_CHARS = 30000
+MAX_PROFESSIONAL_REPORT_PROMPT_CHARS = 60000
 
 DEMO_ACCOUNTS = [
     {"username": "user", "password": "admin", "role": ROLE_NORMAL, "display_name": "普通用户"},
@@ -518,16 +534,38 @@ def load_v2_detection_detail(cur: Any, event_id: str) -> Optional[Dict[str, Any]
         cur.execute(
             """
             SELECT llm_status,llm_error,analyzed_at,model_name,verdict,severity,confidence,
-                   summary,evidence_json,rag_enabled,rag_hits,review_latency_ms,handling_suggestion
+                   summary,evidence_json,analysis_raw,rag_enabled,rag_hits,review_latency_ms,
+                   handling_suggestion,review_source
             FROM analyses WHERE case_id=%s LIMIT 1
             """,
             (case_id,),
         )
         llm_review = normalize_row(cur.fetchone() or {})
         if llm_review:
+            llm_raw = safe_json_loads(llm_review.pop("analysis_raw", None), {})
             llm_review["evidence"] = sanitize_evidence_value(
                 safe_json_loads(llm_review.pop("evidence_json", None), [])
             )
+            if isinstance(llm_raw, dict):
+                for key in (
+                    "analysis_reasoning",
+                    "potential_impact",
+                    "immediate_actions",
+                    "hardening_actions",
+                    "false_positive_notes",
+                    "knowledge_references",
+                ):
+                    value = llm_raw.get(key)
+                    if value not in (None, "", []):
+                        llm_review[key] = sanitize_evidence_value(value)
+            # Old/model-generated references must never look like active RAG
+            # evidence when retrieval was disabled for this review.
+            if int(llm_review.get("rag_enabled") or 0) != 1:
+                llm_review.pop("knowledge_references", None)
+            if not llm_review["evidence"] and str(llm_review.get("summary") or "").strip():
+                llm_review["evidence"] = [
+                    f"大模型研判说明：{str(llm_review['summary']).strip()}"
+                ]
     if db_table_exists(cur, "llm_review_jobs"):
         cur.execute(
             """
@@ -865,6 +903,34 @@ def _read_windows_cpu_percent() -> Optional[float]:
     return None
 
 
+def _read_cpu_percent_cached(max_age_seconds: float = 1.0) -> Optional[float]:
+    """Return a real short-window CPU sample without slowing every API call."""
+    if psutil is None:
+        return _read_windows_cpu_percent() if os.name == "nt" else None
+
+    now_mono = time.monotonic()
+    cached = _CPU_SAMPLE_CACHE.get("value")
+    sampled_at = float(_CPU_SAMPLE_CACHE.get("sampled_at") or 0.0)
+    if cached is not None and now_mono - sampled_at <= max_age_seconds:
+        return float(cached)
+
+    with _CPU_SAMPLE_LOCK:
+        now_mono = time.monotonic()
+        cached = _CPU_SAMPLE_CACHE.get("value")
+        sampled_at = float(_CPU_SAMPLE_CACHE.get("sampled_at") or 0.0)
+        if cached is not None and now_mono - sampled_at <= max_age_seconds:
+            return float(cached)
+        try:
+            # interval=None can return a meaningless 0.0 on the first call.
+            value = round(float(psutil.cpu_percent(interval=0.15)), 2)
+        except Exception:
+            value = _read_windows_cpu_percent() if os.name == "nt" else None
+        if value is not None:
+            _CPU_SAMPLE_CACHE["value"] = value
+            _CPU_SAMPLE_CACHE["sampled_at"] = time.monotonic()
+        return value
+
+
 def _read_windows_memory_status() -> Tuple[int, int]:
     try:
         import ctypes
@@ -926,12 +992,7 @@ def collect_local_system_status() -> Dict[str, Any]:
     uptime_seconds: Optional[int] = None
 
     if psutil is not None:
-        try:
-            # Dashboard refreshes must not block while sampling CPU. psutil keeps
-            # the previous sample internally, so interval=None is instantaneous.
-            cpu_percent = round(float(psutil.cpu_percent(interval=None)), 2)
-        except Exception:
-            cpu_percent = None
+        cpu_percent = _read_cpu_percent_cached()
         try:
             vm = psutil.virtual_memory()
             mem_total = int(vm.total)
@@ -1833,6 +1894,7 @@ def seed_demo_data(conn: Any, force_seed: bool = False) -> None:
             "capture_interface": "auto",
             "llm_model": "qwen3:8b",
             "rag_enabled": "1",
+            "llm_realtime_enabled": "1",
             "situation_minimum_actions": "3",
             "situation_window_minutes": "30",
             "situation_inactivity_minutes": "15",
@@ -2305,6 +2367,7 @@ def create_app(
     jwt_ttl_seconds: int = TOKEN_TTL_SECONDS,
     ollama_url: str = "http://127.0.0.1:11434",
     llm_prompt_path: str = "llm/prompts/system_prompt.txt",
+    professional_report_prompt_path: str = "llm/prompts/professional_situation_report_prompt.txt",
     rag_data_dir: str = "",
     rag_api_config: str = "config/ai_api.local.json",
 ) -> Flask:
@@ -2315,6 +2378,7 @@ def create_app(
     app.config["RAG_SEED_PATH"] = str(Path(rag_seed_path).resolve())
     app.config["OLLAMA_URL"] = normalize_ollama_url(ollama_url)
     app.config["LLM_PROMPT_PATH"] = str(resolve_project_path(llm_prompt_path, DEFAULT_LLM_PROMPT_PATH))
+    app.config["PROFESSIONAL_REPORT_PROMPT_PATH"] = str(resolve_project_path(professional_report_prompt_path, DEFAULT_PROFESSIONAL_REPORT_PROMPT_PATH))
     default_rag_data = Path(os.environ.get("RAG_DATA_DIR") or rag_data_dir or (PROJECT_ROOT / "llm" / "rag" / "runtime"))
     app.config["RAG_DATA_DIR"] = str(default_rag_data.resolve())
     app.config["RAG_API_CONFIG_PATH"] = str(resolve_project_path(rag_api_config, PROJECT_ROOT / "config" / "ai_api.local.json"))
@@ -2339,12 +2403,25 @@ def create_app(
         rag2_ensure_schema(conn)
         rag2_ensure_default_kb(conn)
         MySQLSituationStore(MySQLSettings(**mysql_conf), connection=conn).ensure_schema()
+        ensure_professional_report_schema(conn)
         ensure_builtin_admin(conn)
         if seed_demo:
             seed_demo_data(conn, force_seed=force_seed)
         conn.commit()
 
     Path(app.config["RAG_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+    preferred_report_root = Path(os.environ.get("SITUATION_REPORT_DIR") or "D:/JingyuanTrafficPipelineData/reports")
+    if not preferred_report_root.drive or not Path(f"{preferred_report_root.drive}/").exists():
+        preferred_report_root = PROJECT_ROOT / "output" / "professional_reports"
+    preferred_report_root.mkdir(parents=True, exist_ok=True)
+    app.config["PROFESSIONAL_REPORT_DIR"] = str(preferred_report_root.resolve())
+    app.config["PROFESSIONAL_REPORT_MANAGER"] = ProfessionalReportManager(
+        mysql_conf,
+        preferred_report_root.resolve(),
+        Path(app.config["PROFESSIONAL_REPORT_PROMPT_PATH"]),
+        Path(app.config["RAG_DATA_DIR"]),
+        Path(app.config["RAG_API_CONFIG_PATH"]),
+    )
     with closing(get_conn(mysql_conf, autocommit=False)) as conn:
         migration = rag2_migrate_legacy_sqlite(conn, Path(app.config["RAG_DB_PATH"]))
         if migration.get("document_id"):
@@ -2726,6 +2803,31 @@ def create_app(
             )
         payload = build_llm_prompt_payload(prompt_path)
         payload["ok"] = True
+        return jsonify(payload)
+
+    @app.route("/api/v2/llm/professional-report-prompt", methods=["GET"])
+    @require_roles(ROLE_ADMIN)
+    def professional_report_prompt_get():
+        prompt_path = Path(app.config["PROFESSIONAL_REPORT_PROMPT_PATH"])
+        payload = build_llm_prompt_payload(prompt_path)
+        payload["max_chars"] = MAX_PROFESSIONAL_REPORT_PROMPT_CHARS
+        return jsonify(payload)
+
+    @app.route("/api/v2/llm/professional-report-prompt", methods=["PUT"])
+    @require_roles(ROLE_ADMIN)
+    def professional_report_prompt_update():
+        body = request.get_json(silent=True) or {}
+        prompt = str(body.get("prompt", ""))
+        if not prompt.strip():
+            return jsonify({"error": "prompt_required", "message": "专业报告提示词不能为空"}), 400
+        if len(prompt) > MAX_PROFESSIONAL_REPORT_PROMPT_CHARS:
+            return jsonify({"error": "prompt_too_long", "message": f"专业报告提示词不能超过 {MAX_PROFESSIONAL_REPORT_PROMPT_CHARS} 个字符"}), 400
+        prompt_path = Path(app.config["PROFESSIONAL_REPORT_PROMPT_PATH"])
+        write_llm_prompt_file(prompt_path, prompt)
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            log_action(conn, g.session["username"], g.session["role"], "professional_report_prompt_update", display_project_path(prompt_path), f"chars={len(prompt)}")
+        payload = build_llm_prompt_payload(prompt_path)
+        payload.update({"ok": True, "max_chars": MAX_PROFESSIONAL_REPORT_PROMPT_CHARS})
         return jsonify(payload)
 
     def rag2_runtime() -> Tuple[Path, Dict[str, Any]]:
@@ -3666,6 +3768,52 @@ def create_app(
         if not item:
             return jsonify({"error": "situation_not_found"}), 404
         return jsonify({"item": normalize_situation_value(item)})
+
+    def load_professional_report_situation(situation_id: str) -> Optional[Dict[str, Any]]:
+        store = open_situation_store()
+        try:
+            return store.get_situation(situation_id)
+        finally:
+            store.close()
+
+    @app.route("/api/v2/situations/<situation_id>/professional-report", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def professional_report_create(situation_id: str):
+        item = load_professional_report_situation(situation_id)
+        if not item:
+            return jsonify({"error": "situation_not_found"}), 404
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            job = create_professional_report_job(conn, item, str(g.session.get("username") or "unknown"))
+        manager: ProfessionalReportManager = app.config["PROFESSIONAL_REPORT_MANAGER"]
+        if job.get("status") in {"queued", "running"}:
+            manager.start(str(job["job_id"]))
+        return jsonify({"job": normalize_situation_value(public_professional_report_job(job))}), 202
+
+    @app.route("/api/v2/situations/<situation_id>/professional-report", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def professional_report_status(situation_id: str):
+        item = load_professional_report_situation(situation_id)
+        if not item:
+            return jsonify({"error": "situation_not_found"}), 404
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            job = find_professional_report_job(conn, situation_id, str(item.get("sequence_hash") or ""))
+        return jsonify({"job": normalize_situation_value(public_professional_report_job(job))})
+
+    @app.route("/api/v2/situations/<situation_id>/professional-report/download", methods=["GET"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def professional_report_download(situation_id: str):
+        job_id = request.args.get("job_id", "").strip()
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            job = get_professional_report_job(conn, job_id) if job_id else find_professional_report_job(conn, situation_id)
+        if not job or str(job.get("situation_id")) != situation_id:
+            return jsonify({"error": "report_not_found", "message": "尚未生成专业态势报告"}), 404
+        if job.get("status") != "completed" or not job.get("pdf_path"):
+            return jsonify({"error": "report_not_ready", "message": "专业态势报告仍在生成中"}), 409
+        path = Path(str(job["pdf_path"])).resolve()
+        report_root = Path(app.config["PROFESSIONAL_REPORT_DIR"]).resolve()
+        if report_root not in path.parents or not path.is_file():
+            return jsonify({"error": "report_file_missing", "message": "报告文件不存在"}), 404
+        return send_file(path, mimetype="application/pdf", as_attachment=True, download_name=f"{situation_id}_专业态势感知报告.pdf")
 
     @app.route("/api/v2/situations/<situation_id>/graph", methods=["GET"])
     @require_roles(ROLE_NORMAL, ROLE_ADMIN)
@@ -5092,9 +5240,9 @@ def create_app(
                 if v < 1 or v > 100000:
                     return jsonify({"error": "invalid_alert_threshold_high"}), 400
                 cfg_val = str(v)
-            elif cfg_key == "sound_alert_enabled":
+            elif cfg_key in {"sound_alert_enabled", "llm_realtime_enabled"}:
                 if cfg_val not in {"0", "1"}:
-                    return jsonify({"error": "invalid_sound_alert_enabled"}), 400
+                    return jsonify({"error": f"invalid_{cfg_key}"}), 400
             elif cfg_key == "llm_model":
                 cfg_val = cfg_val.strip()
                 if not cfg_val or len(cfg_val) > 128:
@@ -5315,6 +5463,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rag-data-dir", default="", help="Advanced RAG runtime data directory; RAG_DATA_DIR env has priority")
     parser.add_argument("--rag-api-config", default="config/ai_api.local.json", help="DashScope local config JSON")
     parser.add_argument("--llm-prompt", default="llm/prompts/system_prompt.txt", help="LLM system prompt file path")
+    parser.add_argument("--professional-report-prompt", default="llm/prompts/professional_situation_report_prompt.txt", help="Professional situation report prompt file path")
     parser.add_argument("--jwt-secret", default="", help="JWT secret, fallback to env TP_JWT_SECRET")
     parser.add_argument("--jwt-ttl-seconds", type=int, default=TOKEN_TTL_SECONDS, help="JWT token TTL seconds")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama base URL")
@@ -5343,6 +5492,7 @@ def main() -> None:
         jwt_ttl_seconds=args.jwt_ttl_seconds,
         ollama_url=args.ollama_url,
         llm_prompt_path=args.llm_prompt,
+        professional_report_prompt_path=args.professional_report_prompt,
         rag_data_dir=args.rag_data_dir,
         rag_api_config=args.rag_api_config,
     )

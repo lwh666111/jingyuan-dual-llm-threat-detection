@@ -14,14 +14,26 @@ DEFAULT_LLM_TASK = (
 )
 
 
-def read_jsonl(path: Path):
+def read_jsonl(path: Path, *, tolerate_invalid: bool = False):
     if not path.exists():
         return
     with path.open("r", encoding="utf-8-sig") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if line:
-                yield json.loads(line)
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    if tolerate_invalid:
+                        print(f"[WARN] skip invalid JSONL line: {path}:{line_no}: {exc}")
+                        continue
+                    raise
+                if not isinstance(value, dict):
+                    if tolerate_invalid:
+                        print(f"[WARN] skip non-object JSONL line: {path}:{line_no}")
+                        continue
+                    raise ValueError(f"JSONL record must be an object: {path}:{line_no}")
+                yield value
 
 
 def write_jsonl_append(path: Path, records):
@@ -39,7 +51,10 @@ def write_jsonl(path: Path, records):
 
 
 def load_manifest(manifest_path: Path):
-    records = list(read_jsonl(manifest_path)) if manifest_path.exists() else []
+    # A disk-full interruption can leave a partial final line. Keep valid history
+    # available and rewrite the manifest after this export instead of blocking all
+    # subsequent traffic forever.
+    records = list(read_jsonl(manifest_path, tolerate_invalid=True)) if manifest_path.exists() else []
     existing_keys = set()
     key_to_idx = {}
     max_case_num = 0

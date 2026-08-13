@@ -34,7 +34,7 @@ NORMAL_PASSWORDS = [
     "hello2026",
     "correct-password",
     "P@ssw0rd2026!",
-    "Lwh20060523",
+    "ExamplePass2026",
     "Qwer1234!",
     "summer2026",
     "normal_login_001",

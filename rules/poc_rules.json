@@ -96,7 +96,7 @@
     "score": 0.9,
     "tags": ["upload", "webshell"],
     "request": {
-      "text_regex": ["(?i)filename\\s*=\\s*['\"]?[^\\r\\n;]+\\.(?:php|phtml|php5|jsp|jspx|asp|aspx|exe|bat|cmd|ps1|sh)\\b", "(?i)Content-Type:\\s*(?:application/x-php|application/x-msdownload)"]
+      "text_regex": ["(?i)filename\\s*=\\s*['\"]?[^\\r\\n;]+\\.(?:php|phtml|php5|jsp|jspx|asp|aspx|exe|bat|cmd|ps1|sh)\\b", "(?i)Content-Type:\\s*(?:application/x-php|application/x-msdownload)", "(?is)(?=.*['\"]?filename['\"]?\\s*[:=]\\s*['\"][^'\"]+\\.(?:php|phtml|php[3457]?|phar|jsp|jspx|asp|aspx|ashx|asmx)['\"])(?=.*(?:<\\?php|<%@\\s*page|<%\\s*(?:eval|runtime)|runtime\\.getruntime\\(\\)\\.exec|processbuilder\\s*\\(|(?:system|exec|passthru|shell_exec)\\s*\\())"]
     }
   },
   {

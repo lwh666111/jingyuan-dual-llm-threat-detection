@@ -6,13 +6,41 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from pipeline_events import LLM_READY_EVENT, wait_event
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _cached_review_ready_at(event_time, now=None) -> Optional[datetime]:
+    if isinstance(event_time, str):
+        try:
+            event_time = datetime.fromisoformat(event_time)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(event_time, datetime):
+        return None
+
+    if event_time.tzinfo is not None:
+        current = now if isinstance(now, datetime) else datetime.now(tz=event_time.tzinfo)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=event_time.tzinfo)
+        else:
+            current = current.astimezone(event_time.tzinfo)
+    else:
+        current = now if isinstance(now, datetime) else datetime.now()
+        if current.tzinfo is not None:
+            current = current.astimezone().replace(tzinfo=None)
+
+    age = current - event_time
+    if age < timedelta(seconds=-60) or age > timedelta(minutes=10):
+        return current + timedelta(seconds=5)
+    return event_time + timedelta(seconds=5)
 
 
 def log(msg: str) -> None:
@@ -271,6 +299,20 @@ def format_rag_context(rows: List[Dict], max_chars: int = 3200) -> str:
     return text[:max_chars]
 
 
+def build_rag_references(rows: List[Dict]) -> List[str]:
+    """Build citations only from chunks actually retrieved for this request."""
+    references: List[str] = []
+    for idx, row in enumerate(rows[:4], start=1):
+        title = str(row.get("title") or row.get("source") or "知识片段").strip()
+        doc_id = str(row.get("doc_id") or "").strip()
+        label = f"RAG#{idx} {title}"
+        if doc_id:
+            label += f"（{doc_id}）"
+        if label not in references:
+            references.append(label)
+    return references
+
+
 def call_ollama_chat(
     base_url: str,
     model: str,
@@ -294,10 +336,10 @@ def call_ollama_chat(
             {"role": "user", "content": user_payload},
         ],
         "options": {
-            "num_ctx": num_ctx,
+            "num_ctx": max(2048, num_ctx),
             "num_gpu": num_gpu,
             "temperature": temperature,
-            "num_predict": 384,
+            "num_predict": 512,
         },
     }
 
@@ -336,10 +378,33 @@ def call_ollama_chat(
             "severity": "unknown",
             "confidence": 0.0,
             "evidence": [],
+            "analysis_reasoning": content[:500],
+            "potential_impact": ["模型未返回合法 JSON，暂无法确认具体影响"],
+            "immediate_actions": ["保留原始请求并转人工复核"],
+            "hardening_actions": ["核验接口输入校验与安全日志配置"],
+            "false_positive_notes": "模型输出格式异常，不能据此确认攻击。",
+            "knowledge_references": [],
             "summary": content[:500],
         }
 
     return parsed, content
+
+
+def warm_ollama_model(base_url: str, model: str, timeout_sec: int = 60) -> None:
+    """Load model weights before traffic arrives and retain them for the demo window."""
+    data = json.dumps(
+        {
+            "model": model, "prompt": "ready", "stream": False,
+            "keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "15m"),
+            "options": {"num_predict": 1},
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/api/generate", data=data,
+        method="POST", headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=max(5, int(timeout_sec))) as response:
+        response.read()
 
 
 def fetch_available_models(base_url: str, timeout_sec: int = 10) -> List[str]:
@@ -428,11 +493,91 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
         confidence /= 100.0
     confidence = max(0.0, min(1.0, confidence))
     confidence_percent = confidence * 100
-    trusted_summary = (
-        f"检测到来源 {trusted_source_ip} 对 {uri} 发起疑似{trusted_attack_type}行为，"
-        f"请求方法为 {method or 'unknown'}。LLM研判结论为 {verdict}，"
-        f"风险等级为 {severity}，置信度约 {confidence_percent:.1f}%。"
+    source_material = "\n".join(
+        str(case_obj.get(key) or "")
+        for key in ("uri", "request_text", "response_text", "detection_context")
+    ).lower()
+
+    signature_terms = {
+        "xss": ("script", "onerror", "onload", "javascript:", "xss"),
+        "sql": ("union", "select", "information_schema", "sleep(", "sql", "or 1=1"),
+        "命令": ("cmd.exe", "/bin/sh", "powershell", "whoami", "命令注入", "$(`", "&&"),
+        "路径": ("../", "..\\", "%2e%2e", "/etc/passwd", "win.ini", "路径遍历"),
+    }
+
+    def evidence_is_grounded(item: str) -> bool:
+        lowered = item.lower()
+        for label, terms in signature_terms.items():
+            if label in lowered and not any(term in source_material for term in terms):
+                return False
+        if "script" in lowered and "script" not in source_material:
+            return False
+        if re.search(r"(?:参数|parameter)\s*[qQ](?:\s|：|:)", item) and not re.search(r"[?&]q=|\"q\"", source_material):
+            return False
+        return True
+
+    parsed_evidence = parsed.get("evidence") if isinstance(parsed.get("evidence"), list) else []
+    grounded_evidence = [
+        str(item).strip() for item in parsed_evidence
+        if str(item).strip() and evidence_is_grounded(str(item))
+    ][:6]
+    context = case_obj.get("detection_context") if isinstance(case_obj.get("detection_context"), dict) else {}
+    fusion_score = float(context.get("fusion_score") or 0.0)
+    poc_rows = context.get("poc_matches") if isinstance(context.get("poc_matches"), list) else []
+    payload_rows = context.get("payload_models") if isinstance(context.get("payload_models"), list) else []
+    strong_payload = any(float(item.get("score") or 0.0) >= 0.85 for item in payload_rows if isinstance(item, dict))
+    model_summary = str(parsed.get("summary") or "").strip()
+    if verdict == "benign" and fusion_score >= 0.8 and poc_rows and strong_payload:
+        verdict = "unknown"
+        severity = "unknown"
+        confidence = min(confidence, 0.49)
+        model_summary = "大模型结论与多源强证据发生冲突，系统已阻止其发布为正常流量并转入人工复核。"
+    if not grounded_evidence:
+        pocs = poc_rows
+        predictions = payload_rows
+        if pocs:
+            grounded_evidence.append(f"POC 规则：{pocs[0].get('rule_name') or pocs[0].get('rule_id') or '明确规则命中'}")
+        elif predictions:
+            pred = predictions[0]
+            grounded_evidence.append(
+                f"Payload 模型：{pred.get('label') or 'unknown'}，评分 {float(pred.get('score') or 0):.2f}"
+            )
+        else:
+            grounded_evidence.append("大模型复核：输入中未发现可独立验证的明确攻击特征")
+    if verdict == "attack" and confidence >= 0.8:
+        model_summary = model_summary.replace("证据不足", "尚无成功利用证据")
+    trusted_summary = model_summary or (
+        f"来源 {trusted_source_ip} 对 {uri} 的请求经大模型复核为 {verdict}，"
+        f"攻击类型为 {trusted_attack_type}，风险等级 {severity}，"
+        f"置信度约 {confidence_percent:.1f}%。"
     )
+
+    def clean_list(name: str, limit: int = 4) -> List[str]:
+        value = parsed.get(name)
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()][:limit]
+
+    immediate_actions = clean_list("immediate_actions")
+    hardening_actions = clean_list("hardening_actions")
+    attack_type_lower = trusted_attack_type.lower()
+    if "xss" in attack_type_lower:
+        hardening_actions = [item for item in hardening_actions if "参数化查询" not in item and "sql" not in item.lower()]
+        defaults = ["按 HTML/属性/JavaScript 上下文执行输出编码", "部署 CSP 并使用可信 HTML Sanitizer 处理富文本"]
+        hardening_actions = (hardening_actions + [item for item in defaults if item not in hardening_actions])[:4]
+    elif "sql" in attack_type_lower:
+        defaults = ["数据库访问统一使用参数化查询或预编译语句", "限制数据库账户权限并隐藏详细数据库错误"]
+        hardening_actions = (hardening_actions + [item for item in defaults if item not in hardening_actions])[:4]
+
+    if verdict == "benign":
+        immediate_actions = [item for item in immediate_actions if "封禁" not in item and "拦截" not in item]
+
+    analysis_reasoning = str(parsed.get("analysis_reasoning") or "").strip()
+    if analysis_reasoning and not evidence_is_grounded(analysis_reasoning):
+        analysis_reasoning = (
+            f"大模型结合抓包事实、融合评分及可复核证据，将该请求判定为 {verdict}；"
+            "原模型推理包含无法在输入中定位的特征，已由一致性校验移除。"
+        )
 
     return {
         "case_id": str(case_obj.get("case_id") or ""),
@@ -449,9 +594,15 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
         "severity": severity,
         "confidence": confidence,
         "verdict": verdict,
-        "evidence": parsed.get("evidence") if isinstance(parsed.get("evidence"), list) else [],
+        "evidence": grounded_evidence,
         "summary": trusted_summary,
-        "llm_explanation": parsed.get("summary") or "",
+        "llm_explanation": analysis_reasoning or model_summary,
+        "analysis_reasoning": analysis_reasoning,
+        "potential_impact": clean_list("potential_impact"),
+        "immediate_actions": immediate_actions,
+        "hardening_actions": hardening_actions,
+        "false_positive_notes": str(parsed.get("false_positive_notes") or "").strip(),
+        "knowledge_references": clean_list("knowledge_references"),
         "model_name": model_name,
         "analyzed_at": now_iso(),
     }
@@ -554,6 +705,7 @@ def process_case(
             analysis = normalize_analysis(parsed, case_obj, src_ip, dst_ip, model_name)
             analysis["rag_hits"] = len(rag_rows)
             analysis["rag_enabled"] = bool(args.rag_enable)
+            analysis["knowledge_references"] = build_rag_references(rag_rows) if args.rag_enable else []
             write_json(analysis_path, analysis)
             analysis_raw_path.write_text(raw_content or "", encoding="utf-8")
 
@@ -597,13 +749,58 @@ def open_review_conn(args):
     )
 
 
+def build_fusion_only_analysis(row: Dict, case_obj: Dict, context: Dict) -> Dict:
+    attack_type = str(row.get("attack_type") or "可疑流量")
+    risk = str(row.get("risk_level") or "medium").lower()
+    score = max(0.0, min(1.0, float(row.get("final_score") or 0.0)))
+    evidence: List[str] = []
+    for value in context.get("fusion_evidence") or []:
+        text = str(value).strip()
+        if text and text not in evidence:
+            evidence.append(text)
+    for item in context.get("poc_matches") or []:
+        name = str(item.get("rule_name") or item.get("rule_id") or "POC规则").strip()
+        text = f"POC规则命中：{name}"
+        if text not in evidence:
+            evidence.append(text)
+    for item in context.get("payload_models") or []:
+        label = str(item.get("label") or "").strip()
+        if label:
+            evidence.append(f"Payload模型判定为{label}，评分{float(item.get('score') or 0):.3f}")
+    evidence = evidence[:6] or [f"多模型融合评分为{score:.3f}，建议人工复核原始请求与响应"]
+    verdict = "attack" if str(row.get("preliminary_decision")) == "attack_event" else "unknown"
+    return {
+        "verdict": verdict,
+        "source_ip": str(row.get("source_ip") or "unknown"),
+        "destination_ip": str(row.get("destination_ip") or "unknown"),
+        "attack_interface": str(row.get("uri") or ""),
+        "attack_method": attack_type,
+        "attack_path": f"{row.get('method') or ''} {row.get('uri') or ''}".strip(),
+        "attack_time": str(row.get("event_time") or ""),
+        "severity": risk if risk in {"low", "medium", "high", "critical"} else "unknown",
+        "confidence": score,
+        "evidence": evidence,
+        "analysis_reasoning": "Payload模型、POC规则与行为窗口完成交叉验证；当前未调用实时生成模型。",
+        "potential_impact": [f"若该{attack_type}请求成功，可能影响目标接口的数据或服务完整性。"],
+        "immediate_actions": ["核验来源IP与同时间窗口请求，必要时限流或封禁。", "检查目标接口日志与异常响应。"],
+        "hardening_actions": ["针对目标接口实施参数校验、最小权限和安全审计。", "持续更新POC规则与行为基线。"],
+        "false_positive_notes": "如请求来自授权测试或内部扫描，应结合资产台账降级处置。",
+        "knowledge_references": [],
+        "summary": f"多模型融合发现{attack_type}特征，风险等级为{risk}，融合置信度{score:.1%}。",
+    }
+
+
 def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optional[str]:
     from raw_llm_review import (
         claim_next_review,
         complete_review,
+        defer_review,
         detection_context,
         ensure_review_schema,
         fail_review,
+        find_cached_review,
+        mark_cache_hit,
+        realtime_llm_enabled,
     )
 
     conn = open_review_conn(args)
@@ -616,6 +813,9 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
         event_id = str(row.get("event_id") or "")
         case_id = str(row.get("case_id") or "")
         started = time.perf_counter()
+        request_text = str(row.get("request_text") or "")
+        response_text = str(row.get("response_text") or "")
+        context = detection_context(row)
         case_obj = {
             "case_id": case_id,
             "file_id": row.get("file_id"),
@@ -629,10 +829,49 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
             "attack_type": row.get("attack_type"),
             "v2_risk_level": row.get("risk_level"),
             "export_time": row.get("event_time"),
+            "request_text": request_text,
+            "response_text": response_text,
+            "detection_context": context,
         }
-        request_text = str(row.get("request_text") or "")
-        response_text = str(row.get("response_text") or "")
-        context = detection_context(row)
+
+        realtime_enabled = realtime_llm_enabled(conn)
+        if not realtime_enabled:
+            cached = find_cached_review(conn, row)
+            if cached:
+                ready_at = _cached_review_ready_at(row.get("event_time"))
+                if ready_at is not None:
+                    current = datetime.now(tz=ready_at.tzinfo) if ready_at.tzinfo is not None else datetime.now()
+                    if current < ready_at:
+                        defer_review(conn, event_id, ready_at)
+                        return f"{event_id}: cached review deferred until {ready_at.isoformat(timespec='milliseconds')}"
+                analysis = normalize_analysis(
+                    dict(cached["analysis"]), case_obj,
+                    str(row.get("source_ip") or "unknown"),
+                    str(row.get("destination_ip") or "unknown"),
+                    str(cached.get("model_name") or args.model),
+                )
+                analysis["knowledge_references"] = list(analysis.get("knowledge_references") or [])
+                latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+                confirmed = complete_review(
+                    conn, row=row, analysis=analysis,
+                    raw_content=json.dumps(analysis, ensure_ascii=False),
+                    model_name=str(cached.get("model_name") or args.model),
+                    rag_enabled=bool(analysis.get("knowledge_references")),
+                    rag_hits=len(analysis.get("knowledge_references") or []),
+                    latency_ms=latency_ms, review_source="verified_cache",
+                )
+                mark_cache_hit(conn, str(cached["fingerprint"]))
+                return f"{event_id}: done cached=1 published={int(confirmed)} latency_ms={latency_ms}"
+
+            analysis = build_fusion_only_analysis(row, case_obj, context)
+            latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+            confirmed = complete_review(
+                conn, row=row, analysis=analysis,
+                raw_content=json.dumps(analysis, ensure_ascii=False),
+                model_name="AI多模型融合", rag_enabled=False, rag_hits=0,
+                latency_ms=latency_ms, review_source="fusion_only",
+            )
+            return f"{event_id}: done fusion_only=1 published={int(confirmed)} latency_ms={latency_ms}"
 
         rag_rows: List[Dict] = []
         rag_context = ""
@@ -687,6 +926,7 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
                     str(row.get("destination_ip") or "unknown"),
                     model_name,
                 )
+                analysis["knowledge_references"] = build_rag_references(rag_rows) if args.rag_enable else []
                 latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
                 confirmed = complete_review(
                     conn,
@@ -812,6 +1052,11 @@ def main() -> None:
         log(f"fallback model enabled: {args.fallback_model_resolved}")
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
     log(f"result_dir={result_dir}")
+    try:
+        warm_ollama_model(args.ollama_url, args.model, timeout_sec=min(90, args.timeout_sec))
+        log(f"LLM model warmed and kept alive: {args.model}")
+    except Exception as exc:
+        log(f"LLM warmup skipped: {exc}")
 
     try:
         review_conn = open_review_conn(args)
@@ -854,7 +1099,7 @@ def main() -> None:
             if args.once:
                 log(f"once done processed={processed}")
                 break
-            time.sleep(max(1, args.poll_seconds))
+            wait_event(LLM_READY_EVENT, max(1, args.poll_seconds))
             continue
 
         case_dirs = find_case_dirs(result_dir)
@@ -899,9 +1144,8 @@ def main() -> None:
             log(f"once done processed={processed}")
             break
 
-        time.sleep(max(args.poll_seconds, 1))
+        wait_event(LLM_READY_EVENT, max(args.poll_seconds, 1))
 
 
 if __name__ == "__main__":
     main()
-

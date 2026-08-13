@@ -185,13 +185,67 @@ def detect_http_link_fields(tshark_exe: str) -> Tuple[str, str]:
     return request_in_field, response_in_field
 
 
-def next_file_index(input_dir: Path, prefix: str = "1.1.") -> int:
+def read_capture_sequence(state_path: Path) -> int:
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        return max(0, int(data.get("last_index") or 0))
+    except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0
+
+
+def write_capture_sequence(state_path: Path, last_index: int) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    temp_path.write_text(
+        json.dumps({"last_index": int(last_index)}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, state_path)
+
+
+def next_file_index(
+    input_dir: Path,
+    prefix: str = "1.1.",
+    state_path: Optional[Path] = None,
+    minimum_last_index: int = 0,
+) -> int:
     max_n = 0
     for p in input_dir.glob(f"{prefix}*.txt"):
         m = re.match(rf"{re.escape(prefix)}(\d+)\.txt$", p.name)
         if m:
             max_n = max(max_n, int(m.group(1)))
+    if state_path is not None:
+        max_n = max(max_n, read_capture_sequence(state_path))
+    max_n = max(max_n, int(minimum_last_index or 0))
     return max_n + 1
+
+
+def read_mysql_capture_sequence(config: Dict[str, object]) -> int:
+    try:
+        import pymysql
+
+        conn = pymysql.connect(
+            host=str(config["host"]),
+            port=int(config["port"]),
+            user=str(config["user"]),
+            password=str(config["password"]),
+            database=str(config["database"]),
+            connect_timeout=3,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT MAX(CAST(SUBSTRING_INDEX(file_id,'.',-1) AS UNSIGNED))
+                       FROM raw_http_logs
+                       WHERE file_id REGEXP '^1[.]1[.][0-9]+$'"""
+                )
+                row = cur.fetchone()
+                return max(0, int((row or [0])[0] or 0))
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"[WARN] 无法从 MySQL 恢复抓包编号，使用本地状态: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 0
 
 
 def parse_tshark_line(line: str, headers: List[str]) -> Dict[str, str]:
@@ -492,6 +546,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=20, help="每个 batch 的完整请求/响应数量")
     parser.add_argument("--input-dir", default="input", help="输出 txt 目录")
     parser.add_argument(
+        "--sequence-state",
+        default="output/capture_sequence.json",
+        help="抓包文件全局递增编号状态；即使 input 被清理，重启后也不会复用旧编号",
+    )
+    parser.add_argument(
         "--interface",
         default="",
         help="手动指定网卡关键字，或直接传接口索引（如 1）跳过网卡枚举",
@@ -536,6 +595,7 @@ def main():
 
     input_dir = Path(args.input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
+    sequence_state = Path(args.sequence_state)
     fast_guard = None
     if args.fast_defense:
         try:
@@ -644,7 +704,22 @@ def main():
     pending_stream_queue: Dict[int, List[int]] = {}
     completed_cases: List[Dict] = []
 
-    next_idx = next_file_index(input_dir, prefix="1.1.")
+    db_last_index = read_mysql_capture_sequence(
+        {
+            "host": args.mysql_host,
+            "port": args.mysql_port,
+            "user": args.mysql_user,
+            "password": args.mysql_password,
+            "database": args.mysql_database,
+        }
+    )
+    next_idx = next_file_index(
+        input_dir,
+        prefix="1.1.",
+        state_path=sequence_state,
+        minimum_last_index=db_last_index,
+    )
+    write_capture_sequence(sequence_state, next_idx - 1)
     print(f"下一个输出编号从 1.1.{next_idx}.txt 开始")
 
     try:
@@ -712,17 +787,32 @@ def main():
                             port_desc=",".join(str(p) for p in decode_ports),
                             cases=to_write,
                         )
+                        try:
+                            from pipeline_events import DB_READY_EVENT, DETECTION_READY_EVENT, INPUT_QUEUE_NAME, append_input_ready, notify_event
+
+                            append_input_ready(output_txt.parent.parent / "output" / INPUT_QUEUE_NAME, output_txt)
+                            notify_event(DETECTION_READY_EVENT)
+                            notify_event(DB_READY_EVENT)
+                        except Exception as exc:
+                            print(f"[WARN] input event notification failed: {exc}", file=sys.stderr)
 
                         seq_from = 1
                         seq_to = len(to_write)
                         preview_uris = [c["request"].get("uri", "") for c in to_write[:3]]
 
-                        print(f"[OK] generated {output_txt}")
-                        print(f"cases={len(to_write)}")
-                        print(f"seq_range={seq_from}-{seq_to}")
-                        print(f"uri_preview={preview_uris}")
+                        # Untrusted HTTP text must never terminate packet capture
+                        # because the Windows console cannot encode a payload.
+                        try:
+                            print(f"[OK] generated {output_txt}")
+                            print(f"cases={len(to_write)}")
+                            print(f"seq_range={seq_from}-{seq_to}")
+                            print(f"uri_preview={preview_uris!r}")
+                        except UnicodeEncodeError:
+                            safe_preview = repr(preview_uris).encode("ascii", "backslashreplace").decode("ascii")
+                            print(f"uri_preview={safe_preview}")
 
                         completed_cases = completed_cases[args.batch_size :]
+                        write_capture_sequence(sequence_state, next_idx)
                         next_idx += 1
 
                         if args.once:

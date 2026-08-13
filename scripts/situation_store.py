@@ -348,17 +348,33 @@ class MySQLSituationStore:
             row["ai_report"] = json_value(row.pop("ai_report_json", None), None)
         return rows
 
-    def list_actions(self, *, lookback_days: int = 30, limit: int = 100000) -> List[SecurityAction]:
+    def list_actions(
+        self,
+        *,
+        lookback_days: int = 30,
+        lookback_minutes: int = 0,
+        limit: int = 100000,
+    ) -> List[SecurityAction]:
         conn = self.connect()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT * FROM security_actions
-                WHERE occurred_at >= UTC_TIMESTAMP(3) - INTERVAL %s DAY
-                ORDER BY occurred_at ASC LIMIT %s
-                """,
-                (max(1, int(lookback_days)), max(1, min(500000, int(limit)))),
-            )
+            if int(lookback_minutes) > 0:
+                cur.execute(
+                    """
+                    SELECT * FROM security_actions
+                    WHERE occurred_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE
+                    ORDER BY occurred_at ASC LIMIT %s
+                    """,
+                    (max(1, int(lookback_minutes)), max(1, min(500000, int(limit)))),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM security_actions
+                    WHERE occurred_at >= UTC_TIMESTAMP(3) - INTERVAL %s DAY
+                    ORDER BY occurred_at ASC LIMIT %s
+                    """,
+                    (max(1, int(lookback_days)), max(1, min(500000, int(limit)))),
+                )
             rows = list(cur.fetchall())
         conn.commit()
         return [self._action_from_db(row) for row in rows]
@@ -455,7 +471,7 @@ class MySQLSituationStore:
         situation["actions"] = actions
         return situation
 
-    def list_pending_ai(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def list_pending_ai(self, limit: int = 10, *, recent_minutes: int = 60) -> List[Dict[str, Any]]:
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
@@ -463,9 +479,10 @@ class MySQLSituationStore:
                 SELECT situation_id FROM attack_situations
                 WHERE ai_status IN ('pending','retry')
                   AND status IN ('open','closed')
-                ORDER BY risk_score DESC,last_action_at DESC LIMIT %s
+                  AND last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE
+                ORDER BY last_action_at DESC,risk_score DESC LIMIT %s
                 """,
-                (max(1, min(100, int(limit))),),
+                (max(1, int(recent_minutes)), max(1, min(100, int(limit)))),
             )
             ids = [str(row["situation_id"]) for row in cur.fetchall()]
         conn.commit()

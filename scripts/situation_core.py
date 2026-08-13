@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -267,9 +268,14 @@ class Situation:
         self.risk_score = calculate_situation_risk(self.actions)
         self.risk_level = risk_level(self.risk_score)
         self.status = "open" if self.distinct_action_types >= minimum_distinct_actions else "observing"
-        signature = "|".join(
-            f"{x.action_type}:{timestamp_text(x.occurred_at)}:{x.count}" for x in self.actions
-        )
+        # Repeated hits update graph counters without calling AI for every
+        # packet. Refresh when the chain changes, the volume crosses a power-of-
+        # two boundary, or activity advances into another five-minute window.
+        # This keeps long-running situations current while bounding AI cost.
+        material = sorted({f"{x.stage}:{x.action_type}" for x in self.actions})
+        count_bucket = int(math.log2(max(1, self.total_action_count)))
+        activity_bucket = int(self.last_action_at.timestamp()) // 300
+        signature = "|".join(material + [f"count:{count_bucket}", f"time:{activity_bucket}"])
         self.sequence_hash = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
 
     def as_dict(self) -> Dict[str, Any]:
@@ -400,7 +406,21 @@ class SituationCorrelator:
     def _build(self, source_ip: str, target_asset: str, rows: Sequence[SecurityAction]) -> Situation:
         aggregated = aggregate_actions(rows)
         first = min(x.occurred_at for x in aggregated)
-        token = f"{source_ip}|{target_asset}|{timestamp_text(first)}"
+        # Captured files from one burst may reach MySQL out of order. Using the
+        # earliest individual packet made the situation ID change whenever an
+        # older packet arrived a few seconds later, leaving stale partial chains
+        # beside the completed one. Anchor the identity to the correlation
+        # window instead; the exact start time remains available in started_at.
+        # The inactivity bucket is also the session boundary. It keeps a
+        # partially observed burst stable when its files arrive out of order,
+        # while two bursts separated by the configured idle gap cannot collide.
+        bucket_seconds = max(60, int(self.inactivity.total_seconds()))
+        first_epoch = int(first.timestamp())
+        bucket_start = datetime.fromtimestamp(
+            first_epoch - (first_epoch % bucket_seconds),
+            tz=timezone.utc,
+        )
+        token = f"{source_ip}|{target_asset}|{timestamp_text(bucket_start)}"
         situation_id = "SIT-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:20].upper()
         situation = Situation(
             situation_id=situation_id,
