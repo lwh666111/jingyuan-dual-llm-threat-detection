@@ -125,6 +125,8 @@ def main() -> None:
     )
     try:
         first_cycle = True
+        last_logged_stats: Dict[str, int] = {}
+        last_health_log = 0.0
         while True:
             started = time.monotonic()
             try:
@@ -140,7 +142,12 @@ def main() -> None:
                     ),
                 )
                 first_cycle = False
-                log("sync " + json.dumps(stats, ensure_ascii=False), log_file)
+                now_mono = time.monotonic()
+                meaningful_change = bool(stats.get("changed")) or stats != last_logged_stats
+                if meaningful_change or now_mono - last_health_log >= 300:
+                    log("sync " + json.dumps(stats, ensure_ascii=False), log_file)
+                    last_logged_stats = dict(stats)
+                    last_health_log = now_mono
             except Exception as exc:
                 log(f"sync failed: {type(exc).__name__}: {exc}", log_file)
                 try:

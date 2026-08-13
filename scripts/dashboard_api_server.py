@@ -5496,6 +5496,11 @@ def main() -> None:
         rag_data_dir=args.rag_data_dir,
         rag_api_config=args.rag_api_config,
     )
+    # Dashboard polling is expected traffic, not an error. Keeping Werkzeug's
+    # per-request access logger enabled can grow stderr by tens of MB per day.
+    import logging
+
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     app.run(host=args.host, port=args.port, debug=False)
 
 

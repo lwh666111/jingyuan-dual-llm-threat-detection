@@ -38,6 +38,8 @@ class SituationSupervisorTests(unittest.TestCase):
             poll_seconds=10,
             ollama_url="http://127.0.0.1:11434",
             rag_db_path="llm/rag/rag_knowledge.db",
+            rag_data_dir="D:/JingyuanTrafficPipelineData/rag",
+            rag_api_config="config/ai_api.local.json",
             scan_port_threshold=10,
             scan_window_seconds=60,
             neo4j_url="http://127.0.0.1:7474",

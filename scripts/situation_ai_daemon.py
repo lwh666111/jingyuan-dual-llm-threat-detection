@@ -43,7 +43,7 @@ def raw_review_waiting(store: MySQLSituationStore) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate explainable Ollama/RAG reports for attack situations")
+    parser = argparse.ArgumentParser(description="Generate explainable Bailian/RAG reports for attack situations")
     parser.add_argument("--mysql-host", default="127.0.0.1")
     parser.add_argument("--mysql-port", type=int, default=3306)
     parser.add_argument("--mysql-user", default="root")
@@ -52,6 +52,8 @@ def main() -> None:
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db")
+    parser.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag")
+    parser.add_argument("--rag-api-config", default="config/ai_api.local.json")
     parser.add_argument("--rag-top-k", type=int, default=4)
     parser.add_argument("--timeout-sec", type=int, default=120)
     parser.add_argument("--poll-seconds", type=int, default=10)
@@ -67,6 +69,15 @@ def main() -> None:
     store.ensure_schema()
     log_file = Path(args.log_file)
     rag_path = Path(args.rag_db_path).resolve()
+    rag_data_dir = Path(args.rag_data_dir).resolve()
+    rag_api_config = Path(args.rag_api_config).resolve()
+    rag_mysql_conf = {
+        "host": args.mysql_host,
+        "port": args.mysql_port,
+        "user": args.mysql_user,
+        "password": args.mysql_password,
+        "database": args.mysql_database,
+    }
     idle_since = time.monotonic()
     next_report_at = 0.0
     try:
@@ -106,6 +117,9 @@ def main() -> None:
                     ollama_url=args.ollama_url,
                     model=args.model,
                     rag_db_path=rag_path,
+                    rag_mysql_conf=rag_mysql_conf,
+                    rag_data_dir=rag_data_dir,
+                    rag_api_config=rag_api_config,
                     rag_enabled=rag_enabled,
                     rag_top_k=args.rag_top_k,
                     timeout_sec=args.timeout_sec,

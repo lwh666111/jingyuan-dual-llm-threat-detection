@@ -126,6 +126,8 @@ def ai_command(args: argparse.Namespace, model: str) -> List[str]:
         "--ollama-url", args.ollama_url,
         "--model", model,
         "--rag-db-path", args.rag_db_path,
+        "--rag-data-dir", args.rag_data_dir,
+        "--rag-api-config", args.rag_api_config,
         "--poll-seconds", str(args.poll_seconds),
     ]
 
@@ -185,6 +187,8 @@ def main() -> None:
     parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--rag-db-path", default="llm/rag/rag_knowledge.db")
+    parser.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag")
+    parser.add_argument("--rag-api-config", default="config/ai_api.local.json")
     parser.add_argument("--target-asset", default=socket.gethostname())
     parser.add_argument("--minimum-actions", type=int, default=3)
     parser.add_argument("--window-minutes", type=int, default=30)

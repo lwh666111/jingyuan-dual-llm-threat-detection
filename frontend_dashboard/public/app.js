@@ -1846,7 +1846,7 @@ function renderSituationView() {
     <section class="situation-report-grid">
       <article class="situation-report-panel">
         <div class="situation-panel-title">
-          <div><span>AI 态势报告</span><small id="situationAiMeta">Ollama + RAG 可解释研判</small></div>
+          <div><span>AI 态势报告</span><small id="situationAiMeta">百炼 API + RAG 可解释研判</small></div>
           <div class="situation-report-actions">
             <button id="btnProfessionalSituationReport" class="btn btn-primary btn-mini" type="button">获取专业态势报告</button>
             <button id="btnSituationReanalyze" class="btn btn-ghost btn-mini ${state.profile?.role === ROLE_ADMIN ? "" : "hidden"}" type="button">重新研判</button>
@@ -2075,7 +2075,7 @@ function renderSituationAiReport(detail) {
       : formatAiStatus(detail.ai_status, report);
   }
   if (!report) {
-    container.innerHTML = `<div class="situation-report-placeholder"><i class="live-pulse"></i> 研判任务已入队，Ollama 完成后将自动刷新</div>`;
+    container.innerHTML = `<div class="situation-report-placeholder"><i class="live-pulse"></i> 研判任务已入队，百炼 API 完成后将自动刷新</div>`;
     return;
   }
   container.innerHTML = `
@@ -2433,7 +2433,7 @@ function renderSituationEmptyState() {
   const report = document.getElementById("situationAiReport");
   if (report) report.innerHTML = `<div class="situation-report-placeholder">暂无符合关联条件的攻击链，不生成虚构研判。</div>`;
   const reportMeta = document.getElementById("situationAiMeta");
-  if (reportMeta) reportMeta.textContent = state.situations.scopeMode === "cross_ip" ? "跨 IP 融合研判" : "Ollama + RAG 可解释研判";
+  if (reportMeta) reportMeta.textContent = state.situations.scopeMode === "cross_ip" ? "百炼 API 跨 IP 融合研判" : "百炼 API + RAG 可解释研判";
   const evidence = document.getElementById("situationEvidence");
   if (evidence) evidence.innerHTML = `<div class="situation-evidence-empty">证据将在动作发生后按时间顺序列出</div>`;
 }
@@ -2497,7 +2497,7 @@ function formatAiStatus(status, report) {
   if (status === "fallback") {
     const reason = String(report?.fallback_reason || "");
     if (/未经证据确认|事实|中文|ValueError/i.test(reason)) return "规则化应急报告 · AI 输出未通过事实校验";
-    if (/urlopen|connect|timeout|timed out|ollama/i.test(reason)) return "规则化应急报告 · Ollama 暂不可用";
+    if (/urlopen|connect|timeout|timed out|bailian|百炼|http/i.test(reason)) return "规则化应急报告 · 外部 API 暂不可用";
     return "规则化应急报告 · AI 结果不可用";
   }
   if (status === "failed") return "研判失败，等待重试";

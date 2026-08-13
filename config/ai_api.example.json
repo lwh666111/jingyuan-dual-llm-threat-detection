@@ -5,6 +5,7 @@
   "embedding_model": "text-embedding-v4",
   "rerank_model": "qwen3-rerank",
   "report_model": "qwen-plus",
+  "situation_report_model": "qwen-plus",
   "embedding_dimensions": 1024,
   "timeout_seconds": 90
 }

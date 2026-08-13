@@ -4,6 +4,7 @@ import json
 import os
 import re
 import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -167,6 +168,11 @@ def validate_report(report: Dict[str, Any], *, allow_success_claims: bool = Fals
         if not isinstance(report[key], list):
             report[key] = [str(report[key])]
         report[key] = [str(item).strip() for item in report[key] if str(item).strip()]
+    for key in DETAIL_TEXT_FIELDS:
+        if isinstance(report[key], list):
+            report[key] = "；".join(str(item).strip(" ；") for item in report[key] if str(item).strip())
+        else:
+            report[key] = str(report[key]).strip()
     for key in ("narrative", "analysis", "conclusion", "likely_intent", *DETAIL_TEXT_FIELDS):
         if not re.search(r"[\u4e00-\u9fff]", str(report[key])):
             raise ValueError(f"大模型报告字段未使用中文: {key}")
@@ -180,7 +186,12 @@ def validate_report(report: Dict[str, Any], *, allow_success_claims: bool = Fals
         )
         # Keep legitimate negative wording such as “暂无成功入侵证据”, while
         # rejecting unsupported affirmative compromise claims.
-        narrative_text = re.sub(r"(?:未|没有|尚未|暂无|无)[^。；，]{0,8}成功", "", narrative_text)
+        narrative_text = re.sub(
+            r"(?:未发现|未观察到|未能|不能|无法|不足以|不代表|不等于|没有|尚未|暂无|无|缺乏)"
+            r"[^。；，]{0,32}(?:成功|失陷)",
+            "",
+            narrative_text,
+        )
         if re.search(r"成功(?:地|的)?(?:执行|利用|入侵|获取|写入|绕过)|攻击成功", narrative_text):
             raise ValueError("大模型报告包含未经证据确认的攻击成功表述")
     report["confidence"] = max(0.0, min(1.0, float(report.get("confidence") or 0.0)))
@@ -258,6 +269,39 @@ def call_ollama(ollama_url: str, model: str, prompt: str, timeout_sec: int = 120
     return extract_json(str(result.get("response") or ""))
 
 
+def call_bailian(api_config: Dict[str, Any], model: str, prompt: str, timeout_sec: int = 120) -> Dict[str, Any]:
+    """Generate a structured situation report through Bailian's OpenAI-compatible API."""
+    api_key = str(api_config.get("api_key") or "").strip()
+    base_url = str(api_config.get("base_url") or "").strip().rstrip("/")
+    if not api_key or not base_url:
+        raise RuntimeError("百炼 API 配置不完整")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是严谨的网络安全态势研判专家，只输出合法 JSON。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.15,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    request_timeout = max(10, int(api_config.get("timeout_seconds") or timeout_sec))
+    try:
+        with urllib.request.urlopen(request, timeout=request_timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"百炼 HTTP {exc.code}: {detail}") from exc
+    content = str((((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""))
+    return extract_json(content)
+
+
 def analyze_situation(
     situation: Dict[str, Any],
     *,
@@ -307,13 +351,25 @@ def analyze_situation(
         rag_rows = []
     rag_context = format_rag_context(rag_rows, max_chars=5000) if rag_rows else ""
     try:
+        if not rag_api_config:
+            raise RuntimeError("未配置态势报告外部 API")
+        from rag_service import load_api_config
+
+        api_config = load_api_config(rag_api_config)
+        config_payload = json.loads(rag_api_config.read_text(encoding="utf-8-sig")) if rag_api_config.exists() else {}
+        cloud_model = str(
+            config_payload.get("situation_report_model")
+            or config_payload.get("report_model")
+            or "qwen-plus"
+        ).strip()
         report = validate_report(
-            call_ollama(ollama_url, model, build_prompt(situation, rag_context), timeout_sec),
+            call_bailian(api_config, cloud_model, build_prompt(situation, rag_context), timeout_sec),
             allow_success_claims=False,
         )
         report.update(
             {
-                "generated_by": "ollama_rag",
+                "generated_by": "bailian_rag" if rag_enabled and rag_rows else "bailian",
+                "model_name": cloud_model,
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
                 "rag_hits": len(rag_rows),
                 "rag_refs": [str(row.get("title") or row.get("doc_id") or "") for row in rag_rows],

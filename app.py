@@ -79,8 +79,27 @@ def log(msg: str, log_path: Path) -> None:
     line = f"[{now_iso()}] {msg}"
     print(line, flush=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    trim_log_file(log_path)
     with log_path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def trim_log_file(path: Path, max_bytes: int = 8 * 1024 * 1024, keep_bytes: int = 2 * 1024 * 1024) -> None:
+    """Bound long-running text logs without removing the most recent diagnostics."""
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return
+        with path.open("rb") as handle:
+            handle.seek(-min(keep_bytes, path.stat().st_size), os.SEEK_END)
+            tail = handle.read()
+        newline = tail.find(b"\n")
+        if newline >= 0:
+            tail = tail[newline + 1 :]
+        path.write_bytes(b"[log truncated; recent entries retained]\n" + tail)
+    except OSError:
+        # A child process may currently own the file on Windows. It will be
+        # trimmed on the next supervisor restart before handles are opened.
+        return
 
 
 def ensure_scripts(script_dir: Path, script_names: List[str]) -> None:
@@ -690,6 +709,10 @@ def build_situation_cmd(args, script_dir: Path, interface: str, model: str) -> L
         args.ollama_url,
         "--rag-db-path",
         args.rag_db_path,
+        "--rag-data-dir",
+        args.rag_data_dir,
+        "--rag-api-config",
+        args.rag_api_config,
         "--minimum-actions",
         str(args.situation_minimum_actions),
         "--window-minutes",
@@ -1185,6 +1208,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     result_dir.mkdir(parents=True, exist_ok=True)
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    for existing_log in list(runtime_dir.glob("*.log")) + [output_dir / "result_db_daemon.log", output_dir / "situation_daemon.log"]:
+        trim_log_file(existing_log)
 
     default_pre, default_model = resolve_old_model_artifacts(project_root)
 
