@@ -133,10 +133,21 @@ class MySQLSituationStore:
     def __init__(self, settings: MySQLSettings, connection: Any = None) -> None:
         self.settings = settings
         self._connection = connection
+        self._owns_connection = connection is None
 
     def connect(self) -> Any:
         if self._connection is not None:
-            return self._connection
+            if not self._owns_connection:
+                return self._connection
+            try:
+                self._connection.ping(reconnect=True)
+                return self._connection
+            except Exception:
+                try:
+                    self._connection.close()
+                except Exception:
+                    pass
+                self._connection = None
         if pymysql is None:
             raise RuntimeError("PyMySQL 未安装，无法使用态势数据库")
         self._connection = pymysql.connect(

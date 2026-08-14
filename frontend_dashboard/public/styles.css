@@ -1713,6 +1713,15 @@ svg {
   align-items: stretch;
 }
 
+.emergency-task-card {
+  border-color: rgba(255, 103, 126, 0.38);
+  background: linear-gradient(135deg, rgba(70, 20, 35, 0.28), rgba(8, 34, 55, 0.76));
+}
+
+.emergency-task-card .btn {
+  min-width: 176px;
+}
+
 .background-preview {
   min-height: 190px;
   border-radius: 18px;

@@ -6,6 +6,8 @@ import socket
 import subprocess
 import sys
 import time
+import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -26,6 +28,26 @@ def validated_int_text(value: object, fallback: int, minimum: int, maximum: int)
     if parsed < minimum or parsed > maximum:
         parsed = int(fallback)
     return str(parsed)
+
+
+def resolve_tshark_interface_index(configured: str) -> str:
+    value = str(configured or "").strip()
+    if not value or value.isdigit() or value.lower() in {"auto", "none", "off"}:
+        return value
+    try:
+        result = subprocess.run(
+            ["tshark", "-D"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=12,
+        )
+        if result.returncode == 0:
+            needle = value.lower()
+            for line in result.stdout.splitlines():
+                match = re.match(r"^\s*(\d+)\.\s+(.+)$", line)
+                if match and needle in match.group(2).lower():
+                    return match.group(1)
+    except Exception:
+        pass
+    return value
 
 
 def stop(proc: Optional[subprocess.Popen], name: str) -> None:
@@ -64,7 +86,7 @@ def load_runtime_config(args: argparse.Namespace) -> Dict[str, str]:
             cur.execute(
                 """SELECT config_key,config_value FROM demo_system_config
                    WHERE config_key IN (
-                     'capture_interface','llm_model','situation_minimum_actions',
+                     'capture_interface','capture_interface_identity','llm_model','situation_minimum_actions',
                      'situation_window_minutes','situation_inactivity_minutes',
                      'scan_port_threshold','scan_window_seconds'
                    )"""
@@ -90,6 +112,10 @@ def load_runtime_config(args: argparse.Namespace) -> Dict[str, str]:
     fallback["scan_window_seconds"] = validated_int_text(
         fallback.get("scan_window_seconds"), args.scan_window_seconds, 10, 3600
     )
+    fallback["capture_interface"] = (
+        fallback.get("capture_interface_identity") or fallback.get("capture_interface") or args.interface
+    )
+    fallback["capture_interface"] = resolve_tshark_interface_index(fallback["capture_interface"])
     return fallback
 
 
@@ -129,6 +155,7 @@ def ai_command(args: argparse.Namespace, model: str) -> List[str]:
         "--rag-data-dir", args.rag_data_dir,
         "--rag-api-config", args.rag_api_config,
         "--poll-seconds", str(args.poll_seconds),
+        "--heartbeat-file", str(getattr(args, "ai_heartbeat_file", Path("output/situation_ai_heartbeat.json"))),
     ]
 
 
@@ -195,6 +222,8 @@ def main() -> None:
     parser.add_argument("--inactivity-minutes", type=int, default=15)
     parser.add_argument("--lookback-days", type=int, default=30)
     parser.add_argument("--poll-seconds", type=int, default=10)
+    parser.add_argument("--ai-heartbeat-file", type=Path, default=Path("output/situation_ai_heartbeat.json"))
+    parser.add_argument("--ai-heartbeat-timeout", type=int, default=210)
     parser.add_argument("--scan-port-threshold", type=int, default=10)
     parser.add_argument("--scan-window-seconds", type=int, default=60)
     parser.add_argument("--neo4j-url", default="")
@@ -204,6 +233,8 @@ def main() -> None:
     args = parser.parse_args()
     args.scripts_dir = args.scripts_dir.resolve()
     project_root = args.scripts_dir.parent
+    if not args.ai_heartbeat_file.is_absolute():
+        args.ai_heartbeat_file = project_root / args.ai_heartbeat_file
 
     processes: Dict[str, Optional[subprocess.Popen]] = {
         "correlator": None,
@@ -256,6 +287,17 @@ def main() -> None:
                 processes["correlator"] = start(situation_command(args, runtime_config), "correlator", project_root)
             if processes["ai"] is None or processes["ai"].poll() is not None:
                 processes["ai"] = start(ai_command(args, active_model or args.model), "ai", project_root)
+            elif args.ai_heartbeat_file.exists():
+                try:
+                    heartbeat = json.loads(args.ai_heartbeat_file.read_text(encoding="utf-8-sig"))
+                    updated = datetime.fromisoformat(str(heartbeat.get("updated_at") or ""))
+                    age = (datetime.now() - updated).total_seconds()
+                    if age > max(60, args.ai_heartbeat_timeout):
+                        log(f"ai business heartbeat stale ({age:.0f}s), restarting")
+                        stop(processes["ai"], "ai")
+                        processes["ai"] = None
+                except Exception as exc:
+                    log(f"ai heartbeat check skipped: {exc}")
             if active_interface and active_interface.lower() not in {"auto", "none", "off"}:
                 if processes["sensor"] is None or processes["sensor"].poll() is not None:
                     processes["sensor"] = start(sensor_command(args, active_interface, runtime_config), "sensor", project_root)

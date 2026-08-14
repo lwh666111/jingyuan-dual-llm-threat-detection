@@ -14,6 +14,9 @@ from sync_detection_v2_db import sync_case_mysql as sync_v2_case_mysql
 from pipeline_events import DB_READY_EVENT, INPUT_QUEUE_NAME, LLM_READY_EVENT, notify_event, read_input_ready, wait_event
 
 
+_MYSQL_SCHEMA_READY = False
+
+
 def iter_raw_input_files(input_dir: Path) -> List[Path]:
     def sequence(path: Path) -> int:
         try:
@@ -146,6 +149,7 @@ def run_sync(
     input_files: List[Path] | None = None,
     raw_engine: object | None = None,
 ) -> Dict[str, str | int]:
+    global _MYSQL_SCHEMA_READY
     sync_started = time.perf_counter()
     # RAW-only changes are the normal hot path. Running the legacy b.* importer
     # here needlessly performs schema checks and full-table counts before every
@@ -176,10 +180,16 @@ def run_sync(
     if backend == "mysql":
         try:
             conn = v2_mysql_connect(mysql_config)
-            ensure_v2_mysql(conn)
-            from raw_llm_review import ensure_review_schema
+            # Schema introspection belongs to startup. Repeating DDL checks for
+            # every captured packet added seconds to the live detection path.
+            if not _MYSQL_SCHEMA_READY:
+                ensure_v2_mysql(conn)
+                from raw_llm_review import ensure_review_schema
+                from sync_raw_http_logs import ensure_demo_attack_events
 
-            ensure_review_schema(conn)
+                ensure_review_schema(conn)
+                ensure_demo_attack_events(conn)
+                _MYSQL_SCHEMA_READY = True
             raw_totals = {"files": 0, "raw": 0, "candidate": 0, "attack": 0, "model": 0, "poc": 0, "behavior": 0, "errors": 0}
             raw_paths = iter_raw_input_files(input_dir) if input_files is None else input_files
             engine = raw_engine
@@ -302,6 +312,7 @@ def main() -> None:
     log(f"raw input watch dir={input_dir}", log_file)
     log(f"backend={args.backend} target={state['db_target']}", log_file)
     input_queue = project_root / "output" / INPUT_QUEUE_NAME
+    reset_request = project_root / "output" / "pipeline_reset.request"
     state.setdefault("input_queue_offset", 0)
 
     raw_engine: object | None = None
@@ -372,6 +383,16 @@ def main() -> None:
     while True:
         awakened = wait_event(DB_READY_EVENT, max(args.poll_seconds, 1))
         try:
+            if reset_request.exists():
+                # Emergency reset establishes the current filesystem as the
+                # new baseline. Already captured files are preserved, but no
+                # stale input/result work is replayed after queue cancellation.
+                state["watch_index"] = collect_watch_index(result_dir, input_dir)
+                state["input_queue_offset"] = input_queue.stat().st_size if input_queue.exists() else 0
+                write_state(state_file, state)
+                reset_request.unlink(missing_ok=True)
+                log("emergency queue reset applied", log_file)
+                continue
             queued_paths, next_queue_offset = read_input_ready(input_queue, int(state.get("input_queue_offset") or 0))
             if queued_paths:
                 input_root = input_dir.resolve()

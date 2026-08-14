@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
 from build_result_db import MySQLConfig
 from extract_old_model_features_from_txt import build_request_text, parse_records, read_text_file
 from security_detection_v2 import DetectionEngineV2
-from raw_llm_review import enqueue_review, ensure_review_schema, remove_review
+from raw_llm_review import enqueue_review, ensure_review_schema, find_cached_review, prioritize_cached_review, remove_review
 from sync_detection_v2_db import ensure_mysql, mysql_connect, upsert_mysql
 
 BEHAVIOR_AGG_BUCKET_MINUTES = 10
@@ -373,6 +373,15 @@ def sync_detection_rows_mysql(
             preliminary_decision=decision,
             final_score=final_score,
         )
+        prioritize_cached_review(
+            conn,
+            event_id,
+            {
+                **record,
+                "attack_type": detection.get("attack_type"),
+                "final_score": final_score,
+            },
+        )
 
     return {"candidate": 1, "attack": attack_count, "model": 1, "poc": poc_count, "behavior": behavior_count}
 
@@ -430,7 +439,29 @@ def sync_input_file_mysql(conn: Any, input_file: Path, engine: DetectionEngineV2
             },
         )
         totals["raw"] += 1
-        detection = engine.detect(record)
+        cached = find_cached_review(conn, record)
+        if cached:
+            template = cached.get("analysis") or {}
+            confidence = max(0.75, min(1.0, float(template.get("confidence") or 0.95)))
+            attack_type = str(template.get("attack_method") or template.get("attack_type") or "可疑流量")
+            severity = str(template.get("severity") or "high")
+            evidence = list(template.get("evidence") or template.get("decision_evidence") or [])
+            detection = {
+                "payload": {"label": attack_type, "score": confidence, "proba": {attack_type: confidence}},
+                "behavior": {"type": "normal", "score": 0.0, "features": {}, "evidence": []},
+                "poc_matches": [],
+                "fusion": {
+                    "decision": "attack_event",
+                    "final_score": confidence,
+                    "risk_level": severity,
+                    "attack_type": attack_type,
+                    "evidence": evidence[:8] or ["已验证攻击指纹精确命中"],
+                    "poc_matches": [],
+                },
+                "verified_cache": True,
+            }
+        else:
+            detection = engine.detect(record)
         row_stats = sync_detection_rows_mysql(conn, case_id, event_id, record, detection)
         for key in ("candidate", "attack", "model", "poc", "behavior"):
             totals[key] += int(row_stats.get(key, 0))

@@ -4910,6 +4910,57 @@ def create_app(
                 rows = cur.fetchall()
         return jsonify({"items": normalize_rows(rows)})
 
+    @app.route("/api/v2/admin/tasks/emergency-reset", methods=["POST"])
+    @require_roles(ROLE_ADMIN)
+    def admin_tasks_emergency_reset():
+        """Cancel unfinished pipeline work while preserving completed evidence."""
+        cleared: Dict[str, int] = {}
+        with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            with conn.cursor() as cur:
+                operations = (
+                    ("llm_reviews", "DELETE FROM llm_review_jobs WHERE status IN ('pending','processing','failed')"),
+                    ("situation_ai", "UPDATE attack_situations SET ai_status='cancelled' WHERE ai_status IN ('pending','retry','processing')"),
+                    ("professional_reports", "UPDATE situation_professional_reports SET status='failed',progress=100,stage='管理员已紧急取消',error_message='emergency_reset',completed_at=NOW(3) WHERE status IN ('queued','running')"),
+                    ("rag_documents", "UPDATE rag_documents SET status='failed',progress=0,error_message='管理员已紧急取消任务' WHERE status IN ('pending','processing')"),
+                    ("graph_outbox", "UPDATE situation_outbox SET status='cancelled',last_error='emergency_reset',processed_at=NOW(3) WHERE status IN ('pending','retry','processing')"),
+                )
+                for name, sql in operations:
+                    try:
+                        cleared[name] = int(cur.execute(sql) or 0)
+                    except Exception as exc:  # Optional modules may not be initialized yet.
+                        if getattr(exc, "args", [None])[0] != 1146:
+                            raise
+                        cleared[name] = 0
+                log_action(
+                    conn,
+                    g.session["username"],
+                    g.session["role"],
+                    "emergency_task_reset",
+                    "pipeline_queues",
+                    json.dumps(cleared, ensure_ascii=False),
+                )
+            conn.commit()
+
+        queue_path = PROJECT_ROOT / "output" / "input_ready.jsonl"
+        try:
+            queue_path.parent.mkdir(parents=True, exist_ok=True)
+            queue_path.write_text("", encoding="ascii")
+            (queue_path.parent / "pipeline_reset.request").write_text(
+                datetime.now().isoformat(timespec="milliseconds"), encoding="ascii"
+            )
+        except OSError:
+            pass
+        # Wake workers immediately so they observe the empty queues instead of
+        # sleeping until their fallback poll.
+        try:
+            from pipeline_events import DB_READY_EVENT, LLM_READY_EVENT, notify_event
+
+            notify_event(DB_READY_EVENT)
+            notify_event(LLM_READY_EVENT)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "cleared": cleared, "message": "未完成任务已清空，历史数据保持不变"})
+
     @app.route("/api/v2/common/home-background", methods=["GET"])
     def common_home_background():
         url = DEFAULT_HOMEPAGE_BACKGROUND
@@ -5256,6 +5307,16 @@ def create_app(
                     cfg_val = "auto"
                 if len(cfg_val) > 128:
                     return jsonify({"error": "invalid_capture_interface"}), 400
+                interface_info = list_tshark_interfaces()
+                resolved_index, resolved_name = resolve_capture_interface(
+                    cfg_val, interface_info.get("items", [])
+                )
+                if cfg_val.lower() != "auto" and not resolved_index:
+                    return jsonify({"error": "capture_interface_not_found"}), 400
+                if resolved_name:
+                    # Store the stable NPF device token, not the localized
+                    # adapter description or mutable tshark numeric index.
+                    normalized["capture_interface_identity"] = resolved_name.split(" (", 1)[0].strip()
             elif cfg_key == "situation_minimum_actions":
                 try:
                     v = int(cfg_val)

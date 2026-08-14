@@ -2029,7 +2029,11 @@ function renderSituationDetail() {
   renderSituationAiReport(detail);
   renderSituationEvidence(detail.actions || []);
   drawSituationChain(graph);
-  refreshProfessionalReportStatus(false).catch(() => {});
+  refreshProfessionalReportStatus(false)
+    .then((job) => {
+      if (job && !["completed", "failed"].includes(job.status)) beginProfessionalReportPolling();
+    })
+    .catch(() => {});
 }
 
 function renderSituationStagePills(nodes) {
@@ -2161,10 +2165,6 @@ async function startProfessionalSituationReport() {
 
 function closeProfessionalReportModal() {
   document.getElementById("professionalReportOverlay")?.remove();
-  if (state.situations.professionalReportPoll) {
-    clearTimeout(state.situations.professionalReportPoll);
-    state.situations.professionalReportPoll = null;
-  }
 }
 
 function renderProfessionalReportModal() {
@@ -2205,13 +2205,19 @@ function renderProfessionalReportModal() {
 
 function beginProfessionalReportPolling() {
   if (state.situations.professionalReportPoll) clearTimeout(state.situations.professionalReportPoll);
+  const situationId = state.situations.selectedId;
   const poll = async () => {
-    if (!document.getElementById("professionalReportOverlay")) return;
+    if (!situationId || state.situations.selectedId !== situationId) {
+      state.situations.professionalReportPoll = null;
+      return;
+    }
     try {
       const job = await refreshProfessionalReportStatus(false);
-      renderProfessionalReportModal();
+      if (document.getElementById("professionalReportOverlay")) renderProfessionalReportModal();
       if (job && !["completed", "failed"].includes(job.status)) {
         state.situations.professionalReportPoll = setTimeout(poll, 1500);
+      } else {
+        state.situations.professionalReportPoll = null;
       }
     } catch (err) {
       showToast(`报告状态读取失败：${err.message}`);
@@ -4679,6 +4685,13 @@ function renderAdminConfigView() {
           <b id="cfg_llm_realtime_label">已开启</b>
         </label>
       </div>
+      <div class="background-config-card emergency-task-card">
+        <div class="config-switch-copy">
+          <h4 class="detail-title">紧急任务恢复</h4>
+          <p class="panel-sub">当模型或外部 API 任务卡住时，清空所有未完成队列并立即恢复接收新流量。历史攻击、已完成报告、知识库和封禁记录不会被删除。</p>
+        </div>
+        <button id="adm_emergency_reset" class="btn btn-danger">清空卡住的任务</button>
+      </div>
       <div class="row-actions">
         <button id="adm_cfg_save" class="btn btn-primary">保存全局配置</button>
       </div>
@@ -4694,12 +4707,32 @@ function renderAdminConfigView() {
   document.getElementById("adm_bg_upload")?.addEventListener("click", () => uploadAdminHomepageBackground());
   document.getElementById("adm_bg_reset")?.addEventListener("click", () => resetAdminHomepageBackground());
   document.getElementById("cfg_llm_realtime_enabled")?.addEventListener("change", updateRealtimeLlmLabel);
+  document.getElementById("adm_emergency_reset")?.addEventListener("click", () => emergencyResetTasks());
   loadAdminConfig()
     .then(async () => {
       await refreshAdminModelOptions(undefined, true);
       await refreshAdminCaptureInterfaces(undefined, true);
     })
     .catch((err) => showToast(`加载配置失败：${err.message}`));
+}
+
+async function emergencyResetTasks() {
+  if (!confirm("确定清空所有未完成的小模型、大模型和外部 API 任务吗？历史结果不会被删除。")) return;
+  const button = document.getElementById("adm_emergency_reset");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在恢复系统...";
+  }
+  try {
+    const result = await api("/api/v2/admin/tasks/emergency-reset", { method: "POST", body: {} });
+    const total = Object.values(result.cleared || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    showToast(`系统已恢复，可立即继续使用；共清理 ${total} 个未完成任务`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "清空卡住的任务";
+    }
+  }
 }
 
 async function loadAdminConfig() {

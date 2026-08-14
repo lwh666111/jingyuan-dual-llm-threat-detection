@@ -115,6 +115,27 @@ def ensure_paths(paths: List[Path], hint: str = "") -> None:
         raise FileNotFoundError(f"缺少文件: {missing}{extra}")
 
 
+def resolve_tshark_interface_index(configured: str) -> str:
+    """Map a stable tshark device description to its current numeric index."""
+    value = str(configured or "").strip()
+    if not value or value.isdigit() or value.lower() in {"auto", "none", "off"}:
+        return value
+    try:
+        result = subprocess.run(
+            ["tshark", "-D"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=12,
+        )
+        if result.returncode == 0:
+            needle = value.lower()
+            for line in result.stdout.splitlines():
+                match = re.match(r"^\s*(\d+)\.\s+(.+)$", line)
+                if match and needle in match.group(2).lower():
+                    return match.group(1)
+    except Exception:
+        pass
+    return value
+
+
 def terminate_process(proc: Optional[subprocess.Popen], name: str, log_path: Path) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -366,7 +387,7 @@ def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_
                     """
                     SELECT config_key, config_value
                     FROM demo_system_config
-                    WHERE config_key IN ('monitor_ports', 'capture_batch_size', 'capture_interface')
+                    WHERE config_key IN ('monitor_ports', 'capture_batch_size', 'capture_interface', 'capture_interface_identity')
                     """
                 )
                 rows = cur.fetchall()
@@ -397,7 +418,11 @@ def load_capture_runtime_config(args, fallback_ports: List[int], fallback_batch_
             return cfg
 
     try:
-        cfg["interface"] = parse_capture_interface_text(kv.get("capture_interface", ""), cfg.get("interface", ""))
+        stable_interface = kv.get("capture_interface_identity", "").strip()
+        cfg["interface"] = parse_capture_interface_text(
+            stable_interface or kv.get("capture_interface", ""), cfg.get("interface", "")
+        )
+        cfg["interface"] = resolve_tshark_interface_index(cfg["interface"])
     except Exception as exc:  # noqa: BLE001
         cfg["error"] = f"invalid_capture_interface: {exc}"
         return cfg
@@ -1313,6 +1338,8 @@ def main() -> None:
         )
     if run_api:
         required_scripts.append("dashboard_api_server.py")
+    if run_test_lab and str(args.db_backend).lower() == "mysql":
+        required_scripts.append("seed_lab_review_cache.py")
     ensure_scripts(scripts_dir, required_scripts)
     if run_capture and run_situation:
         ensure_paths([project_root / "rules" / "fast_defense_rules.json"], hint="fast defense rules are required")
@@ -1462,6 +1489,30 @@ def main() -> None:
         dashboard_env["API_BASE"] = dashboard_api_base
 
     try:
+        if run_test_lab and str(args.db_backend).lower() == "mysql":
+            seed_cmd = [
+                args.python_exe, str(scripts_dir / "seed_lab_review_cache.py"),
+                "--mysql-host", args.mysql_host,
+                "--mysql-port", str(args.mysql_port),
+                "--mysql-user", args.mysql_user,
+                "--mysql-password", args.mysql_password,
+                "--mysql-database", args.mysql_database,
+            ]
+            try:
+                seeded = subprocess.run(
+                    seed_cmd, cwd=str(project_root), env=workflow_env,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=90,
+                )
+                summary = (seeded.stdout or seeded.stderr or "").strip().splitlines()
+                log(
+                    f"lab review cache seed rc={seeded.returncode} "
+                    + (summary[-1] if summary else "no output"),
+                    app_log,
+                )
+            except Exception as exc:
+                log(f"lab review cache seed failed: {exc}", app_log)
+
         if run_test_lab:
             test_lab_host = args.test_lab_host if args.test_lab_host not in {"0.0.0.0", "::"} else "127.0.0.1"
             if tcp_port_in_use(test_lab_host, args.test_lab_port):

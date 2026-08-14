@@ -805,7 +805,6 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
 
     conn = open_review_conn(args)
     try:
-        ensure_review_schema(conn)
         row = claim_next_review(conn, max_attempts=args.raw_review_max_attempts)
         if not row:
             return None

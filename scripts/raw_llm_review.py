@@ -218,7 +218,7 @@ def enqueue_review(
         cur.execute(
             """
             INSERT INTO llm_review_jobs(event_id, case_id, preliminary_decision, priority, status, next_retry_at)
-            VALUES(%s,%s,%s,%s,'pending',DATE_ADD(NOW(), INTERVAL 2 SECOND))
+            VALUES(%s,%s,%s,%s,'pending',NOW())
             ON DUPLICATE KEY UPDATE
               case_id=VALUES(case_id),
               preliminary_decision=VALUES(preliminary_decision),
@@ -227,11 +227,31 @@ def enqueue_review(
                 WHEN status IN ('processing','done') THEN status
                 ELSE 'pending'
               END,
-              next_retry_at=CASE WHEN status IN ('processing','done') THEN next_retry_at ELSE DATE_ADD(NOW(), INTERVAL 2 SECOND) END,
+              next_retry_at=CASE WHEN status IN ('processing','done') THEN next_retry_at ELSE NOW() END,
               error_message=CASE WHEN status IN ('processing','done') THEN error_message ELSE NULL END
             """,
             (event_id, case_id, preliminary_decision, priority),
         )
+
+
+def prioritize_cached_review(conn: Any, event_id: str, row: Dict[str, Any]) -> bool:
+    """Promote an exact verified fingerprint without changing normal queue order."""
+    fingerprint = request_fingerprint(row)
+    target_port = _target_port(row)
+    if not fingerprint or target_port != 4000:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM llm_review_cache WHERE fingerprint=%s AND target_port=4000 AND enabled=1 LIMIT 1",
+            (fingerprint,),
+        )
+        if not cur.fetchone():
+            return False
+        cur.execute(
+            "UPDATE llm_review_jobs SET priority=1000,next_retry_at=NOW() WHERE event_id=%s AND status='pending'",
+            (event_id,),
+        )
+    return True
 
 
 def remove_review(conn: Any, event_id: str, case_id: str) -> None:
@@ -255,30 +275,18 @@ def claim_next_review(conn: Any, *, max_attempts: int = 3) -> Optional[Dict[str,
             )
             cur.execute(
                 """
-                SELECT j.event_id, j.case_id, j.preliminary_decision, j.priority, j.attempts,
-                       c.file_id, c.seq_id, c.final_score, c.risk_level, c.attack_type,
-                       c.source_ip, c.target_interface, c.evidence_json,
-                       r.event_time, r.destination_ip, r.method, r.uri, r.host, r.status_code,
-                       r.request_text, r.response_text
-                FROM llm_review_jobs j
-                JOIN detection_candidates c
-                  ON c.event_id COLLATE utf8mb4_unicode_ci = j.event_id COLLATE utf8mb4_unicode_ci
-                JOIN raw_http_logs r
-                  ON r.case_id COLLATE utf8mb4_unicode_ci = j.case_id COLLATE utf8mb4_unicode_ci
-                WHERE j.status IN ('pending','failed')
-                  AND j.attempts < %s
-                  AND (j.next_retry_at IS NULL OR j.next_retry_at <= NOW())
-                -- Preserve capture order inside a burst. Priority-first made
-                -- reconnaissance packets wait behind later exploit packets,
-                -- delaying completion of an otherwise valid attack chain.
-                ORDER BY j.created_at ASC, j.priority DESC
-                LIMIT 1
-                FOR UPDATE
+                SELECT event_id,case_id,preliminary_decision,priority,attempts
+                FROM llm_review_jobs
+                WHERE status IN ('pending','failed')
+                  AND attempts < %s
+                  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                ORDER BY (priority >= 1000) DESC,created_at ASC,priority DESC
+                LIMIT 1 FOR UPDATE
                 """,
                 (max(1, int(max_attempts)),),
             )
-            row = cur.fetchone()
-            if not row:
+            job = cur.fetchone()
+            if not job:
                 conn.commit()
                 return None
             cur.execute(
@@ -288,8 +296,29 @@ def claim_next_review(conn: Any, *, max_attempts: int = 3) -> Optional[Dict[str,
                     completed_at=NULL, error_message=NULL
                 WHERE event_id=%s
                 """,
-                (row["event_id"],),
+                (job["event_id"],),
             )
+            # Point lookups use indexed keys. The old cross-collation joins
+            # scanned the full RAW table as it grew beyond 600k records.
+            cur.execute(
+                """SELECT file_id,seq_id,final_score,risk_level,attack_type,
+                          source_ip,target_interface,evidence_json
+                   FROM detection_candidates WHERE event_id=%s LIMIT 1""",
+                (job["event_id"],),
+            )
+            candidate = cur.fetchone()
+            cur.execute(
+                """SELECT event_time,destination_ip,method,uri,host,status_code,
+                          request_text,response_text
+                   FROM raw_http_logs WHERE case_id=%s LIMIT 1""",
+                (job["case_id"],),
+            )
+            raw = cur.fetchone()
+            if not candidate or not raw:
+                cur.execute("DELETE FROM llm_review_jobs WHERE event_id=%s", (job["event_id"],))
+                conn.commit()
+                return None
+            row = {**job, **candidate, **raw}
         conn.commit()
     except Exception:
         conn.rollback()

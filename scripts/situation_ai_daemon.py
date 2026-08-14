@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -62,12 +64,26 @@ def main() -> None:
     parser.add_argument("--report-cooldown-seconds", type=int, default=5)
     parser.add_argument("--recent-minutes", type=int, default=60)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--heartbeat-file", default="output/situation_ai_heartbeat.json")
     parser.add_argument("--log-file", default="output/situation_ai_daemon.log")
     args = parser.parse_args()
 
     store = MySQLSituationStore(MySQLSettings(args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_database))
     store.ensure_schema()
     log_file = Path(args.log_file)
+    heartbeat_file = Path(args.heartbeat_file)
+
+    def heartbeat(status: str, **extra: object) -> None:
+        heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            **extra,
+        }
+        temporary = heartbeat_file.with_suffix(heartbeat_file.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(heartbeat_file)
     rag_path = Path(args.rag_db_path).resolve()
     rag_data_dir = Path(args.rag_data_dir).resolve()
     rag_api_config = Path(args.rag_api_config).resolve()
@@ -82,6 +98,7 @@ def main() -> None:
     next_report_at = 0.0
     try:
         while True:
+            heartbeat("polling")
             rag_enabled = True
             try:
                 with store.connect().cursor() as cur:
@@ -112,6 +129,7 @@ def main() -> None:
             for situation in pending:
                 if raw_review_waiting(store):
                     break
+                heartbeat("analyzing", situation_id=str(situation["situation_id"]))
                 report, status = analyze_situation(
                     situation,
                     ollama_url=args.ollama_url,
@@ -125,6 +143,7 @@ def main() -> None:
                     timeout_sec=args.timeout_sec,
                 )
                 store.update_ai_report(str(situation["situation_id"]), report, status)
+                heartbeat("completed", situation_id=str(situation["situation_id"]), result=status)
                 log(f"analyzed {situation['situation_id']} status={status}", log_file)
                 next_report_at = time.monotonic() + max(0, args.report_cooldown_seconds)
                 idle_since = time.monotonic()
