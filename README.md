@@ -1,4 +1,4 @@
-﻿# 靖渊 AI 攻击态势感知平台
+﻿# 靖渊智御：AI 驱动的外部 Web 威胁态势感知平台
 
 面向实战流量的端到端安全分析系统，覆盖抓包、检测、LLM 研判、RAG 增强、结果入库、API 服务与前端大屏。
 
@@ -31,7 +31,7 @@
 - 安装包校验：安装后可在发布机器执行 `Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256` 查看
 
 ## GitHub 仓库简介
-`靖渊 AI 攻击态势感知平台：支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库、大屏展示、系统自检、模型切换、靶场测试与安装包部署。`
+`靖渊智御：AI 驱动的外部 Web 威胁态势感知平台，支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库、大屏展示、系统自检、模型切换、靶场测试与安装包部署。`
 
 ## 主要能力
 

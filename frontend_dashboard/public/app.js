@@ -328,11 +328,14 @@ async function bootstrap() {
 
 function normalizeBackgroundUrl(url) {
   const text = String(url || "").trim();
+  if (text === "/assets/bg-main.jpg") {
+    return "/assets/bg-alt.jpg";
+  }
   if (!text || text.includes('"') || text.includes("\\") || text.startsWith("//")) {
-    return "/assets/bg-main.jpg";
+    return "/assets/bg-alt.jpg";
   }
   if (!text.startsWith("/")) {
-    return "/assets/bg-main.jpg";
+    return "/assets/bg-alt.jpg";
   }
   return text;
 }
@@ -353,10 +356,10 @@ function applyHomepageBackground(url) {
 async function loadHomepageBackground() {
   try {
     const data = await api("/api/v2/common/home-background");
-    applyHomepageBackground(data.url || "/assets/bg-main.jpg");
+    applyHomepageBackground(data.url || "/assets/bg-alt.jpg");
   } catch (err) {
     console.warn("load homepage background failed", err);
-    applyHomepageBackground("/assets/bg-main.jpg");
+    applyHomepageBackground("/assets/bg-alt.jpg");
   }
 }
 
@@ -402,8 +405,8 @@ function renderLoginPage() {
           <div class="login-brand">
             <span class="brand-mark">智</span>
             <div>
-              <strong>智御态势</strong>
-              <small>AI Security Situation Center</small>
+              <strong>靖渊智御</strong>
+              <small>AI-Driven External Web Threat Situational Awareness</small>
             </div>
           </div>
           <div class="login-top-actions">
@@ -416,7 +419,7 @@ function renderLoginPage() {
         <div class="login-stage">
           <div class="login-hero-copy">
             <div class="hero-kicker"><i></i> AI-Powered Security Console</div>
-            <h1 class="login-title">AI攻击态势感知平台</h1>
+            <h1 class="login-title">靖渊智御：AI 驱动的外部 Web 威胁态势感知平台</h1>
             <p class="login-subtitle">
               面向 Web 服务与靶场验证的轻量级态势感知系统，融合抓包、分层检测、LLM/RAG 研判、数据大屏与封禁处置。
             </p>
@@ -935,8 +938,8 @@ function renderMainLayout() {
           <span class="brand">
             <span class="brand-icon">智</span>
             <span>
-              <strong>AI攻击态势感知平台</strong>
-              <small>Jingyuan Threat Intelligence</small>
+              <strong>靖渊智御：AI 驱动的外部 Web 威胁态势感知平台</strong>
+              <small>JINGYUAN ZHIYU · AI-DRIVEN EXTERNAL WEB THREAT SITUATIONAL AWARENESS</small>
             </span>
           </span>
           <span class="pill">身份：${ROLE_LABEL[state.profile?.role] || "-"}</span>
@@ -2132,7 +2135,7 @@ function renderSituationAdvice(items, report = {}) {
 function professionalReportButtonLabel(job) {
   if (!job) return "获取专业态势报告";
   if (job.status === "completed") return "查看专业态势报告";
-  if (job.status === "failed") return "重新生成专业报告";
+  if (job.status === "failed") return "专业报告生成失败";
   return `报告生成中 ${Number(job.progress || 0)}%`;
 }
 
@@ -2152,11 +2155,19 @@ async function startProfessionalSituationReport() {
     return;
   }
   const current = await refreshProfessionalReportStatus(false).catch(() => null);
-  if (current?.status === "completed" || current?.status === "running" || current?.status === "queued") {
+  if (current?.status === "completed" || current?.status === "running" || current?.status === "queued" || current?.status === "failed") {
     renderProfessionalReportModal();
-    beginProfessionalReportPolling();
+    if (current.status !== "failed") beginProfessionalReportPolling();
     return;
   }
+  const response = await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/professional-report`, { method: "POST", body: {} });
+  state.situations.professionalReport = response.job || null;
+  renderProfessionalReportModal();
+  beginProfessionalReportPolling();
+}
+
+async function retryProfessionalSituationReport() {
+  if (state.situations.scopeMode !== "single_ip" || !state.situations.selectedId) return;
   const response = await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/professional-report`, { method: "POST", body: {} });
   state.situations.professionalReport = response.job || null;
   renderProfessionalReportModal();
@@ -2185,7 +2196,7 @@ function renderProfessionalReportModal() {
       <span class="section-eyebrow">PROFESSIONAL SITUATION REPORT</span>
       <div class="professional-report-mark ${done ? "done" : failed ? "failed" : ""}"><i></i><i></i><i></i></div>
       <h3 id="professionalReportTitle">${done ? "专业态势报告已生成" : failed ? "专业态势报告生成失败" : "正在生成专业态势报告"}</h3>
-      <p>${done ? "报告已完成事实核验、知识增强与 PDF 排版，可以立即下载。" : failed ? escapeHtml(job.error_message || "生成服务暂时不可用，请稍后重试。") : "大约需要一分钟，退出此界面也可以"}</p>
+      <p>${done ? "报告已完成事实核验、知识增强与 PDF 排版，可以立即下载。" : failed ? escapeHtml(job.error_message || "生成服务暂时不可用，请稍后重试。") : "通常需要 1 至 3 分钟，退出此界面也可以"}</p>
       <div class="professional-report-progress"><span style="width:${progress}%"></span></div>
       <div class="professional-report-stage"><span>${escapeHtml(job.stage || "任务已创建")}</span><strong>${progress}%</strong></div>
       <footer>
@@ -2199,7 +2210,7 @@ function renderProfessionalReportModal() {
   root.querySelector("[data-professional-download]")?.addEventListener("click", downloadProfessionalSituationReport);
   root.querySelector("[data-professional-retry]")?.addEventListener("click", async () => {
     closeProfessionalReportModal();
-    await startProfessionalSituationReport();
+    await retryProfessionalSituationReport();
   });
 }
 
@@ -4664,7 +4675,7 @@ function renderAdminConfigView() {
         <div class="background-uploader">
           <div>
             <h4 class="detail-title">主页背景图</h4>
-            <p id="cfg_home_bg_current" class="panel-sub">当前背景：/assets/bg-main.jpg</p>
+            <p id="cfg_home_bg_current" class="panel-sub">当前背景：/assets/bg-alt.jpg</p>
             <p class="panel-sub">支持 JPG、PNG、WebP，建议使用 1920×1080 或更高分辨率，上传后登录页和数据大屏背景会立即更新。</p>
           </div>
           <input id="cfg_home_background_file" class="file-input" type="file" accept="image/jpeg,image/png,image/webp" />
@@ -4758,7 +4769,7 @@ async function loadAdminConfig() {
   const realtimeToggle = document.getElementById("cfg_llm_realtime_enabled");
   if (realtimeToggle) realtimeToggle.checked = String(map.llm_realtime_enabled || "1") === "1";
   updateRealtimeLlmLabel();
-  applyHomepageBackground(map.homepage_background_url || "/assets/bg-main.jpg");
+  applyHomepageBackground(map.homepage_background_url || "/assets/bg-alt.jpg");
 }
 
 async function saveAdminConfig() {
@@ -4807,15 +4818,15 @@ async function uploadAdminHomepageBackground() {
   const form = new FormData();
   form.append("file", file);
   const data = await apiForm("/api/v2/admin/home-background", form);
-  applyHomepageBackground(data.url || "/assets/bg-main.jpg");
+  applyHomepageBackground(data.url || "/assets/bg-alt.jpg");
   if (input) input.value = "";
   showToast("主页背景图已更新");
   await loadAdminConfig();
 }
 
 async function resetAdminHomepageBackground() {
-  await api("/api/v2/admin/config", { method: "PUT", body: { homepage_background_url: "/assets/bg-main.jpg" } });
-  applyHomepageBackground("/assets/bg-main.jpg");
+  await api("/api/v2/admin/config", { method: "PUT", body: { homepage_background_url: "/assets/bg-alt.jpg" } });
+  applyHomepageBackground("/assets/bg-alt.jpg");
   showToast("已恢复默认背景");
   await loadAdminConfig();
 }

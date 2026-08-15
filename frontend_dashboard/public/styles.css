@@ -51,7 +51,7 @@ body {
   z-index: 0;
   background:
     linear-gradient(160deg, rgba(4, 10, 20, 0.78), rgba(5, 14, 27, 0.68) 42%, rgba(6, 17, 33, 0.62)),
-    var(--homepage-bg-url, url("/assets/bg-main.jpg")) center/cover no-repeat fixed;
+    var(--homepage-bg-url, url("/assets/bg-alt.jpg")) center/cover no-repeat fixed;
   filter: saturate(1.06) contrast(1.06) brightness(0.98);
 }
 
@@ -1728,7 +1728,7 @@ svg {
   border: 1px solid rgba(145, 199, 255, 0.42);
   background:
     linear-gradient(160deg, rgba(4, 10, 20, 0.28), rgba(6, 17, 33, 0.42)),
-    var(--homepage-bg-url, url("/assets/bg-main.jpg")) center/cover no-repeat;
+    var(--homepage-bg-url, url("/assets/bg-alt.jpg")) center/cover no-repeat;
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.04),
     0 16px 36px rgba(0, 0, 0, 0.22);

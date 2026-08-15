@@ -39,6 +39,7 @@ from raw_llm_review import ensure_review_schema
 from situation_professional_report import (
     ProfessionalReportManager,
     create_job as create_professional_report_job,
+    expire_stale_jobs as expire_professional_report_jobs,
     ensure_schema as ensure_professional_report_schema,
     find_job as find_professional_report_job,
     get_job as get_professional_report_job,
@@ -101,7 +102,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_PUBLIC_DIR = PROJECT_ROOT / "frontend_dashboard" / "public"
 DASHBOARD_UPLOAD_DIR = DASHBOARD_PUBLIC_DIR / "uploads"
 AVATAR_UPLOAD_DIR = DASHBOARD_UPLOAD_DIR / "avatars"
-DEFAULT_HOMEPAGE_BACKGROUND = "/assets/bg-main.jpg"
+DEFAULT_HOMEPAGE_BACKGROUND = "/assets/bg-alt.jpg"
 ALLOWED_BACKGROUND_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_BACKGROUND_BYTES = 10 * 1024 * 1024
 ALLOWED_AVATAR_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
@@ -1462,8 +1463,14 @@ def load_system_config_map(conn: Any) -> Dict[str, str]:
 
 def normalize_homepage_background_url(value: str) -> str:
     url = str(value or "").strip()
+    if url == "/assets/bg-main.jpg":
+        return DEFAULT_HOMEPAGE_BACKGROUND
     if not url or not url.startswith("/") or url.startswith("//") or "\\" in url or '"' in url:
         return DEFAULT_HOMEPAGE_BACKGROUND
+    if url.startswith("/uploads/homepage_background_"):
+        upload_path = DASHBOARD_PUBLIC_DIR / url.lstrip("/")
+        if not upload_path.is_file():
+            return DEFAULT_HOMEPAGE_BACKGROUND
     return url[:240]
 
 
@@ -3783,6 +3790,7 @@ def create_app(
         if not item:
             return jsonify({"error": "situation_not_found"}), 404
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=False)) as conn:
+            expire_professional_report_jobs(conn)
             job = create_professional_report_job(conn, item, str(g.session.get("username") or "unknown"))
         manager: ProfessionalReportManager = app.config["PROFESSIONAL_REPORT_MANAGER"]
         if job.get("status") in {"queued", "running"}:
@@ -3796,6 +3804,7 @@ def create_app(
         if not item:
             return jsonify({"error": "situation_not_found"}), 404
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+            expire_professional_report_jobs(conn)
             job = find_professional_report_job(conn, situation_id, str(item.get("sequence_hash") or ""))
         return jsonify({"job": normalize_situation_value(public_professional_report_job(job))})
 
