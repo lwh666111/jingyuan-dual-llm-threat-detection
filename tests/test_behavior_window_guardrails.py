@@ -44,6 +44,15 @@ class BehaviorWindowGuardrailTests(unittest.TestCase):
         self.assertEqual(result["type"], "normal")
         self.assertEqual(result["features"]["distinct_path_count"], 1)
 
+    def test_busy_successful_portal_session_is_not_high_frequency_attack(self) -> None:
+        analyzer = self.analyzer()
+        result = {}
+        for index in range(350):
+            result = analyzer.observe(self.event(f"/api/v1/portal/page-{index % 80}"))
+        self.assertEqual(result["type"], "normal")
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["features"]["not_found_count"], 0)
+
     def test_directory_scan_action_alone_cannot_open_auto_defense_situation(self) -> None:
         action = SecurityAction(
             action_id="ACT-DIR-1",

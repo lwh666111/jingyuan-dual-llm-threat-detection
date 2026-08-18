@@ -18,6 +18,7 @@ from situation_professional_report import (  # noqa: E402
     _sanitize_pdf_text,
     build_snapshot,
     call_bailian,
+    find_latest_completed_job,
     render_pdf,
 )
 
@@ -37,6 +38,23 @@ class FakeResponse:
 
 
 class ProfessionalSituationReportTests(unittest.TestCase):
+    def test_latest_completed_report_survives_attack_chain_revision(self):
+        completed = {"job_id": "SPR-OLD", "status": "completed", "pdf_path": "report.pdf"}
+
+        class Cursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+            def fetchone(self): return completed
+
+        class Connection:
+            def cursor(self): return Cursor()
+
+        row = find_latest_completed_job(Connection(), "SIT-1")
+        self.assertEqual(row["job_id"], "SPR-OLD")
+
     @patch("urllib.request.urlopen", return_value=FakeResponse())
     def test_professional_api_timeout_is_bounded(self, mocked_urlopen):
         call_bailian(

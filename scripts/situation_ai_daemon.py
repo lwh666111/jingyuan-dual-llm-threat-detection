@@ -19,31 +19,6 @@ def log(message: str, path: Path) -> None:
         handle.write(line + "\n")
 
 
-def raw_review_waiting(store: MySQLSituationStore) -> bool:
-    """Yield Ollama to real-time packet review before generating reports."""
-    try:
-        with store.connect().cursor() as cur:
-            cur.execute(
-                "SELECT config_value FROM demo_system_config WHERE config_key='llm_realtime_enabled' LIMIT 1"
-            )
-            config = cur.fetchone() or {}
-            realtime = str(config.get("config_value", "1")).strip().lower() in {"1", "true", "yes", "on"}
-            if realtime:
-                cur.execute(
-                    """SELECT
-                         (SELECT COUNT(*) FROM llm_review_jobs WHERE status IN ('pending','processing'))
-                         + (SELECT COUNT(*) FROM raw_http_logs WHERE event_time >= NOW() - INTERVAL 20 SECOND) AS c"""
-                )
-            else:
-                cur.execute(
-                    "SELECT COUNT(*) AS c FROM llm_review_jobs WHERE status IN ('pending','processing')"
-                )
-            row = cur.fetchone() or {}
-        return int(row.get("c") or 0) > 0
-    except Exception:
-        return False
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate explainable Bailian/RAG reports for attack situations")
     parser.add_argument("--mysql-host", default="127.0.0.1")
@@ -62,7 +37,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--idle-grace-seconds", type=int, default=8)
     parser.add_argument("--report-cooldown-seconds", type=int, default=5)
-    parser.add_argument("--recent-minutes", type=int, default=60)
+    parser.add_argument("--recent-minutes", type=int, default=1440)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--heartbeat-file", default="output/situation_ai_heartbeat.json")
     parser.add_argument("--log-file", default="output/situation_ai_daemon.log")
@@ -72,6 +47,9 @@ def main() -> None:
     store.ensure_schema()
     log_file = Path(args.log_file)
     heartbeat_file = Path(args.heartbeat_file)
+    recovered = store.recover_interrupted_ai()
+    if recovered:
+        log(f"recovered {recovered} interrupted AI report task(s)", log_file)
 
     def heartbeat(status: str, **extra: object) -> None:
         heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -107,42 +85,55 @@ def main() -> None:
                 rag_enabled = str(row.get("config_value", "1")).strip().lower() in {"1", "true", "yes", "on"}
             except Exception:
                 rag_enabled = True
-            if raw_review_waiting(store):
-                idle_since = time.monotonic()
-                if args.once:
-                    break
-                time.sleep(2)
-                continue
             now = time.monotonic()
             if now < next_report_at or now - idle_since < max(0, args.idle_grace_seconds):
                 if args.once:
                     break
                 time.sleep(2)
                 continue
-            # Do not spend the single CPU-only Ollama worker backfilling old
-            # reports after every restart. Historical situations remain
-            # queryable; only newly formed chains enter the live AI queue.
+            # Situation reports use the external Bailian endpoint and therefore
+            # run independently from the local packet-review Ollama worker.
+            # Keep a one-day recovery window so a transient outage cannot leave
+            # a visible situation permanently labelled as queued.
             pending = store.list_pending_ai(
                 args.batch_size,
                 recent_minutes=args.recent_minutes,
             )
             for situation in pending:
-                if raw_review_waiting(store):
-                    break
-                heartbeat("analyzing", situation_id=str(situation["situation_id"]))
-                report, status = analyze_situation(
-                    situation,
-                    ollama_url=args.ollama_url,
-                    model=args.model,
-                    rag_db_path=rag_path,
-                    rag_mysql_conf=rag_mysql_conf,
-                    rag_data_dir=rag_data_dir,
-                    rag_api_config=rag_api_config,
-                    rag_enabled=rag_enabled,
-                    rag_top_k=args.rag_top_k,
-                    timeout_sec=args.timeout_sec,
+                situation_id = str(situation["situation_id"])
+                sequence_hash = str(situation.get("sequence_hash") or "")
+                if not store.mark_ai_processing(situation_id, sequence_hash):
+                    continue
+                heartbeat("analyzing", situation_id=situation_id)
+                try:
+                    report, status = analyze_situation(
+                        situation,
+                        ollama_url=args.ollama_url,
+                        model=args.model,
+                        rag_db_path=rag_path,
+                        rag_mysql_conf=rag_mysql_conf,
+                        rag_data_dir=rag_data_dir,
+                        rag_api_config=rag_api_config,
+                        rag_enabled=rag_enabled,
+                        rag_top_k=args.rag_top_k,
+                        timeout_sec=args.timeout_sec,
+                    )
+                except Exception as exc:
+                    store.mark_ai_retry(situation_id, sequence_hash)
+                    heartbeat("retry", situation_id=situation_id, error=str(exc))
+                    log(f"AI report failed {situation_id}: {exc}", log_file)
+                    continue
+                updated = store.update_ai_report(
+                    situation_id,
+                    report,
+                    status,
+                    expected_sequence_hash=sequence_hash,
                 )
-                store.update_ai_report(str(situation["situation_id"]), report, status)
+                if not updated:
+                    heartbeat("superseded", situation_id=str(situation["situation_id"]))
+                    log(f"discarded stale report {situation['situation_id']} because the attack chain changed", log_file)
+                    idle_since = time.monotonic()
+                    continue
                 heartbeat("completed", situation_id=str(situation["situation_id"]), result=status)
                 log(f"analyzed {situation['situation_id']} status={status}", log_file)
                 next_report_at = time.monotonic() + max(0, args.report_cooldown_seconds)

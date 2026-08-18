@@ -7,9 +7,7 @@ generation path remains unchanged.
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
 import math
 import os
@@ -19,10 +17,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -501,9 +498,20 @@ def list_documents(conn: Any, kb_id: int) -> List[Dict[str, Any]]:
         return list(cur.fetchall())
 
 
-def list_chunks(conn: Any, kb_id: int, document_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    sql = """SELECT c.*,d.name AS document_name FROM rag_chunks c
-             JOIN rag_documents d ON d.id=c.document_id WHERE c.kb_id=%s"""
+def list_chunks(
+    conn: Any,
+    kb_id: int,
+    document_id: Optional[int] = None,
+    *,
+    include_content: bool = True,
+) -> List[Dict[str, Any]]:
+    columns = "c.*" if include_content else """
+        c.id,c.document_id,c.chunk_index,c.title_path,c.token_count,
+        c.enabled,c.retrieval_count,c.updated_at,
+        LEFT(c.content, 160) AS content_preview
+    """
+    sql = f"""SELECT {columns},d.name AS document_name FROM rag_chunks c
+              JOIN rag_documents d ON d.id=c.document_id WHERE c.kb_id=%s"""
     params: List[Any] = [kb_id]
     if document_id:
         sql += " AND c.document_id=%s"
@@ -512,6 +520,16 @@ def list_chunks(conn: Any, kb_id: int, document_id: Optional[int] = None) -> Lis
     with conn.cursor() as cur:
         cur.execute(sql, tuple(params))
         return list(cur.fetchall())
+
+
+def get_chunk(conn: Any, chunk_id: int) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT c.*,d.name AS document_name FROM rag_chunks c
+               JOIN rag_documents d ON d.id=c.document_id WHERE c.id=%s""",
+            (int(chunk_id),),
+        )
+        return cur.fetchone()
 
 
 def ingest_file(

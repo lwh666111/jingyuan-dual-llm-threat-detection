@@ -179,6 +179,8 @@ body {
 .rag3-chunk-list h4 { margin: 13px 0 8px; color: #e8f7ff; }
 .rag3-chunk-list p { margin: 0; color: rgba(198, 220, 235, .74); line-height: 1.75; white-space: pre-wrap; }
 .rag3-chunk-list footer { margin-top: 12px; color: rgba(177, 204, 222, .45); font-size: 11px; }
+.rag3-chunk-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding-top: 14px; color: rgba(196, 221, 237, .72); font-size: 12px; }
+.rag3-chunk-pager .btn { min-width: 86px; }
 .rag3-recall-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) 380px; min-height: calc(100vh - 235px); }
 .rag3-recall-layout > main { padding: 20px; background: radial-gradient(circle at 50% 20%, rgba(33, 112, 172, .11), transparent 42%); }
 .rag3-recall-layout > main > header { display: flex; justify-content: space-between; align-items: center; }
@@ -4108,6 +4110,29 @@ body.modal-open {
 .situation-ai-report,
 .situation-evidence-list { min-height: 320px; padding: 20px; }
 .situation-report-placeholder { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 270px; color: var(--text-muted); text-align: center; }
+.situation-ai-queue-card {
+  width: min(680px, calc(100% - 40px));
+  margin: 34px auto;
+  padding: 22px 24px;
+  border: 1px solid rgba(84, 184, 244, 0.28);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(24, 73, 110, 0.26), rgba(6, 26, 43, 0.78));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 18px 36px rgba(0, 9, 22, 0.2);
+}
+.situation-ai-queue-head,
+.situation-ai-queue-foot { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.situation-ai-queue-head span { display: inline-flex; align-items: center; gap: 10px; color: #dff5ff; font-weight: 620; }
+.situation-ai-queue-head strong { color: #71d6ff; font: 600 12px var(--font-mono); white-space: nowrap; }
+.situation-ai-queue-progress { height: 8px; margin: 18px 0 14px; overflow: hidden; border-radius: 99px; background: rgba(104, 171, 215, 0.13); }
+.situation-ai-queue-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #238de0, #58d8ff); box-shadow: 0 0 16px rgba(67, 190, 250, 0.45); transition: width 0.55s var(--ease-out); }
+.situation-ai-queue-progress.is-processing span { position: relative; overflow: hidden; }
+.situation-ai-queue-progress.is-processing span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.58), transparent); transform: translateX(-100%); animation: situationQueueSweep 1.35s ease-in-out infinite; }
+.situation-ai-queue-foot p { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+@keyframes situationQueueSweep { to { transform: translateX(100%); } }
+@media (max-width: 720px) {
+  .situation-ai-queue-card { width: calc(100% - 24px); padding: 18px; }
+  .situation-ai-queue-foot { align-items: stretch; flex-direction: column; }
+}
 .situation-report-lead { padding: 18px 20px; border: 1px solid rgba(91, 171, 229, 0.25); border-radius: 17px; background: linear-gradient(120deg, rgba(59, 148, 215, 0.12), rgba(41, 95, 139, 0.04)); }
 .situation-report-lead span { color: #7ed2ff; font: 10px var(--font-mono); letter-spacing: 0.13em; }
 .situation-report-lead p { margin: 9px 0 0; color: #e9f6ff; line-height: 1.8; }

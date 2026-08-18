@@ -2,15 +2,13 @@
 
 import argparse
 import json
-import random
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from urllib.parse import quote_plus
 
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 
-from security_detection_v2 import DetectionEngineV2, extract_request_from_record, is_simple_page_view, payload_model_text
+from security_detection_v2 import DetectionEngineV2, extract_request_from_record, is_simple_page_view
 from train_payload_model_v2 import make_record
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

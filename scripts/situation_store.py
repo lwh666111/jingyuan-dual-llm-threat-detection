@@ -57,12 +57,15 @@ MYSQL_DDL = [
       risk_level VARCHAR(24) NOT NULL DEFAULT 'low',
       sequence_hash VARCHAR(64) NOT NULL,
       ai_status VARCHAR(24) NOT NULL DEFAULT 'pending',
+      ai_priority INT NOT NULL DEFAULT 0,
+      ai_queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       ai_report_json LONGTEXT NULL,
       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
       KEY idx_situation_source_time (source_ip, last_action_at),
       KEY idx_situation_status_time (status, last_action_at),
-      KEY idx_situation_risk_time (risk_level, last_action_at)
+      KEY idx_situation_risk_time (risk_level, last_action_at),
+      KEY idx_situation_ai_queue (ai_status, ai_priority, ai_queued_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
@@ -176,6 +179,21 @@ class MySQLSituationStore:
             with conn.cursor() as cur:
                 for ddl in MYSQL_DDL:
                     cur.execute(ddl)
+                cur.execute("SHOW COLUMNS FROM attack_situations LIKE 'ai_priority'")
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE attack_situations ADD COLUMN ai_priority INT NOT NULL DEFAULT 0 AFTER ai_status")
+                cur.execute("SHOW COLUMNS FROM attack_situations LIKE 'ai_queued_at'")
+                if not cur.fetchone():
+                    cur.execute(
+                        "ALTER TABLE attack_situations ADD COLUMN ai_queued_at DATETIME(3) "
+                        "NOT NULL DEFAULT CURRENT_TIMESTAMP(3) AFTER ai_priority"
+                    )
+                cur.execute("SHOW INDEX FROM attack_situations WHERE Key_name='idx_situation_ai_queue'")
+                if not cur.fetchone():
+                    cur.execute(
+                        "ALTER TABLE attack_situations ADD INDEX idx_situation_ai_queue "
+                        "(ai_status,ai_priority,ai_queued_at)"
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -258,6 +276,9 @@ class MySQLSituationStore:
                       current_stage=VALUES(current_stage), risk_score=VALUES(risk_score),
                       risk_level=VALUES(risk_level),
                       ai_status=IF(sequence_hash<>VALUES(sequence_hash),'pending',ai_status),
+                      ai_priority=IF(sequence_hash<>VALUES(sequence_hash),0,ai_priority),
+                      ai_queued_at=IF(sequence_hash<>VALUES(sequence_hash),UTC_TIMESTAMP(3),ai_queued_at),
+                      ai_report_json=IF(sequence_hash<>VALUES(sequence_hash),NULL,ai_report_json),
                       sequence_hash=VALUES(sequence_hash)
                     """,
                     (
@@ -323,6 +344,7 @@ class MySQLSituationStore:
         minimum_risk: float = 0.0,
         lookback_hours: int = 0,
         include_observing: bool = False,
+        include_ai_report: bool = False,
     ) -> List[Dict[str, Any]]:
         where = ["risk_score >= %s"]
         values: List[Any] = [max(0.0, min(1.0, float(minimum_risk)))]
@@ -341,10 +363,11 @@ class MySQLSituationStore:
         # Time-bounded correlation needs more than the latest page; normal list APIs stay capped at 500.
         limit_cap = 5000 if lookback else 500
         values.extend([max(1, min(limit_cap, int(limit))), max(0, int(offset))])
+        report_column = ",ai_report_json" if include_ai_report else ""
         sql = f"""
             SELECT situation_id,source_ip,target_asset,started_at,last_action_at,status,
                    distinct_action_types,total_action_count,current_stage,risk_score,
-                   risk_level,sequence_hash,ai_status,ai_report_json
+                   risk_level,sequence_hash,ai_status{report_column}
             FROM attack_situations WHERE {' AND '.join(where)}
             ORDER BY last_action_at DESC LIMIT %s OFFSET %s
         """
@@ -355,8 +378,9 @@ class MySQLSituationStore:
         # PyMySQL starts a transaction for SELECT when autocommit is disabled.
         # End it explicitly so long-running daemons never retain metadata locks.
         conn.commit()
-        for row in rows:
-            row["ai_report"] = json_value(row.pop("ai_report_json", None), None)
+        if include_ai_report:
+            for row in rows:
+                row["ai_report"] = json_value(row.pop("ai_report_json", None), None)
         return rows
 
     def list_actions(
@@ -405,6 +429,7 @@ class MySQLSituationStore:
             minimum_risk=minimum_risk,
             lookback_hours=lookback_hours,
             include_observing=include_observing,
+            include_ai_report=True,
         )
         ids = [str(row.get("situation_id") or "") for row in situations if row.get("situation_id")]
         if not ids:
@@ -489,9 +514,9 @@ class MySQLSituationStore:
                 """
                 SELECT situation_id FROM attack_situations
                 WHERE ai_status IN ('pending','retry')
-                  AND status IN ('open','closed')
-                  AND last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE
-                ORDER BY last_action_at DESC,risk_score DESC LIMIT %s
+                  AND (status IN ('open','closed') OR ai_priority > 0)
+                  AND (last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE OR ai_priority > 0)
+                ORDER BY ai_priority DESC,ai_queued_at ASC,risk_score DESC,situation_id ASC LIMIT %s
                 """,
                 (max(1, int(recent_minutes)), max(1, min(100, int(limit)))),
             )
@@ -499,14 +524,190 @@ class MySQLSituationStore:
         conn.commit()
         return [row for row in (self.get_situation(item_id) for item_id in ids) if row]
 
-    def update_ai_report(self, situation_id: str, report: Dict[str, Any], status: str = "complete") -> bool:
+    def get_ai_queue_status(self, situation_id: str, *, recent_minutes: int = 1440) -> Optional[Dict[str, Any]]:
+        conn = self.connect()
+        recent_minutes = max(1, int(recent_minutes))
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT situation_id,ai_status,ai_priority,ai_queued_at,risk_score "
+                "FROM attack_situations WHERE situation_id=%s",
+                (situation_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.commit()
+                return None
+            status = str(row.get("ai_status") or "pending")
+            if status == "processing":
+                ahead = 0
+            elif status in {"pending", "retry"}:
+                cur.execute(
+                    "SELECT COUNT(*) AS total FROM attack_situations "
+                    "WHERE ai_status='processing' AND (status IN ('open','closed') OR ai_priority > 0)"
+                )
+                processing_ahead = int((cur.fetchone() or {}).get("total") or 0)
+                cur.execute(
+                    """SELECT COUNT(*) AS total FROM attack_situations
+                       WHERE ai_status IN ('pending','retry') AND (status IN ('open','closed') OR ai_priority > 0)
+                         AND (last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE OR ai_priority > 0)
+                         AND (
+                           ai_priority > %s OR
+                           (ai_priority=%s AND ai_queued_at < %s) OR
+                           (ai_priority=%s AND ai_queued_at=%s AND risk_score > %s) OR
+                           (ai_priority=%s AND ai_queued_at=%s AND risk_score=%s AND situation_id < %s)
+                         )""",
+                    (
+                        recent_minutes,
+                        int(row.get("ai_priority") or 0), int(row.get("ai_priority") or 0), row["ai_queued_at"],
+                        int(row.get("ai_priority") or 0), row["ai_queued_at"], float(row.get("risk_score") or 0),
+                        int(row.get("ai_priority") or 0), row["ai_queued_at"], float(row.get("risk_score") or 0), situation_id,
+                    ),
+                )
+                ahead = processing_ahead + int((cur.fetchone() or {}).get("total") or 0)
+            else:
+                ahead = 0
+            cur.execute(
+                "SELECT COUNT(*) AS total FROM attack_situations "
+                "WHERE ai_status IN ('pending','retry','processing') "
+                "AND (status IN ('open','closed') OR ai_priority > 0) "
+                "AND (ai_status='processing' OR last_action_at >= UTC_TIMESTAMP(3) - INTERVAL %s MINUTE OR ai_priority > 0)",
+                (recent_minutes,),
+            )
+            total = int((cur.fetchone() or {}).get("total") or 0)
+        conn.commit()
+        position = ahead + 1 if status in {"pending", "retry"} else (1 if status == "processing" else 0)
+        return {
+            "status": status,
+            "queue_ahead": ahead,
+            "queue_position": position,
+            "queue_total": total,
+            "priority": int(row.get("ai_priority") or 0),
+            "prioritized": int(row.get("ai_priority") or 0) > 0,
+            "progress_percent": 100 if status == "processing" else (round(100 / max(1, position)) if position else 100),
+        }
+
+    def prioritize_ai(self, situation_id: str) -> Optional[Dict[str, Any]]:
         conn = self.connect()
         try:
             with conn.cursor() as cur:
-                affected = cur.execute(
-                    "UPDATE attack_situations SET ai_status=%s,ai_report_json=%s WHERE situation_id=%s",
-                    (status, json_text(report), situation_id),
+                cur.execute(
+                    "SELECT ai_status,ai_priority FROM attack_situations WHERE situation_id=%s FOR UPDATE",
+                    (situation_id,),
                 )
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+                if str(row.get("ai_status") or "") in {"pending", "retry"} and int(row.get("ai_priority") or 0) <= 0:
+                    cur.execute("SELECT COALESCE(MAX(ai_priority),0)+1 AS priority FROM attack_situations")
+                    priority = int((cur.fetchone() or {}).get("priority") or 1)
+                    cur.execute(
+                        "UPDATE attack_situations SET ai_priority=%s WHERE situation_id=%s",
+                        (priority, situation_id),
+                    )
+            conn.commit()
+            return self.get_ai_queue_status(situation_id)
+        except Exception:
+            conn.rollback()
+            raise
+
+    def requeue_ai(self, situation_id: str) -> Optional[Dict[str, Any]]:
+        """Queue a fresh report without blocking the API request on the AI provider."""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ai_status,ai_priority FROM attack_situations WHERE situation_id=%s FOR UPDATE",
+                    (situation_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+                status = str(row.get("ai_status") or "")
+                if status == "processing":
+                    conn.commit()
+                    return self.get_ai_queue_status(situation_id)
+                cur.execute("SELECT COALESCE(MAX(ai_priority),0)+1 AS priority FROM attack_situations")
+                priority = int((cur.fetchone() or {}).get("priority") or 1)
+                cur.execute(
+                    """UPDATE attack_situations
+                       SET ai_status='retry',ai_priority=%s,ai_queued_at=UTC_TIMESTAMP(3),ai_report_json=NULL
+                       WHERE situation_id=%s""",
+                    (priority, situation_id),
+                )
+            conn.commit()
+            return self.get_ai_queue_status(situation_id)
+        except Exception:
+            conn.rollback()
+            raise
+
+    def recover_interrupted_ai(self) -> int:
+        """Return work abandoned by a stopped AI daemon to the pending queue."""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                affected = cur.execute("UPDATE attack_situations SET ai_status='retry' WHERE ai_status='processing'")
+            conn.commit()
+            return int(affected or 0)
+        except Exception:
+            conn.rollback()
+            raise
+
+    def mark_ai_retry(self, situation_id: str, expected_sequence_hash: str = "") -> bool:
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                sql = "UPDATE attack_situations SET ai_status='retry' WHERE situation_id=%s AND ai_status='processing'"
+                params: List[Any] = [situation_id]
+                if expected_sequence_hash:
+                    sql += " AND sequence_hash=%s"
+                    params.append(expected_sequence_hash)
+                affected = cur.execute(sql, tuple(params))
+            conn.commit()
+            return bool(affected)
+        except Exception:
+            conn.rollback()
+            raise
+
+    def mark_ai_processing(self, situation_id: str, expected_sequence_hash: str = "") -> bool:
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                sql = "UPDATE attack_situations SET ai_status='processing' WHERE situation_id=%s AND ai_status IN ('pending','retry')"
+                params: List[Any] = [situation_id]
+                if expected_sequence_hash:
+                    sql += " AND sequence_hash=%s"
+                    params.append(expected_sequence_hash)
+                affected = cur.execute(sql, tuple(params))
+            conn.commit()
+            return bool(affected)
+        except Exception:
+            conn.rollback()
+            raise
+
+    def update_ai_report(
+        self,
+        situation_id: str,
+        report: Dict[str, Any],
+        status: str = "complete",
+        *,
+        expected_sequence_hash: str = "",
+    ) -> bool:
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                if expected_sequence_hash:
+                    affected = cur.execute(
+                        """UPDATE attack_situations SET ai_status=%s,ai_priority=0,ai_report_json=%s
+                           WHERE situation_id=%s AND sequence_hash=%s""",
+                        (status, json_text(report), situation_id, expected_sequence_hash),
+                    )
+                else:
+                    affected = cur.execute(
+                        "UPDATE attack_situations SET ai_status=%s,ai_priority=0,ai_report_json=%s WHERE situation_id=%s",
+                        (status, json_text(report), situation_id),
+                    )
             conn.commit()
             return bool(affected)
         except Exception:

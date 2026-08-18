@@ -1,6 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 const { URL } = require("url");
 
 const HOST = process.env.DASHBOARD_HOST || "0.0.0.0";
@@ -34,6 +35,28 @@ function readBody(req) {
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
+  });
+}
+
+function sendBuffer(req, res, statusCode, headers, data) {
+  const contentType = String(headers["Content-Type"] || "").toLowerCase();
+  const acceptsGzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""));
+  const compressible = /json|javascript|text\/|svg\+xml/.test(contentType);
+  if (!acceptsGzip || !compressible || data.length < 1024) {
+    res.writeHead(statusCode, headers);
+    return res.end(data);
+  }
+  zlib.gzip(data, { level: zlib.constants.Z_BEST_SPEED }, (err, compressed) => {
+    if (err) {
+      res.writeHead(statusCode, headers);
+      return res.end(data);
+    }
+    res.writeHead(statusCode, {
+      ...headers,
+      "Content-Encoding": "gzip",
+      "Vary": "Accept-Encoding",
+    });
+    res.end(compressed);
   });
 }
 
@@ -85,14 +108,13 @@ async function proxyRequest(req, res, upstreamPath, searchParams) {
     }
 
     const data = Buffer.from(await upstream.arrayBuffer());
-    res.writeHead(upstream.status, outputHeaders);
-    res.end(data);
+    sendBuffer(req, res, upstream.status, outputHeaders, data);
   } catch (err) {
     sendJson(res, 502, { error: "upstream_unreachable", detail: String(err) });
   }
 }
 
-function serveStatic(reqPath, res) {
+function serveStatic(req, reqPath, res) {
   const relative = reqPath === "/" ? "/index.html" : reqPath;
   const safePath = path.normalize(relative).replace(/^(\.\.[/\\])+/, "");
   const fullPath = path.join(PUBLIC_DIR, safePath);
@@ -109,13 +131,11 @@ function serveStatic(reqPath, res) {
     }
     const ext = path.extname(fullPath).toLowerCase();
     const contentType = MIME_TYPES[ext] || "application/octet-stream";
-    res.writeHead(200, {
+    const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=60, must-revalidate";
+    sendBuffer(req, res, 200, {
       "Content-Type": contentType,
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-      "Pragma": "no-cache",
-      "Expires": "0",
-    });
-    res.end(data);
+      "Cache-Control": cacheControl,
+    }, data);
   });
 }
 
@@ -153,7 +173,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET") {
-    return serveStatic(reqUrl.pathname, res);
+    return serveStatic(req, reqUrl.pathname, res);
   }
 
   sendJson(res, 405, { error: "method_not_allowed" });

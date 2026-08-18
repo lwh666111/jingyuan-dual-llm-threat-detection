@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_analyzer_daemon import format_rag_context, retrieve_rag_docs
 

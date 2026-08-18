@@ -259,6 +259,7 @@ const state = {
     clusterWindowMinutes: 60,
     professionalReport: null,
     professionalReportPoll: null,
+    aiQueuePoll: null,
     clusterLookbackHours: 720,
   },
 };
@@ -2082,8 +2083,37 @@ function renderSituationAiReport(detail) {
       : formatAiStatus(detail.ai_status, report);
   }
   if (!report) {
-    container.innerHTML = `<div class="situation-report-placeholder"><i class="live-pulse"></i> 研判任务已入队，百炼 API 完成后将自动刷新</div>`;
+    const status = String(detail.ai_status || "pending").toLowerCase();
+    const pending = state.situations.scopeMode === "single_ip" && ["pending", "retry", "processing"].includes(status);
+    const queue = detail.ai_queue || {};
+    const ahead = Math.max(0, Number(queue.queue_ahead || 0));
+    const position = Math.max(1, Number(queue.queue_position || ahead + 1));
+    const total = Math.max(position, Number(queue.queue_total || position));
+    const processing = status === "processing";
+    const queueProgress = processing ? 88 : Math.max(6, Math.min(96, Number(queue.progress_percent || Math.round(100 / position))));
+    const prioritized = Boolean(queue.prioritized);
+    container.innerHTML = pending
+      ? `<div class="situation-ai-queue-card">
+          <div class="situation-ai-queue-head">
+            <span><i class="live-pulse"></i>${processing ? "百炼 API 正在研判" : "AI 研判任务已入队"}</span>
+            <strong>${processing ? "正在生成" : `第 ${position} / ${total} 位`}</strong>
+          </div>
+          <div class="situation-ai-queue-progress${processing ? " is-processing" : ""}" role="progressbar" aria-label="${processing ? "报告生成进度" : "AI 研判排队进度"}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${queueProgress}">
+            <span style="width:${queueProgress}%"></span>
+          </div>
+          <div class="situation-ai-queue-foot">
+            <p>${processing ? "报告完成后页面将自动刷新" : ahead ? `前方还有 ${ahead} 个任务，系统将按顺序自动生成` : "当前已在队首，即将开始生成"}</p>
+            ${processing ? "" : `<button class="btn btn-primary btn-mini" data-prioritize-ai-report type="button" ${prioritized ? "disabled" : ""}>${prioritized ? "已优先生成" : "优先生成"}</button>`}
+          </div>
+        </div>`
+      : `<div class="situation-report-placeholder">当前态势尚无可用报告，可由管理员重新研判</div>`;
+    container.querySelector("[data-prioritize-ai-report]")?.addEventListener("click", prioritizeSelectedSituationReport);
+    if (pending) beginSituationAiQueuePolling();
     return;
+  }
+  if (state.situations.aiQueuePoll) {
+    clearTimeout(state.situations.aiQueuePoll);
+    state.situations.aiQueuePoll = null;
   }
   container.innerHTML = `
     <header class="situation-report-lead">
@@ -2110,6 +2140,51 @@ function renderSituationAiReport(detail) {
       <summary>证据边界与不确定性</summary>
       ${renderSituationAdvice(report.evidence_limitations, report)}
     </details>`;
+}
+
+async function prioritizeSelectedSituationReport() {
+  const situationId = state.situations.selectedId;
+  if (!situationId || state.situations.scopeMode !== "single_ip") return;
+  const button = document.querySelector("[data-prioritize-ai-report]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在提升优先级";
+  }
+  try {
+    const response = await api(`/api/v2/situations/${encodeURIComponent(situationId)}/prioritize-report`, { method: "POST", body: {} });
+    if (state.situations.detail && state.situations.selectedId === situationId) {
+      state.situations.detail.ai_queue = response.queue || state.situations.detail.ai_queue;
+      renderSituationAiReport(state.situations.detail);
+    }
+    showToast("已提升到 AI 研判待处理队首");
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "优先生成";
+    }
+    showToast(`优先生成失败：${error.message}`);
+  }
+}
+
+function beginSituationAiQueuePolling() {
+  if (state.situations.aiQueuePoll) clearTimeout(state.situations.aiQueuePoll);
+  const situationId = state.situations.selectedId;
+  const poll = async () => {
+    if (!situationId || state.currentView !== "situations" || state.situations.selectedId !== situationId) {
+      state.situations.aiQueuePoll = null;
+      return;
+    }
+    try {
+      const response = await api(`/api/v2/situations/${encodeURIComponent(situationId)}`);
+      if (state.situations.selectedId !== situationId) return;
+      state.situations.detail = response.item || state.situations.detail;
+      state.situations.aiQueuePoll = null;
+      renderSituationAiReport(state.situations.detail || {});
+    } catch (_) {
+      state.situations.aiQueuePoll = setTimeout(poll, 3000);
+    }
+  };
+  state.situations.aiQueuePoll = setTimeout(poll, 1200);
 }
 
 function normalizeSituationReportTime(value, report = {}) {
@@ -2482,7 +2557,7 @@ async function reanalyzeSelectedSituation() {
     } else {
       await api(`/api/v2/situations/${encodeURIComponent(state.situations.selectedId)}/reanalyze`, { method: "POST", body: {} });
     }
-    showToast("AI 态势报告已更新");
+    showToast(state.situations.scopeMode === "cross_ip" ? "AI 态势报告已更新" : "已加入 AI 研判队列");
     if (state.situations.scopeMode !== "cross_ip") await loadSituationDetail(state.situations.selectedId);
   } catch (error) {
     showToast(`重新研判失败：${error.message}`);
@@ -2872,24 +2947,29 @@ function collectProFilters() {
   return state.pro.filters;
 }
 
+function buildProEventParams(filters, page, pageSize) {
+  const params = new URLSearchParams();
+  params.set("time_range", filters.time_range);
+  params.set("risk_level", filters.risk_level);
+  params.set("attack_type", filters.attack_type);
+  params.set("target_port", filters.target_port);
+  params.set("process_status", filters.process_status);
+  if (filters.keyword) params.set("keyword", filters.keyword);
+  if (filters.time_range === "custom") {
+    if (filters.start_time) params.set("start_time", new Date(filters.start_time).toISOString());
+    if (filters.end_time) params.set("end_time", new Date(filters.end_time).toISOString());
+  }
+  params.set("page", String(page));
+  params.set("page_size", String(pageSize));
+  return params;
+}
+
 async function loadProEvents(forcePageOne = false) {
   if (forcePageOne) {
     state.pro.listPage = 1;
   }
   const f = collectProFilters();
-  const params = new URLSearchParams();
-  params.set("time_range", f.time_range);
-  params.set("risk_level", f.risk_level);
-  params.set("attack_type", f.attack_type);
-  params.set("target_port", f.target_port);
-  params.set("process_status", f.process_status);
-  if (f.keyword) params.set("keyword", f.keyword);
-  if (f.time_range === "custom") {
-    if (f.start_time) params.set("start_time", new Date(f.start_time).toISOString());
-    if (f.end_time) params.set("end_time", new Date(f.end_time).toISOString());
-  }
-  params.set("page", String(state.pro.listPage));
-  params.set("page_size", String(state.pro.pageSize));
+  const params = buildProEventParams(f, state.pro.listPage, state.pro.pageSize);
 
   const data = await api(`/api/v2/pro/events?${params.toString()}`);
   state.pro.items = Array.isArray(data.items) ? data.items : [];
@@ -3552,22 +3632,51 @@ async function unblockProEventIp(eventId) {
   }
 }
 
-function exportProEventsCsv() {
-  if (!state.pro.items.length) {
-    showToast("暂无可导出数据");
-    return;
+async function exportProEventsCsv() {
+  const button = document.getElementById("pro_export");
+  if (button) button.disabled = true;
+  try {
+    const filters = collectProFilters();
+    const pageSize = 200;
+    const maxRows = 10000;
+    let page = 1;
+    let total = 0;
+    const items = [];
+    do {
+      const params = buildProEventParams(filters, page, pageSize);
+      const data = await api(`/api/v2/pro/events?${params.toString()}`);
+      const batch = Array.isArray(data.items) ? data.items : [];
+      total = Number(data.total || 0);
+      items.push(...batch);
+      page += 1;
+      if (!batch.length) break;
+    } while (items.length < Math.min(total, maxRows));
+
+    if (!items.length) {
+      showToast("暂无可导出数据");
+      return;
+    }
+    const rows = items.slice(0, maxRows).map((x) => ({
+      事件ID: x.event_id,
+      发生时间: x.occurred_at,
+      风险等级: formatRiskLevel(x.risk_level),
+      攻击类型: formatAttackType(x.attack_type),
+      来源IP: x.source_ip,
+      来源地区: x.source_region || "未知",
+      攻击端口: x.target_port == null ? "-" : x.target_port,
+      被攻击接口: x.target_interface || "-",
+      IP封禁情况: Number(x.ip_blocked || 0) === 1 ? "已封禁" : "未封禁",
+      处理状态: formatProcessStatus(x.process_status),
+      "响应耗时(ms)": x.response_ms == null ? "-" : x.response_ms,
+    }));
+    const date = new Date().toISOString().slice(0, 10);
+    downloadCsv(`攻击事件明细_${date}.csv`, rows);
+    showToast(total > maxRows ? `已导出最新 ${maxRows} 条（共 ${total} 条）` : `已导出 ${rows.length} 条攻击事件`);
+  } catch (error) {
+    showToast(`导出失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
   }
-  const rows = state.pro.items.map((x) => ({
-    event_id: x.event_id,
-    occurred_at: x.occurred_at,
-    risk_level: x.risk_level,
-    attack_type: x.attack_type,
-    source_ip: x.source_ip,
-    target_port: x.target_port,
-    ip_blocked: Number(x.ip_blocked || 0) === 1 ? "已封禁" : "未封禁",
-    process_status: x.process_status,
-  }));
-  downloadCsv("pro_events_export.csv", rows);
 }
 
 function renderRagSettingsView() {
@@ -4717,7 +4826,7 @@ function renderAdminConfigView() {
   document.getElementById("adm_export_report")?.addEventListener("click", () => exportAdminReport());
   document.getElementById("adm_bg_upload")?.addEventListener("click", () => uploadAdminHomepageBackground());
   document.getElementById("adm_bg_reset")?.addEventListener("click", () => resetAdminHomepageBackground());
-  document.getElementById("cfg_llm_realtime_enabled")?.addEventListener("change", updateRealtimeLlmLabel);
+  document.getElementById("cfg_llm_realtime_enabled")?.addEventListener("change", persistRealtimeLlmToggle);
   document.getElementById("adm_emergency_reset")?.addEventListener("click", () => emergencyResetTasks());
   loadAdminConfig()
     .then(async () => {
@@ -4802,6 +4911,29 @@ function updateRealtimeLlmLabel() {
   const enabled = Boolean(document.getElementById("cfg_llm_realtime_enabled")?.checked);
   const label = document.getElementById("cfg_llm_realtime_label");
   if (label) label.textContent = enabled ? "已开启" : "已关闭";
+}
+
+async function persistRealtimeLlmToggle() {
+  const toggle = document.getElementById("cfg_llm_realtime_enabled");
+  if (!toggle) return;
+  const enabled = Boolean(toggle.checked);
+  const previous = !enabled;
+  updateRealtimeLlmLabel();
+  toggle.disabled = true;
+  try {
+    await api("/api/v2/admin/config", {
+      method: "PUT",
+      body: { llm_realtime_enabled: enabled ? "1" : "0" },
+    });
+    if (state.admin.config) state.admin.config.llm_realtime_enabled = enabled ? "1" : "0";
+    showToast(enabled ? "大模型实时研判已开启并立即生效" : "大模型实时研判已关闭");
+  } catch (error) {
+    toggle.checked = previous;
+    updateRealtimeLlmLabel();
+    showToast(`大模型研判配置保存失败：${error.message}`);
+  } finally {
+    toggle.disabled = false;
+  }
 }
 
 async function uploadAdminHomepageBackground() {
@@ -5616,6 +5748,9 @@ function formatAttackType(attackType) {
     xxe: "XXE外部实体",
     ssti: "SSTI模板注入",
     deserialization: "反序列化",
+    fastjson: "Fastjson反序列化探测",
+    "fastjson反序列化探测": "Fastjson反序列化探测",
+    "fastjson autotype反序列化探测": "Fastjson反序列化探测",
     "dangerous file upload": "危险文件上传",
     dangerous_file_upload: "危险文件上传",
     "graphql introspection": "GraphQL探测",
@@ -5771,10 +5906,14 @@ function downloadCsv(filename, rows) {
   const headers = Object.keys(rows[0]);
   const lines = [headers.join(",")];
   rows.forEach((row) => {
-    const vals = headers.map((h) => `"${String(row[h] ?? "").replaceAll('"', '""')}"`);
+    const vals = headers.map((h) => {
+      let value = String(row[h] ?? "");
+      if (/^[=+\-@]/.test(value)) value = `'${value}`;
+      return `"${value.replaceAll('"', '""')}"`;
+    });
     lines.push(vals.join(","));
   });
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const blob = new Blob(["\ufeff", lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -5802,6 +5941,9 @@ function rag3State() {
       evalCases: [],
       evalRuns: [],
       evalResult: null,
+      chunkPage: 1,
+      chunkPageSize: 60,
+      loaded: { documents: false, chunks: false, recall: false, evaluation: false },
       busy: false,
     };
   }
@@ -6182,6 +6324,13 @@ async function rag3OpenWorkspace(kbId, tab = "documents") {
   const data = await api(`/api/v3/rag/knowledge-bases/${kbId}`);
   workspace.selectedKb = data.item;
   workspace.detailTab = tab;
+  workspace.documents = [];
+  workspace.chunks = [];
+  workspace.recallHistory = [];
+  workspace.evalCases = [];
+  workspace.evalRuns = [];
+  workspace.chunkPage = 1;
+  workspace.loaded = { documents: false, chunks: false, recall: false, evaluation: false };
   await rag3LoadWorkspaceData();
   rag3RenderWorkspace();
 }
@@ -6190,18 +6339,16 @@ async function rag3LoadWorkspaceData() {
   const workspace = rag3State();
   const kbId = workspace.selectedKb?.id;
   if (!kbId) return;
-  const [documents, chunks, history, evalCases, evalRuns] = await Promise.all([
-    api(`/api/v3/rag/knowledge-bases/${kbId}/documents`),
-    api(`/api/v3/rag/knowledge-bases/${kbId}/chunks`),
-    api(`/api/v3/rag/knowledge-bases/${kbId}/recall-history`),
-    api(`/api/v3/rag/knowledge-bases/${kbId}/eval-cases`),
-    api(`/api/v3/rag/knowledge-bases/${kbId}/eval-runs`),
-  ]);
-  workspace.documents = documents.items || [];
-  workspace.chunks = chunks.items || [];
-  workspace.recallHistory = history.items || [];
-  workspace.evalCases = evalCases.items || [];
-  workspace.evalRuns = evalRuns.items || [];
+  workspace.loaded ||= { documents: false, chunks: false, recall: false, evaluation: false };
+  const jobs = [];
+  if (!workspace.loaded.documents) jobs.push(api(`/api/v3/rag/knowledge-bases/${kbId}/documents`).then((data) => { workspace.documents = data.items || []; workspace.loaded.documents = true; }));
+  if (workspace.detailTab === "chunks" && !workspace.loaded.chunks) jobs.push(api(`/api/v3/rag/knowledge-bases/${kbId}/chunks?summary=1`).then((data) => { workspace.chunks = data.items || []; workspace.loaded.chunks = true; }));
+  if (workspace.detailTab === "recall" && !workspace.loaded.recall) jobs.push(api(`/api/v3/rag/knowledge-bases/${kbId}/recall-history`).then((data) => { workspace.recallHistory = data.items || []; workspace.loaded.recall = true; }));
+  if (workspace.detailTab === "evaluation" && !workspace.loaded.evaluation) {
+    jobs.push(api(`/api/v3/rag/knowledge-bases/${kbId}/eval-cases`).then((data) => { workspace.evalCases = data.items || []; }));
+    jobs.push(api(`/api/v3/rag/knowledge-bases/${kbId}/eval-runs`).then((data) => { workspace.evalRuns = data.items || []; workspace.loaded.evaluation = true; }));
+  }
+  await Promise.all(jobs);
   if (!workspace.evalResult && workspace.evalRuns.length) {
     const latest = workspace.evalRuns[0];
     workspace.evalResult = {
@@ -6239,8 +6386,9 @@ function rag3RenderWorkspace() {
   `;
   document.getElementById("rag3_back")?.addEventListener("click", () => { workspace.selectedKb = null; renderRagSettingsView(); });
   document.getElementById("rag3_edit_current")?.addEventListener("click", () => rag3OpenKbModal(kb));
-  root.querySelectorAll("[data-rag3-tab]").forEach((button) => button.addEventListener("click", () => {
+  root.querySelectorAll("[data-rag3-tab]").forEach((button) => button.addEventListener("click", async () => {
     workspace.detailTab = button.dataset.rag3Tab;
+    await rag3LoadWorkspaceData();
     rag3RenderWorkspace();
   }));
   if (workspace.detailTab === "chunks") rag3RenderChunks();
@@ -6268,7 +6416,7 @@ function rag3RenderDocuments() {
   document.getElementById("rag3_upload_file")?.addEventListener("click", () => document.getElementById("rag3_file_input")?.click());
   document.getElementById("rag3_file_input")?.addEventListener("change", (event) => rag3UploadFile(event.target.files?.[0]));
   document.getElementById("rag3_add_text")?.addEventListener("click", rag3OpenTextModal);
-  body.querySelectorAll("[data-rag3-doc-chunks]").forEach((button) => button.addEventListener("click", () => { workspace.chunkDocumentId = Number(button.dataset.rag3DocChunks); workspace.detailTab = "chunks"; rag3RenderWorkspace(); }));
+  body.querySelectorAll("[data-rag3-doc-chunks]").forEach((button) => button.addEventListener("click", async () => { workspace.chunkDocumentId = Number(button.dataset.rag3DocChunks); workspace.chunkPage = 1; workspace.detailTab = "chunks"; await rag3LoadWorkspaceData(); rag3RenderWorkspace(); }));
   body.querySelectorAll("[data-rag3-index]").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true; showToast("正在建立向量索引，请稍候...");
     try { await api(`/api/v3/rag/documents/${button.dataset.rag3Index}/index`, { method: "POST", body: {} }); await rag3ReloadWorkspace("索引建立完成"); }
@@ -6310,14 +6458,27 @@ function rag3RenderChunks() {
   if (!body) return;
   const docs = workspace.documents;
   const visible = workspace.chunkDocumentId ? workspace.chunks.filter((item) => Number(item.document_id) === Number(workspace.chunkDocumentId)) : workspace.chunks;
+  const pageSize = Number(workspace.chunkPageSize || 60);
+  const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
+  workspace.chunkPage = Math.min(Math.max(1, Number(workspace.chunkPage || 1)), pageCount);
+  const pageStart = (workspace.chunkPage - 1) * pageSize;
+  const pageItems = visible.slice(pageStart, pageStart + pageSize);
   body.innerHTML = `
     <section class="rag3-chunk-layout">
       <aside><label class="rag3-search"><span>⌕</span><input id="rag3_doc_filter" placeholder="筛选文档" /></label><button class="${workspace.chunkDocumentId ? "" : "active"}" data-doc-filter="0"><span>全部文档</span><b>${workspace.chunks.length}</b></button>${docs.map((doc) => `<button class="${Number(workspace.chunkDocumentId) === Number(doc.id) ? "active" : ""}" data-doc-filter="${doc.id}"><span>${escapeHtml(doc.name)}</span><b>${Number(doc.chunk_count || 0)}</b></button>`).join("")}</aside>
-      <section><header><div><h3>分段列表</h3><p>共 ${visible.length} 段，点击切片可查看与修改完整正文。</p></div><button id="rag3_recall_from_chunks" class="btn btn-primary">召回测试</button></header><div class="rag3-chunk-list">${visible.length ? visible.map((chunk, index) => `<article data-rag3-chunk="${chunk.id}"><div><span>${index + 1}/${visible.length}</span><small>${Number(chunk.token_count || 0)} 估算 tokens · 召回 ${Number(chunk.retrieval_count || 0)} 次</small><i class="rag3-status ${chunk.enabled ? "ready" : "disabled"}">${chunk.enabled ? "启用" : "停用"}</i></div><h4>${escapeHtml(chunk.title_path || "正文")}</h4><p>${escapeHtml(String(chunk.content || "").slice(0, 420))}${String(chunk.content || "").length > 420 ? "…" : ""}</p><footer>${escapeHtml(chunk.document_name || "-")} · 更新于 ${escapeHtml(rag3Date(chunk.updated_at))}</footer></article>`).join("") : `<div class="rag3-empty-state"><b>暂无切片</b><span>请先上传并成功解析知识文档。</span></div>`}</div></section>
+      <section><header><div><h3>分段列表</h3><p>共 ${visible.length} 段，点击切片可查看与修改完整正文。</p></div><button id="rag3_recall_from_chunks" class="btn btn-primary">召回测试</button></header><div class="rag3-chunk-list">${visible.length ? pageItems.map((chunk, index) => { const preview = String(chunk.content_preview || chunk.content || ""); return `<article data-rag3-chunk="${chunk.id}"><div><span>${pageStart + index + 1}/${visible.length}</span><small>${Number(chunk.token_count || 0)} 估算 tokens · 召回 ${Number(chunk.retrieval_count || 0)} 次</small><i class="rag3-status ${chunk.enabled ? "ready" : "disabled"}">${chunk.enabled ? "启用" : "停用"}</i></div><h4>${escapeHtml(chunk.title_path || "正文")}</h4><p>${escapeHtml(preview)}${preview.length >= 160 ? "…" : ""}</p><footer>${escapeHtml(chunk.document_name || "-")} · 更新于 ${escapeHtml(rag3Date(chunk.updated_at))}</footer></article>`; }).join("") : `<div class="rag3-empty-state"><b>暂无切片</b><span>请先上传并成功解析知识文档。</span></div>`}</div>${visible.length > pageSize ? `<div class="rag3-chunk-pager"><button class="btn btn-ghost" data-chunk-page="${workspace.chunkPage - 1}" ${workspace.chunkPage <= 1 ? "disabled" : ""}>上一页</button><span>第 ${workspace.chunkPage} / ${pageCount} 页</span><button class="btn btn-ghost" data-chunk-page="${workspace.chunkPage + 1}" ${workspace.chunkPage >= pageCount ? "disabled" : ""}>下一页</button></div>` : ""}</section>
     </section>
   `;
-  body.querySelectorAll("[data-doc-filter]").forEach((button) => button.addEventListener("click", () => { workspace.chunkDocumentId = Number(button.dataset.docFilter) || 0; rag3RenderChunks(); }));
-  body.querySelectorAll("[data-rag3-chunk]").forEach((article) => article.addEventListener("click", () => rag3OpenChunkModal(workspace.chunks.find((item) => Number(item.id) === Number(article.dataset.rag3Chunk)))));
+  body.querySelectorAll("[data-doc-filter]").forEach((button) => button.addEventListener("click", () => { workspace.chunkDocumentId = Number(button.dataset.docFilter) || 0; workspace.chunkPage = 1; rag3RenderChunks(); }));
+  body.querySelectorAll("[data-chunk-page]").forEach((button) => button.addEventListener("click", () => { workspace.chunkPage = Number(button.dataset.chunkPage) || 1; rag3RenderChunks(); document.getElementById("rag3_workspace_body")?.scrollTo({ top: 0, behavior: "smooth" }); }));
+  body.querySelectorAll("[data-rag3-chunk]").forEach((article) => article.addEventListener("click", async () => {
+    try {
+      const response = await api(`/api/v3/rag/chunks/${Number(article.dataset.rag3Chunk)}`);
+      rag3OpenChunkModal(response.item);
+    } catch (err) {
+      showToast(`切片详情加载失败：${err.message}`);
+    }
+  }));
   document.getElementById("rag3_recall_from_chunks")?.addEventListener("click", () => { workspace.detailTab = "recall"; rag3RenderWorkspace(); });
   document.getElementById("rag3_doc_filter")?.addEventListener("input", (event) => { const q = event.target.value.toLowerCase(); body.querySelectorAll("aside [data-doc-filter]").forEach((button) => button.classList.toggle("hidden", !button.textContent.toLowerCase().includes(q))); });
 }
@@ -6352,7 +6513,8 @@ async function rag3RunRecall() {
   try {
     const data = await api(`/api/v3/rag/knowledge-bases/${workspace.selectedKb.id}/recall`, { method: "POST", body: { query } });
     workspace.recallItems = data.items || [];
-    await rag3LoadWorkspaceData();
+    const history = await api(`/api/v3/rag/knowledge-bases/${workspace.selectedKb.id}/recall-history`);
+    workspace.recallHistory = history.items || [];
     rag3RenderRecall();
     showToast(`召回完成：${workspace.recallItems.length} 条，耗时 ${data.duration_ms || 0}ms`);
   } catch (err) { showToast(`召回失败：${err.message}`); if (button) { button.disabled = false; button.textContent = "运行混合召回"; } }
@@ -6437,6 +6599,11 @@ async function rag3RunEvaluation() {
 }
 
 async function rag3ReloadWorkspace(message) {
+  const workspace = rag3State();
+  workspace.loaded.documents = false;
+  if (workspace.detailTab === "chunks") workspace.loaded.chunks = false;
+  if (workspace.detailTab === "recall") workspace.loaded.recall = false;
+  if (workspace.detailTab === "evaluation") workspace.loaded.evaluation = false;
   await rag3LoadWorkspaceData();
   rag3RenderWorkspace();
   if (message) showToast(message);

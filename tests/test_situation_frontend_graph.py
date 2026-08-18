@@ -64,6 +64,17 @@ console.log(JSON.stringify({
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn('timeZone: "Asia/Shanghai"', source)
 
+    def test_ai_report_queue_has_live_position_and_priority_action(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("前方还有 ${ahead} 个任务", source)
+        self.assertIn("data-prioritize-ai-report", source)
+        self.assertIn("/prioritize-report", source)
+        self.assertIn("beginSituationAiQueuePolling", source)
+        self.assertLess(
+            source.index('const processing = status === "processing";'),
+            source.index("const queueProgress = processing ?"),
+        )
+
     def test_legacy_ai_report_utc_time_is_rendered_as_beijing(self):
         script = f"""
 const fs = require("fs");

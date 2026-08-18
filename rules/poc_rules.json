@@ -111,6 +111,17 @@
     }
   },
   {
+    "id": "web-fastjson-autotype-dangerous-001",
+    "name": "Fastjson AutoType 危险类加载特征",
+    "attack_type": "Fastjson反序列化探测",
+    "severity": "high",
+    "score": 0.96,
+    "tags": ["fastjson", "autotype", "deserialization", "nday"],
+    "request": {
+      "text_regex": ["(?is)[\\\"']@type[\\\"']\\s*:\\s*[\\\"'][^\\\"']*(?:jar:file:|(?:jndi|ldap|rmi):|(?:\\.|/)proc(?:\\.|/)self(?:\\.|/)fd|\\.poc\\.(?:exception|exploit)|jdbcrowsetimpl|templatesimpl|jndidatasourcefactory|commons\\.collections|org\\.apache\\.xbean)[^\\\"']*[\\\"']"]
+    }
+  },
+  {
     "id": "web-graphql-introspection-001",
     "name": "GraphQL Introspection探测",
     "attack_type": "GraphQL探测",

@@ -2,14 +2,13 @@
 
 import html
 import json
-import math
 import re
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qsl, unquote_plus, urlsplit
+from urllib.parse import unquote_plus, urlsplit
 
 import joblib
 
@@ -21,6 +20,7 @@ DEFAULT_BEHAVIOR_MODEL_PATH = PROJECT_ROOT / "models" / "behavior_model_v2.jobli
 ATTACK_TYPE_PRIORITY = {
     "XXE": 100,
     "命令注入": 95,
+    "Fastjson反序列化探测": 94,
     "SQL注入": 90,
     "XSS": 88,
     "路径遍历": 85,
@@ -227,6 +227,22 @@ def context_score(event: Dict[str, Any]) -> Tuple[float, str]:
     return 0.15, "普通接口"
 
 
+def is_successful_authentication(event: Dict[str, Any]) -> bool:
+    """Use a successful ordinary login as strong negative evidence."""
+    uri = str(event.get("uri") or "")
+    path = urlsplit(uri).path or uri
+    if not re.search(r"(?i)(/login|/auth/login|/signin|/session)$", path):
+        return False
+    try:
+        status_code = int(event.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if not 200 <= status_code < 300:
+        return False
+    response = lower_norm(event.get("response_side") or event.get("raw_response") or "")
+    return bool(re.search(r'(?i)(access[_-]?token|"token"\s*:|"user"\s*:|login[_ -]?success)', response))
+
+
 @dataclass
 class POCMatch:
     rule_id: str
@@ -357,6 +373,7 @@ class BehaviorWindowAnalyzer:
         ua_count = len({x["ua"] for x in items if x["ua"]})
         payload_hits = sum(1 for x in items if x["payload_or_rule_hit"])
         status_5xx = sum(1 for x in items if 500 <= int(x["status_code"] or 0) <= 599)
+        path_ratio = len(paths) / max(1, req_count)
         features = {
             "request_count": req_count,
             "distinct_path_count": len(paths),
@@ -376,11 +393,11 @@ class BehaviorWindowAnalyzer:
         elif login_fail >= 8:
             score, typ = 0.82, "疑似暴力破解"
             evidence.append(f"{self.window} 内登录失败 {login_fail} 次")
-        if len(paths) >= 25 and req_count >= 30:
+        if len(paths) >= 25 and req_count >= 30 and (not_found >= 5 or path_ratio >= 0.60):
             if score < 0.88:
                 score, typ = 0.88, "扫描探测"
             evidence.append(f"{self.window} 内访问 {len(paths)} 个不同路径/{req_count} 次请求")
-        elif len(paths) >= 10 and req_count >= 15:
+        elif len(paths) >= 10 and req_count >= 15 and (not_found >= 4 or path_ratio >= 0.70):
             if score < 0.72:
                 score, typ = 0.72, "疑似扫描探测"
             evidence.append(f"{self.window} 内访问 {len(paths)} 个不同路径/{req_count} 次请求")
@@ -388,12 +405,22 @@ class BehaviorWindowAnalyzer:
             if score < 0.78:
                 score, typ = 0.78, "目录探测"
             evidence.append(f"{self.window} 内 404 响应 {not_found} 次")
-        if req_count >= 200:
+        high_frequency_supported = req_count >= 600 or (
+            req_count >= 200
+            and (status_5xx >= 20 or login_fail >= 8 or not_found >= 20 or payload_hits >= 5)
+        )
+        if high_frequency_supported:
             score, typ = max(score, 0.9), "高频请求"
             evidence.append(f"{self.window} 内请求 {req_count} 次")
 
         model_supported = self.behavior_model_supported(features)
         model_result = self.score_with_model(features) if model_supported else {"score": 0.0, "label": "not_enough_context", "type": "normal"}
+        if model_supported and not self.behavior_prediction_supported(str(model_result.get("label") or ""), features):
+            # The statistical model was trained on attack-shaped windows. A
+            # successful portal session can also touch many API/static paths,
+            # so require observable protocol evidence before accepting labels.
+            model_result = {"score": 0.0, "label": "normal", "type": "normal"}
+            model_supported = False
         if float(model_result.get("score") or 0.0) > score:
             score = float(model_result.get("score") or 0.0)
             typ = str(model_result.get("type") or typ)
@@ -402,6 +429,32 @@ class BehaviorWindowAnalyzer:
         features["behavior_model_score"] = model_result.get("score") or 0.0
         features["behavior_model_supported"] = model_supported
         return {"score": score, "type": typ, "evidence": evidence, "features": features}
+
+    @staticmethod
+    def behavior_prediction_supported(label: str, features: Dict[str, Any]) -> bool:
+        req_count = int(features.get("request_count") or 0)
+        distinct = int(features.get("distinct_path_count") or 0)
+        login_fail = int(features.get("login_fail_count") or 0)
+        not_found = int(features.get("not_found_count") or 0)
+        payload_hits = int(features.get("payload_hit_count") or 0)
+        status_5xx = int(features.get("status_5xx_count") or 0)
+        path_ratio = distinct / max(1, req_count)
+        payload_ratio = payload_hits / max(1, req_count)
+        normalized = str(label or "").strip().lower()
+        if normalized == "bruteforce":
+            return login_fail >= 8
+        if normalized == "dir_probe":
+            return req_count >= 15 and not_found >= 6
+        if normalized == "scan":
+            return req_count >= 30 and distinct >= 20 and (not_found >= 5 or path_ratio >= 0.60)
+        if normalized == "payload_burst":
+            return payload_hits >= 5 and payload_ratio >= 0.20
+        if normalized == "high_frequency":
+            return req_count >= 600 or (
+                req_count >= 200
+                and (status_5xx >= 20 or login_fail >= 8 or not_found >= 20 or payload_hits >= 5)
+            )
+        return normalized in {"", "normal", "not_enough_context", "unavailable"}
 
     def behavior_model_supported(self, features: Dict[str, Any]) -> bool:
         req_count = int(features.get("request_count") or 0)
@@ -487,6 +540,12 @@ def fuse_detection(
     behavior_score = float(behavior.get("score") or 0.0)
     ctx_score, ctx_reason = context_score(event)
 
+    successful_auth = is_successful_authentication(event)
+    if successful_auth and not poc_matches and payload_score < 0.90:
+        payload_label = "normal"
+        payload_score = 0.0
+        behavior_score = 0.0
+
     final_score = payload_score * 0.45 + behavior_score * 0.30 + poc_score * 0.20 + ctx_score * 0.05
     strong_poc = any(m.severity in {"high", "critical"} for m in poc_matches)
     # The bundled lab emits safe reconnaissance simulations instead of running a
@@ -553,6 +612,7 @@ def fuse_detection(
         "poc_score": round(poc_score, 6),
         "context_score": round(ctx_score, 6),
         "context_reason": ctx_reason,
+        "successful_authentication": successful_auth,
         "simulation_recon_poc": simulation_recon_poc,
         "poc_matches": [m.__dict__ for m in poc_matches],
         "behavior_features": behavior.get("features") or {},

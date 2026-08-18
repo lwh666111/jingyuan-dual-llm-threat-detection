@@ -42,6 +42,7 @@ from situation_professional_report import (
     expire_stale_jobs as expire_professional_report_jobs,
     ensure_schema as ensure_professional_report_schema,
     find_job as find_professional_report_job,
+    find_latest_completed_job as find_latest_completed_professional_report_job,
     get_job as get_professional_report_job,
     public_job as public_professional_report_job,
 )
@@ -57,6 +58,7 @@ from rag_service import (
     delete_kb as rag2_delete_kb,
     ensure_default_kb as rag2_ensure_default_kb,
     ensure_schema as rag2_ensure_schema,
+    get_chunk as rag2_get_chunk,
     get_kb as rag2_get_kb,
     hybrid_search as rag2_hybrid_search,
     index_pending_document as rag2_index_pending_document,
@@ -642,6 +644,8 @@ def normalize_attack_type_label(value: Any) -> str:
         return "XXE"
     if "ssti" in t or "模板注入" in raw:
         return "SSTI"
+    if "fastjson" in t and ("反序列化" in raw or "autotype" in t or "deserial" in t):
+        return "Fastjson反序列化探测"
     if "反序列化" in raw or "deserialization" in t:
         return "反序列化"
     if "graphql" in t:
@@ -3024,13 +3028,20 @@ def create_app(
     @require_roles(ROLE_ADMIN)
     def rag2_chunks(kb_id: int):
         document_id = int(request.args.get("document_id") or 0) or None
+        summary = str(request.args.get("summary") or "").strip().lower() in {"1", "true", "yes", "on"}
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
-            rows = rag2_list_chunks(conn, kb_id, document_id=document_id)
+            rows = rag2_list_chunks(conn, kb_id, document_id=document_id, include_content=not summary)
         return jsonify({"items": rows, "total": len(rows)})
 
-    @app.route("/api/v3/rag/chunks/<int:chunk_id>", methods=["PUT"])
+    @app.route("/api/v3/rag/chunks/<int:chunk_id>", methods=["GET", "PUT"])
     @require_roles(ROLE_ADMIN)
     def rag2_chunk_update(chunk_id: int):
+        if request.method == "GET":
+            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
+                item = rag2_get_chunk(conn, chunk_id)
+            if not item:
+                return jsonify({"error": "chunk_not_found", "message": "切片不存在"}), 404
+            return jsonify({"item": item})
         if not rag2_is_enabled():
             return jsonify({"error": "rag_disabled", "message": "RAG 已关闭，未调用云端向量 API"}), 409
         body = request.get_json(silent=True) or {}
@@ -3770,11 +3781,25 @@ def create_app(
         store = open_situation_store()
         try:
             item = store.get_situation(situation_id)
+            if item:
+                item["ai_queue"] = store.get_ai_queue_status(situation_id)
         finally:
             store.close()
         if not item:
             return jsonify({"error": "situation_not_found"}), 404
         return jsonify({"item": normalize_situation_value(item)})
+
+    @app.route("/api/v2/situations/<situation_id>/prioritize-report", methods=["POST"])
+    @require_roles(ROLE_NORMAL, ROLE_ADMIN)
+    def situation_prioritize_report(situation_id: str):
+        store = open_situation_store()
+        try:
+            queue = store.prioritize_ai(situation_id)
+        finally:
+            store.close()
+        if not queue:
+            return jsonify({"error": "situation_not_found"}), 404
+        return jsonify({"ok": True, "queue": normalize_situation_value(queue)})
 
     def load_professional_report_situation(situation_id: str) -> Optional[Dict[str, Any]]:
         store = open_situation_store()
@@ -3806,6 +3831,8 @@ def create_app(
         with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
             expire_professional_report_jobs(conn)
             job = find_professional_report_job(conn, situation_id, str(item.get("sequence_hash") or ""))
+            if not job:
+                job = find_latest_completed_professional_report_job(conn, situation_id)
         return jsonify({"job": normalize_situation_value(public_professional_report_job(job))})
 
     @app.route("/api/v2/situations/<situation_id>/professional-report/download", methods=["GET"])
@@ -3910,28 +3937,12 @@ def create_app(
     def situation_reanalyze(situation_id: str):
         store = open_situation_store()
         try:
-            item = store.get_situation(situation_id)
-            if not item:
-                return jsonify({"error": "situation_not_found"}), 404
-            with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
-                config_map = load_system_config_map(conn)
-            model = str(config_map.get("llm_model", "qwen2.5:3b")).strip() or "qwen2.5:3b"
-            report, ai_status = analyze_situation(
-                item,
-                ollama_url=app.config["OLLAMA_URL"],
-                model=model,
-                rag_db_path=Path(app.config["RAG_DB_PATH"]),
-                rag_mysql_conf=app.config["MYSQL_CONF"],
-                rag_data_dir=Path(app.config["RAG_DATA_DIR"]),
-                rag_api_config=Path(app.config["RAG_API_CONFIG_PATH"]),
-                rag_enabled=str(config_map.get("rag_enabled", "1")).strip().lower() in {"1", "true", "yes", "on"},
-                rag_top_k=4,
-                timeout_sec=120,
-            )
-            store.update_ai_report(situation_id, report, ai_status)
+            queue = store.requeue_ai(situation_id)
         finally:
             store.close()
-        return jsonify({"ok": True, "ai_status": ai_status, "report": report})
+        if not queue:
+            return jsonify({"error": "situation_not_found"}), 404
+        return jsonify({"ok": True, "ai_status": queue["status"], "queue": normalize_situation_value(queue)}), 202
 
     @app.route("/api/v2/situations/<situation_id>/status", methods=["POST"])
     @require_roles(ROLE_ADMIN)
@@ -4013,8 +4024,11 @@ def create_app(
                       e.risk_level,
                       e.attack_type,
                       e.source_ip,
+                      e.source_region,
                       e.target_port,
+                      e.target_interface,
                       e.process_status,
+                      e.response_ms,
                       CASE WHEN b.ip_address IS NULL THEN 0 ELSE 1 END AS ip_blocked
                     FROM demo_attack_events e
                     LEFT JOIN (
@@ -4032,6 +4046,7 @@ def create_app(
         items = []
         for row in normalize_rows(rows):
             row["attack_type"] = normalize_attack_type_label(row.get("attack_type"))
+            row["source_region"] = normalize_source_region_label(row.get("source_region"))
             row["ip_blocked"] = 1 if row.get("ip_blocked") else 0
             items.append(row)
         return jsonify({"items": items, "page": page, "page_size": page_size, "total": total})

@@ -628,6 +628,10 @@ def build_llm_cmd(
             args.rag_data_dir,
             "--rag-api-config",
             args.rag_api_config,
+            "--review-api-config",
+            getattr(args, "review_api_config", "config/llm_review_api.local.json"),
+            "--review-workers",
+            str(getattr(args, "review_workers", 8)),
             "--rag-mysql-host",
             args.mysql_host,
             "--rag-mysql-port",
@@ -1013,7 +1017,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     llm_group.add_argument("--llm-schema", default="llm/schemas/analysis.schema.json", help="JSON schema path")
     llm_group.add_argument("--llm-poll-seconds", type=int, default=1, help="LLM polling interval")
     llm_group.add_argument("--llm-timeout-sec", type=int, default=300, help="LLM request timeout seconds")
-    llm_group.add_argument("--llm-num-ctx", type=int, default=1024, help="Ollama num_ctx")
+    llm_group.add_argument("--llm-num-ctx", type=int, default=6144, help="Ollama num_ctx")
     llm_group.add_argument("--llm-num-gpu", type=int, default=0, help="Ollama num_gpu, 0 for CPU")
     llm_group.add_argument("--llm-temperature", type=float, default=0.2, help="LLM temperature")
     llm_group.add_argument(
@@ -1029,6 +1033,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     llm_group.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON path")
     llm_group.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag", help="Advanced RAG data directory (prefer a non-system disk)")
     llm_group.add_argument("--rag-api-config", default="config/ai_api.local.json", help="DashScope local config JSON")
+    llm_group.add_argument("--review-api-config", default="config/llm_review_api.local.json", help="Private final-review API config JSON")
+    llm_group.add_argument("--review-workers", type=int, default=8, help="Concurrent RAW final-review workers")
     llm_group.add_argument("--rag-top-k", type=int, default=3, help="RAG top-k")
     llm_group.add_argument("--rag-max-chars", type=int, default=3200, help="Max injected RAG context chars")
     llm_group.add_argument("--rag-auto-build", dest="rag_auto_build", action="store_true", help="Auto build RAG DB if missing")
@@ -1196,7 +1202,7 @@ def main() -> None:
         epilog=(
             "绀轰緥:\n"
             "  python app.py --port 80 --capture-batch-size 4\n"
-            "  python app.py --port 3000 --capture-batch-size 1\n"
+            "  python app.py --port 4000 --capture-batch-size 1\n"
             "  python app.py --interface WLAN --port 10086 --capture-batch-size 20\n"
             "  python app.py --only-detect --no-skip-existing-at-start\n"
             "  python app.py --only-detect --no-llm --no-db --no-api --no-dashboard\n"

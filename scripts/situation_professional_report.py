@@ -10,7 +10,7 @@ import uuid
 from xml.sax.saxutils import escape
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -86,6 +86,18 @@ def find_job(conn: Any, situation_id: str, sequence_hash: str = "") -> Optional[
             cur.execute("SELECT * FROM situation_professional_reports WHERE situation_id=%s AND sequence_hash=%s LIMIT 1", (situation_id, sequence_hash))
         else:
             cur.execute("SELECT * FROM situation_professional_reports WHERE situation_id=%s ORDER BY created_at DESC LIMIT 1", (situation_id,))
+        return cur.fetchone()
+
+
+def find_latest_completed_job(conn: Any, situation_id: str) -> Optional[Dict[str, Any]]:
+    """Return the newest downloadable report even if the live chain has advanced."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT * FROM situation_professional_reports
+               WHERE situation_id=%s AND status='completed' AND pdf_path IS NOT NULL
+               ORDER BY completed_at DESC,created_at DESC LIMIT 1""",
+            (situation_id,),
+        )
         return cur.fetchone()
 
 

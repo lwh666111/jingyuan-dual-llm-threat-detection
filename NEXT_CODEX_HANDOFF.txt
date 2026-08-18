@@ -1,0 +1,702 @@
+Jingyuan Threat Intelligence / Jingyuan Zhiyu project handoff
+Generated: 2026-08-17
+
+This file is written for the next Codex/engineer who needs to take over quickly.
+Please read this before changing code, deploying to the Windows server, or modifying the detection chain.
+
+======================================================================
+1. Project identity
+======================================================================
+
+Project Chinese name:
+  靖渊智御：AI 驱动的外部 Web 威胁态势感知平台
+
+Short English name used in UI/code:
+  JINGYUAN THREAT INTELLIGENCE
+
+What this project is:
+  An end-to-end external Web threat situation awareness platform for competition demonstration and lightweight real traffic monitoring. It captures HTTP traffic, preserves raw request/response evidence, runs layered security detection, sends candidate attacks into LLM/RAG review, writes results into MySQL, displays dashboards, correlates multi-step attacker behavior into situations, and supports defensive actions such as IP blocking.
+
+GitHub repository:
+  https://github.com/lwh666111/jingyuan-dual-llm-threat-detection.git
+
+Local workspace:
+  C:\Users\lenovo\Desktop\deeplearning\traffic_pipeline
+
+Server workspace:
+  C:\Users\Administrator\Desktop\JingyuanTrafficPipeline
+
+Server domain:
+  ctf.ski
+
+Important ports:
+  1145  Frontend dashboard
+  3049  Flask API
+  4000  Built-in multi-vulnerability demo target/lab
+  3307  MySQL on the server deployment
+  11434 Ollama API on localhost
+
+Current Git state when this handoff was written:
+  Latest known commit: b28672e Polish professional report layout and branding
+  Branch: main
+  Remote: origin -> https://github.com/lwh666111/jingyuan-dual-llm-threat-detection.git
+
+Security note:
+  Do not write server passwords, Bailian API keys, or local config secrets into chat, README, Git, or screenshots. Read them from config files on the target machine when needed.
+
+2026-08-18 final-event review update:
+  - Candidate events now support an OpenAI-compatible external final-review API.
+  - Runtime secrets live only in config/llm_review_api.local.json, which is ignored by Git.
+  - Exact port-4000 fingerprints bypass the external API and publish their verified template after 5 seconds.
+  - Non-fingerprint candidates retrieve RAG evidence and are reviewed by the external API.
+  - Eight independent workers claim jobs atomically, so different source IPs do not serialize behind one queue worker.
+  - DeepSeek V4 thinking mode is explicitly disabled for this structured low-latency task; otherwise the output budget can be consumed by reasoning_content before the final JSON is emitted.
+  - The frontend retains the configured local model label; the external provider is not exposed in event cards.
+  - Local measured results: exact fingerprint 5.07 seconds; changed XSS about 15 seconds with 3 RAG hits; 8 concurrent changed XSS events all completed independently.
+  - Server measured results after deployment: exact fingerprint 6.09 seconds; changed XSS about 11 seconds with 3 RAG hits; normal login remained raw-only.
+  - Server backup for this update: backup/deepseek_review_20260818_181814.
+
+======================================================================
+2. What the system does
+======================================================================
+
+High-level workflow:
+  1. app.py starts the whole system.
+  2. tshark/Wireshark captures HTTP traffic on selected interface and port.
+  3. Captured traffic becomes batch files under input/ such as input/1.1.n.txt.
+  4. RAW HTTP logs are written into MySQL.
+  5. Detection V2 runs layered detection:
+     - Payload model
+     - POC rule engine
+     - Behavior window model
+     - Fusion scoring
+  6. Normal traffic remains raw_only.
+  7. Suspicious candidate traffic enters the LLM review queue.
+  8. LLM/RAG final review decides whether it becomes a formal attack event.
+  9. Confirmed attacks are written into MySQL and displayed on the dashboard.
+  10. Situation awareness correlates multiple actions from the same attacker/source group.
+  11. AI situation reports and professional reports are generated through Bailian API.
+  12. Auto defense can block source IPs with Windows firewall rules.
+
+Core distinction:
+  raw_only:
+    Raw traffic stored for evidence and future analysis. It should not be treated as a formal attack.
+
+  candidate:
+    Suspicious traffic after small-model/rule/behavior fusion. It is waiting for LLM review or manual review.
+
+  attack_event:
+    A confirmed attack event after final review. Only this should be shown as real attack evidence in the main dashboard.
+
+  situation:
+    A correlated attacker behavior chain. It is not one packet. It is a sequence such as scan -> brute force -> SQL injection -> XSS from one source or a proxy group within a time window.
+
+======================================================================
+3. Current technical stack
+======================================================================
+
+Backend:
+  Python 3.12
+  Flask API server
+  PyMySQL / MySQL
+  subprocess-based process supervisor in app.py
+  Windows PowerShell helper scripts
+  tshark/Wireshark/Npcap for packet capture
+  Windows Event Log for SSH brute force monitoring
+  Windows firewall for IP blocking/unblocking
+
+Frontend:
+  Node.js static dashboard server
+  Vanilla HTML/CSS/JavaScript in frontend_dashboard/public
+  ECharts-style dashboard charts and custom timeline/situation views
+
+Detection:
+  Legacy MLP compatibility artifacts:
+    models/preprocessor.joblib
+    models/best_mlp.pth
+
+  Detection V2 artifacts:
+    models/payload_model_v2.joblib
+    models/behavior_model_v2.joblib
+    rules/poc_rules.json
+    rules/fast_defense_rules.json
+
+LLM:
+  Local Ollama is used for ordinary single-event review in some chains.
+  Bailian API is used for AI situation reports and professional reports.
+  Model names are configurable through system config.
+
+RAG:
+  Legacy RAG:
+    llm/rag/rag_seed.json
+    llm/rag/rag_knowledge.db
+
+  Advanced RAG:
+    MySQL metadata tables
+    LanceDB vector store
+    Local BM25
+    RRF fusion
+    Bailian text-embedding-v4
+    Bailian qwen3-rerank
+    Upload/runtime data normally under:
+      D:\JingyuanTrafficPipelineData\rag
+
+Professional report output:
+  Situation report files should be stored outside the project runtime directory when configured:
+    D:\JingyuanTrafficPipelineData\reports
+
+======================================================================
+4. RAG knowledge sources
+======================================================================
+
+There are two RAG layers.
+
+1. Legacy/self-built seed knowledge:
+  File:
+    llm/rag/rag_seed.json
+
+  Source type:
+    Project-built expanded security seed knowledge.
+
+  Main content:
+    SQL injection, XSS, AuthAbuse, policy guidance, evidence hints, mitigation suggestions.
+
+  Important wording for defense:
+    This is a self-built seed knowledge base, not a public dataset downloaded directly.
+
+2. Advanced authoritative RAG:
+  Import script:
+    scripts/seed_authoritative_rag.py
+
+  Authoritative public sources:
+    OWASP Cheat Sheet Series
+      https://github.com/OWASP/CheatSheetSeries
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/File_Upload_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Authentication_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Deserialization_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Logging_Cheat_Sheet.md
+      https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/REST_Security_Cheat_Sheet.md
+
+    MITRE ATT&CK Enterprise STIX
+      https://attack.mitre.org/
+      https://github.com/mitre-attack/attack-stix-data
+      https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json
+
+    CISA Known Exploited Vulnerabilities
+      https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+      https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+
+Good answer for judges:
+  The RAG system uses a hybrid knowledge source: project-built Web attack seed knowledge plus official OWASP defense guidance, MITRE ATT&CK enterprise attack techniques, and CISA KEV known exploited vulnerabilities. The documents are parsed, chunked, embedded, indexed, recalled by vector/BM25 fusion, reranked, and then injected into LLM prompts as evidence references.
+
+======================================================================
+5. Main runtime commands
+======================================================================
+
+Common local/server startup:
+  cd C:\Users\Administrator\Desktop\JingyuanTrafficPipeline
+  python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4 --auto-start-lab
+
+If config has already been saved in the frontend system config, plain startup may work:
+  python app.py
+
+Important:
+  Server uses MySQL port 3307.
+  Local development often uses 3306 or whatever is in config/db_config.json.
+  Do not assume 3306 on the server.
+
+Built-in lab:
+  The current intended lab is the 4000 multi-vulnerability lab.
+  app.py should start it automatically with --auto-start-lab.
+  Manual lab script:
+    test/start_multivuln_lab_4000.ps1
+
+Frontend:
+  http://127.0.0.1:1145
+  http://ctf.ski:1145
+
+Lab:
+  http://127.0.0.1:4000
+  http://ctf.ski:4000
+
+API:
+  http://127.0.0.1:3049
+
+======================================================================
+6. Server situation
+======================================================================
+
+Server:
+  Windows Server
+  Domain: ctf.ski
+  Project path: C:\Users\Administrator\Desktop\JingyuanTrafficPipeline
+  MySQL: server deployment is configured around port 3307
+  Ollama: local service on 127.0.0.1:11434
+  Wireshark/tshark and Npcap are required for real capture
+
+Scheduled/watchdog:
+  There is/was a Windows scheduled task named JTP-Main.
+  It runs watchdog.ps1 and is supposed to keep the project alive.
+  watchdog.ps1 should not silently hide everything during debugging if the user asks to keep CMD windows visible.
+
+Deployment preference from user:
+  To save time and quota, when a server file needs replacing, send the file or tell the user where it is.
+  User can manually place it into the server Desktop\codex folder.
+  Do not waste time uploading large files over WinRM unless explicitly needed.
+
+Very important:
+  Do not overwrite server database, config, input/output/result history, or MySQL data unless explicitly asked.
+  When syncing code to server, sync targeted files only.
+
+======================================================================
+7. Key features already implemented
+======================================================================
+
+Dashboard:
+  Data dashboard with KPI cards, attack trends, top attack types, source distribution, heatmap, method share.
+  Details page with event list, event detail, raw request/response, evidence chain, LLM result, RAG references, notes, block IP action.
+  Situation awareness page with single-IP and multi-proxy/group mode.
+  LLM/RAG settings page with advanced knowledge base UI.
+  System config page.
+  Operation logs.
+
+Authentication:
+  JWT-based login/register.
+  Default demo accounts are documented in README.
+
+Detection:
+  RAW main chain.
+  LLM-gated final event promotion.
+  Payload model.
+  POC rule engine.
+  Behavior window model.
+  Fusion score.
+  SSH brute force monitor.
+  Port scan sensor.
+  Fast defense rules.
+
+Auto defense:
+  Automatic IP block switch.
+  Windows firewall inbound/outbound blocking.
+  Blocked IP list and unblock support.
+  Fast defense should only block silently and audit internally; it should not produce frontend attack alerts by itself.
+
+Situation awareness:
+  Single attacker IP chain.
+  Multi-proxy/cross-IP aggregation mode to handle attackers switching proxy IPs.
+  Recent attacker/situation list.
+  Attack chain visualization.
+  AI situation report.
+  Professional situation report generation and download.
+
+Reports:
+  Ordinary AI situation report now should call Bailian API, not local Ollama.
+  Professional report also calls Bailian API.
+  Report generation is asynchronous with progress display.
+  Report layout recently polished to match the AI maturity report style.
+  Recent fixes removed duplicate tables, added centered captions, adjusted table widths, and removed large blank gaps.
+
+RAG:
+  RAG enable/disable switch.
+  Knowledge base creation/edit/toggle/delete.
+  Document upload.
+  Chunk management.
+  Recall testing.
+  Regression evaluation.
+  Bailian embedding/rerank based advanced retrieval.
+
+Lab:
+  4000 all-chain demo target.
+  Organized by penetration phases:
+    information collection
+    classic vulnerabilities
+    N-day style public patterns
+    unknown/0-day-like synthetic traffic structures
+  It is for authorized demonstration only.
+
+======================================================================
+8. Major recent updates
+======================================================================
+
+Recent commits:
+  b28672e Polish professional report layout and branding
+  ce4b9ae Stabilize live review queues and add emergency recovery
+  d3930f1 Move situation reports to Bailian API and bound runtime logs
+  76d65c9 Stabilize live pipeline and add professional situation reports
+  93a1059 Auto-start bundled test lab with workflow
+  b053232 Enforce LLM-gated RAW detection pipeline
+  e128212 Add silent fast-path auto defense and harden situation controls
+  2412205 Revert "Improve RAG retrieval calibration and evaluation"
+
+What changed recently:
+  1. Project name changed to:
+     靖渊智御：AI 驱动的外部 Web 威胁态势感知平台
+
+  2. Professional situation report layout was heavily adjusted:
+     - Better cover/title branding
+     - Fewer huge blank areas
+     - Duplicate markdown/model tables removed
+     - Tables and figures now have captions such as 表1-1 / 图4-1
+     - Wider and more consistent table layout
+     - Report should be closer to the sample PDF style the user provided
+
+  3. AI situation reports and professional reports moved toward Bailian API:
+     - Goal: reduce server Ollama pressure
+     - Both ordinary and professional situation reports should use external API
+
+  4. Live pipeline stabilization:
+     - LLM review queue persisted in MySQL
+     - Watchdog/supervisor introduced
+     - Runtime logs bounded so disk does not fill as quickly
+     - Emergency recovery controls added
+
+  5. RAW detection pipeline clarified:
+     - Small models/rules find candidates
+     - LLM must make final judgment before official display
+     - RAW records should not be shown as confirmed attacks unless final review confirms them
+
+  6. 4000 lab auto-start:
+     - app.py supports --auto-start-lab
+     - User expects the lab to start when the situation awareness system starts
+
+  7. Fast path / demo acceleration:
+     - For exact 4000 lab fingerprints, expected behavior was 5-8 second output
+     - If payload changes or port differs, full chain should run
+     - The UI should look consistent across fast path/full chain/small-model-only mode
+
+======================================================================
+9. Known bugs, incidents, and lessons
+======================================================================
+
+Recurring serious problem:
+  Several times the server appeared healthy but detection did not produce expected events.
+  Causes have included:
+    wrong capture interface
+    wrong monitored port
+    lab not actually running
+    old/new chain conflict
+    LLM queue backlog
+    Ollama pressure
+    polling delays
+    disk full from logs/capture/result/report artifacts
+    frontend reading stale data
+
+Most important troubleshooting sequence:
+  1. Confirm target service/lab is listening on the expected port.
+  2. Confirm app.py capture config says the same port.
+  3. Confirm selected interface:
+     - External traffic normally Ethernet, often interface 4 on the server.
+     - Local 127.0.0.1 test normally loopback, often interface 5.
+  4. Confirm input/ is receiving new files.
+  5. Confirm RAW logs are inserted into MySQL.
+  6. Confirm candidate/event rows are being created.
+  7. Confirm LLM review queue is not stuck.
+  8. Confirm API is running on 3049.
+  9. Confirm frontend on 1145 is loading fresh data.
+  10. Confirm disk space is not exhausted.
+
+Specific known historical bugs:
+  - app.py once had mojibake/unterminated string syntax error due to encoding damage.
+  - db_config.json with UTF-8 BOM caused JSONDecodeError; fix was utf-8-sig reading.
+  - Dashboard once exited immediately because port/process conflicts or stale process.
+  - Normal login traffic was once misclassified as high risk; training and threshold tuning reduced this.
+  - Attack types repeated or were displayed as duplicated categories; frontend aggregation needed cleanup.
+  - Attack source geography was once fake/overcrowded; later reduced to TOP7 and simplified location labels.
+  - Some frontend Chinese text became mojibake; preserve UTF-8.
+  - Fast defense initially did not block/unblock reliably.
+  - Blocking only one direction was insufficient; inbound and outbound Windows firewall rules are needed.
+  - Auto defense was too slow when waiting for full LLM chain; fast deterministic rules were added.
+  - If auto defense blocks an IP, unblocking must remove all matching inbound/outbound rules.
+  - Situation awareness did not always show port scan/lab events due to rule thresholds and event pipeline mismatch.
+  - RAW/AG/b events confused user and judges; UI should clearly reflect final reviewed events.
+  - RAG references were shown even when RAG disabled; frontend/backend guard was needed.
+  - CPU display once showed 0%; check system metric collection.
+  - Professional report had large blank pages, orphan headings, duplicate tables, and garbled numbering.
+  - Background image from an old user-provided photo was supposed to be removed. bg-main.jpg was deleted in latest commit.
+
+Important user expectation:
+  The project must not pretend a model participated when it did not. However, the final UI should present consistent evidence fields for all valid paths. If a fast demo cache is used, make sure the underlying policy is documented honestly in code/comments and does not break competition integrity.
+
+======================================================================
+10. Acceleration measures already used
+======================================================================
+
+1. Small-model/rule/behavior pre-filtering:
+  Only high-value candidate traffic goes to LLM.
+
+2. Ollama warm start / keep-alive:
+  Keeps local model loaded to avoid cold start.
+
+3. Fixed model selection during demonstration:
+  Avoids repeated model loading.
+
+4. 4000 lab fingerprint fast path:
+  Exact known demo payloads can output faster.
+
+5. Reduced polling interval:
+  Some sync loops reduced from 5 seconds to 1 second.
+
+6. Async process separation:
+  capture, detection, db, LLM, API, frontend, situation, lab are separate processes.
+
+7. Watchdog/supervisor:
+  Restarts unhealthy child processes or full process tree.
+
+8. Bailian API for long reports:
+  Professional and situation reports should not block local Ollama.
+
+9. RAG switch:
+  Allows disabling RAG to reduce cost/time.
+
+10. Evidence summary before LLM:
+  Intended direction is to send compact structured evidence instead of huge raw logs.
+
+Future acceleration ideas already discussed:
+  - Replace directory polling with file/event notification.
+  - Use a lightweight in-memory or durable message queue.
+  - Cache common attack template results.
+  - Tiered LLM calls: small cloud model for simple cases, stronger model for complex cases.
+  - Prebuild structured evidence summaries before LLM.
+
+Highest-value four:
+  - Small model pre-filtering before LLM
+  - 4000 lab fingerprint fast path
+  - Event-driven pipeline instead of polling
+  - Prebuilt evidence summaries to reduce LLM input size
+
+======================================================================
+11. How to answer common judge questions
+======================================================================
+
+Q: What is different from a firewall?
+  A firewall mainly enforces allow/deny at network or rule level. This system preserves request/response evidence, performs application-layer semantic detection, correlates multi-step attacker behavior into situations, uses LLM/RAG for explainable review, and generates investigation/defense reports. It can also call firewall rules for blocking, but the core value is situation awareness and evidence-driven explanation.
+
+Q: What are the small models trained on?
+  The current project has legacy MLP artifacts and V2 payload/behavior models. The training scripts are in scripts/train_*.py. Training data includes synthetic Web attack/normal samples, hard negatives such as normal login traffic, and behavior windows for scanning/bruteforce/high-frequency traffic. Be careful: do not overclaim a huge public dataset unless verified in code.
+
+Q: What is RAG implemented with?
+  Legacy: SQLite FTS5 style DB at llm/rag/rag_knowledge.db.
+  Advanced: MySQL metadata + LanceDB vectors + BM25 + RRF + qwen3-rerank.
+  Embeddings: Bailian text-embedding-v4.
+  Sources: project seed + OWASP + MITRE ATT&CK + CISA KEV.
+
+Q: Where is the database?
+  Main runtime DB is MySQL traffic_pipeline. On server it uses port 3307. Do not delete or reset it.
+
+Q: Accuracy and speed?
+  Historical internal tests showed very high numbers on small curated test sets. Be honest: say that competition demos use controlled/lab traffic plus real server traffic observations; exact final metrics should be read from current docs/tests/logs before presenting.
+
+Q: Did you test 0-day?
+  It does not truly detect unknown 0-days by name. It detects suspicious unknown patterns through behavior, payload anomaly, endpoint context, response behavior, and situation correlation. The lab includes unknown/0-day-like synthetic traffic structures for demonstrating anomaly handling, not real 0-day exploitation.
+
+======================================================================
+12. Important files and directories
+======================================================================
+
+Startup:
+  app.py
+  watchdog.ps1
+  install_watchdog.ps1
+
+API:
+  scripts/dashboard_api_server.py
+
+Capture:
+  scripts/capture_http_request_batches.py
+
+Pipeline:
+  scripts/run_demo_daemon.py
+  scripts/demo_workflow.py
+  scripts/sync_raw_http_logs.py
+  scripts/sync_detection_v2_db.py
+  scripts/security_detection_v2.py
+  scripts/llm_analyzer_daemon.py
+  scripts/result_db_daemon.py
+
+Situation awareness:
+  scripts/situation_supervisor.py
+  scripts/situation_ai_daemon.py
+  scripts/situation_professional_report.py
+
+RAG:
+  scripts/rag_service.py
+  scripts/seed_authoritative_rag.py
+  llm/rag/rag_seed.json
+  llm/rag/rag_knowledge.db
+  llm/rag/v3
+
+Frontend:
+  frontend_dashboard/public/index.html
+  frontend_dashboard/public/app.js
+  frontend_dashboard/public/styles.css
+  frontend_dashboard/server.js
+
+Rules/models:
+  models/
+  rules/poc_rules.json
+  rules/fast_defense_rules.json
+
+Lab:
+  test/start_multivuln_lab_4000.ps1
+  test/start_multivuln_lab_4000.bat
+  test/stop_target_labs.ps1
+  scripts/target_multivuln_lab.py
+
+Docs:
+  README.md
+  docs/API_DECLARATION.md
+  docs/USAGE.md
+  docs/SITUATION_INTELLIGENCE.md
+  docs/VERSION_RECORD.md
+  docs/CHANGELOG_2026-04_2026-05.md
+  docs/CHANGELOG_2026-08.md
+
+Runtime data:
+  input/
+  output/
+  result/
+  output/app_runtime/
+  output/pipeline_events/input_events.jsonl
+
+Do not casually commit:
+  config/ai_api.local.json
+  server credentials
+  API keys
+  huge runtime logs
+  capture dumps
+  local temp transfer scripts
+
+======================================================================
+13. User preferences and workflow notes
+======================================================================
+
+The user is preparing for a competition final and needs practical, fast, demo-stable results.
+
+Communication preferences:
+  - Be direct.
+  - Do not overexplain when the user asks for action.
+  - If deploying to server is needed, ask or wait unless the user explicitly says deploy.
+  - For server transfer, user prefers receiving files and placing them into Desktop\codex manually to save time.
+  - The user dislikes repeated regressions and expects testing before saying it is done.
+  - The user cares about UI polish, but does not want the whole theme randomly changed.
+  - Preserve the current dark cyber style unless a specific page requires a scoped improvement.
+  - Avoid making the UI look "AI-generated"; keep it professional and competition-ready.
+
+Testing expectations:
+  - Test with the 4000 lab.
+  - Test SQL injection, XSS, command injection, path traversal, scan/bruteforce behavior.
+  - Test 3 different IP/source attackers if possible.
+  - Test both single-IP and multi-proxy situation modes.
+  - Test auto defense block and unblock.
+  - Test RAG on/off.
+  - Test report generation and download.
+  - Test frontend visually for Chinese text, overflow, huge blank areas, and responsiveness.
+
+======================================================================
+14. Current caution list for next work
+======================================================================
+
+1. Do not reintroduce RAW events as confirmed attacks.
+   The user was very upset when the system appeared to bypass LLM final review. Keep the chain:
+     raw -> candidate -> LLM final review -> attack_event.
+
+2. Do not claim local Ollama made a report if Bailian API did.
+   The current direction is that situation reports and professional reports use external Bailian API.
+
+3. Do not silently change the color theme.
+   Small component polish is fine. Large style redesigns need explicit user direction.
+
+4. Do not fill C drive.
+   Logs, reports, RAG data and bulky runtime artifacts should go to D:\JingyuanTrafficPipelineData where possible.
+
+5. Do not delete MySQL data.
+   User explicitly said old MySQL data must not be deleted.
+
+6. Do not deploy automatically unless the user asks.
+   Latest explicit preference: "除非故意要求，为节省额度，我说部署至服务器再部署服务器".
+
+7. Keep 4000 lab behavior stable.
+   The user often tests manually through the lab. If it is down or not auto-started, the whole demo looks broken.
+
+8. Watch for encoding.
+   Many bugs were mojibake/UTF-8 related. Keep files UTF-8 and inspect Chinese UI/report output.
+
+9. Do not leave server transfer scripts with plaintext credentials.
+   Clean temp scripts after use. Do not commit them.
+
+10. When fixing report layouts, render/check actual PDF/DOCX output visually.
+   The user notices blank pages, duplicate tables, captions, and garbled numbering immediately.
+
+======================================================================
+15. Most likely next tasks
+======================================================================
+
+The user may next ask for one of these:
+
+1. Finish drawing project function/architecture diagrams.
+  Use clean Chinese labels, no overflowing text, good spacing, and likely generate as PNG/SVG/Visio-like layout.
+
+2. Continue professional report polishing.
+  Focus on:
+    no huge blanks
+    no duplicate tables
+    captions centered
+    editable Word output matching PDF style
+    Chinese numbering not garbled
+
+3. Verify 4000 lab detection speed.
+  Need measure from request sent to frontend display. Target for exact lab fingerprint was 5-8 seconds.
+
+4. Fix situation awareness data not appearing.
+  Inspect MySQL situation tables, API responses, and frontend filters.
+
+5. Improve RAG quality.
+  Avoid over-strict refusal behavior. The previous attempt to calibrate recall was reverted in commit 2412205.
+
+6. Deploy to server.
+  Prefer targeted file sync or let user place files into Desktop\codex.
+
+7. Produce competition answer text.
+  The strongest story:
+    application-layer semantics + context correlation + explainable LLM/RAG + situation awareness beyond firewall.
+
+======================================================================
+16. Final quick-start for next Codex
+======================================================================
+
+Start by running:
+  git -C C:\Users\lenovo\Desktop\deeplearning\traffic_pipeline status --short
+  git -C C:\Users\lenovo\Desktop\deeplearning\traffic_pipeline log --oneline -8
+
+Read these files first:
+  README.md
+  docs/API_DECLARATION.md
+  scripts/dashboard_api_server.py
+  scripts/security_detection_v2.py
+  scripts/situation_supervisor.py
+  scripts/situation_professional_report.py
+  frontend_dashboard/public/app.js
+  frontend_dashboard/public/styles.css
+
+If asked to run locally:
+  cd C:\Users\lenovo\Desktop\deeplearning\traffic_pipeline
+  python app.py --port 4000 --capture-batch-size 1 --auto-start-lab
+
+If asked to run on server:
+  Use server path:
+    C:\Users\Administrator\Desktop\JingyuanTrafficPipeline
+  Remember server MySQL port:
+    3307
+  Typical command:
+    python app.py --mysql-port 3307 --port 4000 --capture-batch-size 1 --interface 4 --auto-start-lab
+
+If asked to push GitHub:
+  git status --short
+  git add <specific files>
+  git commit -m "<clear message>"
+  git push origin main
+
+End of handoff.

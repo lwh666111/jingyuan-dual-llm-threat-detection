@@ -126,14 +126,54 @@ class SituationAPITests(unittest.TestCase):
         evidence = self.client.get("/api/v2/situations/SIT-API-INTEGRATION/evidence")
         self.assertEqual(len(evidence.get_json()["items"]), 3)
 
+    def test_detail_exposes_ai_queue_and_priority_endpoint(self) -> None:
+        conn = self.store.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE attack_situations SET ai_status='pending',ai_priority=0,ai_queued_at=UTC_TIMESTAMP(3) "
+                "WHERE situation_id='SIT-API-INTEGRATION'"
+            )
+        conn.commit()
+        detail = self.client.get("/api/v2/situations/SIT-API-INTEGRATION")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("ai_queue", detail.get_json()["item"])
+
+        response = self.client.post("/api/v2/situations/SIT-API-INTEGRATION/prioritize-report", json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["queue"]["prioritized"])
+
     def test_admin_status_and_reanalysis(self) -> None:
         response = self.client.post("/api/v2/situations/SIT-API-INTEGRATION/status", json={"status": "handled"})
         self.assertEqual(response.status_code, 200)
-        fake_report = {"conclusion": "API测试研判"}
-        with patch("dashboard_api_server.analyze_situation", return_value=(fake_report, "complete")):
-            response = self.client.post("/api/v2/situations/SIT-API-INTEGRATION/reanalyze")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["report"]["conclusion"], "API测试研判")
+        response = self.client.post("/api/v2/situations/SIT-API-INTEGRATION/reanalyze")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["ai_status"], "retry")
+        self.assertTrue(response.get_json()["queue"]["prioritized"])
+        detail = self.client.get("/api/v2/situations/SIT-API-INTEGRATION").get_json()["item"]
+        self.assertIsNone(detail["ai_report"])
+        self.assertEqual(detail["ai_queue"]["queue_position"], 1)
+
+    def test_professional_report_history_remains_visible_after_chain_revision(self) -> None:
+        conn = self.store.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM situation_professional_reports WHERE job_id='SPR-API-HISTORY'")
+                cur.execute(
+                    """INSERT INTO situation_professional_reports(
+                           job_id,situation_id,sequence_hash,status,progress,stage,pdf_path,requested_by,completed_at
+                       ) VALUES(%s,%s,%s,'completed',100,'报告已生成',%s,'test',NOW(3))""",
+                    ("SPR-API-HISTORY", "SIT-API-INTEGRATION", "OLDER-SEQUENCE", "C:/reports/history.pdf"),
+                )
+            conn.commit()
+
+            response = self.client.get("/api/v2/situations/SIT-API-INTEGRATION/professional-report")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["job"]["job_id"], "SPR-API-HISTORY")
+            self.assertEqual(response.get_json()["job"]["status"], "completed")
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM situation_professional_reports WHERE job_id='SPR-API-HISTORY'")
+            conn.commit()
 
     def test_invalid_ip_and_status_are_rejected(self) -> None:
         self.assertEqual(self.client.get("/api/v2/situations/by-ip/not-an-ip").status_code, 400)

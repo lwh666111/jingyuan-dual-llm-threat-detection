@@ -2,9 +2,8 @@
 
 import argparse
 import json
-import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
 try:
     import pymysql

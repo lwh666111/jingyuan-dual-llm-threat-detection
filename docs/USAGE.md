@@ -244,11 +244,9 @@ python scripts/build_rag_db.py --seed-file llm/rag/rag_seed.json --db-path llm/r
 Invoke-WebRequest http://127.0.0.1:3049/api/v1/screen/ping
 ```
 
-### 9.2 API 联调脚本
+### 9.2 API 联调
 
-```powershell
-python scripts/platform_api_demo.py
-```
+使用浏览器访问 `http://127.0.0.1:1145/`，或按 `docs/API_DECLARATION.md` 使用当前 `/api/v2`、`/api/v3` 接口。
 
 ## 10. 运行日志与排障
 

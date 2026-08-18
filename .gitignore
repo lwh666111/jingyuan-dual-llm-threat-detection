@@ -48,6 +48,7 @@ models/*.joblib
 llm/rag/rag_knowledge.db
 llm/rag/runtime/
 config/ai_api.local.json
+config/llm_review_api.local.json
 *.lance
 
 # Local deploy env

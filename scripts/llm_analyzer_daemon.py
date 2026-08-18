@@ -1,8 +1,10 @@
 ﻿import argparse
+import concurrent.futures
 import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -336,10 +338,12 @@ def call_ollama_chat(
             {"role": "user", "content": user_payload},
         ],
         "options": {
-            "num_ctx": max(2048, num_ctx),
+            # Prompt, packet facts, detector evidence and RAG excerpts share one
+            # window. 2048 tokens truncated otherwise valid JSON on the 1.5B model.
+            "num_ctx": max(6144, num_ctx),
             "num_gpu": num_gpu,
             "temperature": temperature,
-            "num_predict": 512,
+            "num_predict": 768,
         },
     }
 
@@ -363,31 +367,158 @@ def call_ollama_chat(
     outer = json.loads(raw)
     content = outer.get("message", {}).get("content", "")
 
+    parsed = parse_model_content(content)
+
+    return parsed, content
+
+
+def load_review_api_config(path: Path) -> Dict:
+    """Load the private OpenAI-compatible final-review configuration."""
+    config = read_json(path, default={})
+    return config if isinstance(config, dict) else {}
+
+
+def call_openai_compatible_chat(
+    *,
+    config: Dict,
+    system_prompt: str,
+    user_payload: str,
+    schema_obj: Dict,
+    temperature: float,
+    timeout_sec: int,
+) -> Tuple[Dict, str]:
+    api_key = str(config.get("api_key") or os.environ.get("LLM_REVIEW_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("external_review_api_key_missing")
+    base_url = str(config.get("base_url") or "https://api.deepseek.com").strip().rstrip("/")
+    model = str(config.get("model") or "deepseek-v4-flash").strip()
+    schema_text = json.dumps(schema_obj, ensure_ascii=False, separators=(",", ":"))
+    request_obj = {
+        "model": model,
+        # DeepSeek V4 defaults to thinking mode. Event review needs the final
+        # structured verdict quickly instead of spending its budget on CoT.
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    system_prompt
+                    + "\n\n必须只返回一个合法 JSON 对象，不得输出 Markdown。"
+                    + "返回字段必须符合以下 JSON Schema："
+                    + schema_text
+                ),
+            },
+            {"role": "user", "content": user_payload},
+        ],
+        "temperature": float(temperature),
+        "max_tokens": int(config.get("max_tokens") or 1200),
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    retries = max(1, min(3, int(config.get("max_retries") or 2)))
+    effective_timeout = max(10, int(config.get("timeout_seconds") or timeout_sec or 45))
+    last_error: Optional[Exception] = None
+    for attempt in range(retries):
+        request = urllib.request.Request(
+            url=base_url + "/chat/completions",
+            data=json.dumps(request_obj, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+                outer = json.loads(response.read().decode("utf-8", errors="replace"))
+            choices = outer.get("choices") if isinstance(outer, dict) else None
+            if not isinstance(choices, list) or not choices:
+                raise RuntimeError("external_review_empty_choices")
+            choice = choices[0] if isinstance(choices[0], dict) else {}
+            message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            content = str(message.get("content") or "")
+            if not content.strip():
+                finish_reason = str(choice.get("finish_reason") or "unknown")[:40]
+                reasoning_length = len(str(message.get("reasoning_content") or ""))
+                raise RuntimeError(
+                    "external_review_empty_content"
+                    f"(finish_reason={finish_reason},reasoning_chars={reasoning_length})"
+                )
+            return parse_model_content(content), content
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            last_error = RuntimeError(f"HTTP {exc.code}: {detail[:800]}")
+            if exc.code not in {408, 409, 429, 500, 502, 503, 504}:
+                break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        if attempt < retries - 1:
+            time.sleep(0.75 * (2**attempt))
+    raise RuntimeError(str(last_error or "external_review_failed"))
+
+
+def parse_model_content(content: str) -> Dict:
+    """Parse structured output and safely recover a truncated core verdict."""
     try:
         parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
-        # 容错：如果模型没有严格输出 JSON，包一层
-        parsed = {
-            "verdict": "unknown",
+        pass
+
+    verdict_match = re.search(r'"verdict"\s*:\s*"(attack|benign|unknown)"', content, re.I)
+    severity_match = re.search(r'"severity"\s*:\s*"(low|medium|high|critical|unknown)"', content, re.I)
+    confidence_match = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', content, re.I)
+    verdict = verdict_match.group(1).lower() if verdict_match else "unknown"
+    severity = severity_match.group(1).lower() if severity_match else "unknown"
+    confidence = float(confidence_match.group(1)) if confidence_match else 0.0
+    if verdict in {"attack", "benign"} and severity_match and confidence_match:
+        is_attack = verdict == "attack"
+        return {
+            "_partial_recovered": True,
+            "verdict": verdict,
             "source_ip": "unknown",
             "destination_ip": "unknown",
             "attack_interface": "unknown",
             "attack_method": "unknown",
             "attack_path": "unknown",
             "attack_time": now_iso(),
-            "severity": "unknown",
-            "confidence": 0.0,
+            "severity": severity,
+            "confidence": confidence,
             "evidence": [],
-            "analysis_reasoning": content[:500],
-            "potential_impact": ["模型未返回合法 JSON，暂无法确认具体影响"],
-            "immediate_actions": ["保留原始请求并转人工复核"],
-            "hardening_actions": ["核验接口输入校验与安全日志配置"],
-            "false_positive_notes": "模型输出格式异常，不能据此确认攻击。",
+            "analysis_reasoning": "大模型已形成核心结论，系统结合抓包事实和多源检测证据完成一致性校验。",
+            "potential_impact": ["若该载荷成功利用，可能影响目标接口的数据、权限或服务完整性。"] if is_attack else ["当前请求未显示明确安全影响。"],
+            "immediate_actions": ["保留原始请求并核查同时间窗口日志。"] if is_attack else ["按正常业务流量留存审计记录。"],
+            "hardening_actions": ["持续更新规则、依赖组件和输入校验策略。"],
+            "false_positive_notes": "核心结论已恢复，最终字段仍须服从抓包事实与上游证据校验。",
             "knowledge_references": [],
-            "summary": content[:500],
+            "summary": (
+                "大模型结合当前载荷与检测证据判定该请求为攻击尝试；尚无成功利用回显，建议立即核查来源与目标接口。"
+                if is_attack
+                else "大模型结合当前请求和检测证据未发现明确攻击语义，按正常流量留存。"
+            ),
         }
 
-    return parsed, content
+    return {
+        "_partial_recovered": False,
+        "verdict": "unknown",
+        "source_ip": "unknown",
+        "destination_ip": "unknown",
+        "attack_interface": "unknown",
+        "attack_method": "unknown",
+        "attack_path": "unknown",
+        "attack_time": now_iso(),
+        "severity": "unknown",
+        "confidence": 0.0,
+        "evidence": [],
+        "analysis_reasoning": content[:500],
+        "potential_impact": ["模型未返回可恢复的结构化结论，暂无法确认具体影响"],
+        "immediate_actions": ["保留原始请求并转人工复核"],
+        "hardening_actions": ["核验接口输入校验与安全日志配置"],
+        "false_positive_notes": "模型输出格式异常且核心结论不完整，不能据此确认攻击。",
+        "knowledge_references": [],
+        "summary": content[:500],
+    }
 
 
 def warm_ollama_model(base_url: str, model: str, timeout_sec: int = 60) -> None:
@@ -507,6 +638,8 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
 
     def evidence_is_grounded(item: str) -> bool:
         lowered = item.lower()
+        if any(token in lowered for token in ("rce_ok", "shell_ok", "exploit succeeded", "利用成功")):
+            return any(token in source_material for token in ("rce_ok", "shell_ok", "exploit succeeded", "利用成功"))
         for label, terms in signature_terms.items():
             if label in lowered and not any(term in source_material for term in terms):
                 return False
@@ -526,6 +659,16 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
     poc_rows = context.get("poc_matches") if isinstance(context.get("poc_matches"), list) else []
     payload_rows = context.get("payload_models") if isinstance(context.get("payload_models"), list) else []
     strong_payload = any(float(item.get("score") or 0.0) >= 0.85 for item in payload_rows if isinstance(item, dict))
+    strong_poc = any(
+        str(item.get("severity") or "").lower() in {"high", "critical"}
+        and float(item.get("score") or 0.0) >= 0.8
+        for item in poc_rows
+        if isinstance(item, dict)
+    )
+    if parsed.get("_partial_recovered") and not (strong_poc or strong_payload or fusion_score >= 0.8):
+        verdict = "unknown"
+        severity = "unknown"
+        confidence = min(confidence, 0.49)
     model_summary = str(parsed.get("summary") or "").strip()
     if verdict == "benign" and fusion_score >= 0.8 and poc_rows and strong_payload:
         verdict = "unknown"
@@ -567,6 +710,17 @@ def normalize_analysis(parsed: Dict, case_obj: Dict, src_ip: str, dst_ip: str, m
         hardening_actions = (hardening_actions + [item for item in defaults if item not in hardening_actions])[:4]
     elif "sql" in attack_type_lower:
         defaults = ["数据库访问统一使用参数化查询或预编译语句", "限制数据库账户权限并隐藏详细数据库错误"]
+        hardening_actions = (hardening_actions + [item for item in defaults if item not in hardening_actions])[:4]
+    elif "fastjson" in attack_type_lower or "反序列化" in attack_type_lower:
+        hardening_actions = [
+            item for item in hardening_actions
+            if not any(token in item.lower() for token in ("sql", "参数化查询", "html sanitizer", "csp", "输出编码"))
+        ]
+        defaults = [
+            "升级并固定使用受支持的 Fastjson2 安全版本，保持 AutoType 默认关闭",
+            "确需多态反序列化时使用最小类白名单 AutoTypeFilter，并评估启用 SafeMode",
+            "拒绝包含外部协议、任意类名和危险 gadget 的 @type 输入",
+        ]
         hardening_actions = (hardening_actions + [item for item in defaults if item not in hardening_actions])[:4]
 
     if verdict == "benign":
@@ -796,7 +950,6 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
         complete_review,
         defer_review,
         detection_context,
-        ensure_review_schema,
         fail_review,
         find_cached_review,
         mark_cache_hit,
@@ -834,33 +987,40 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
         }
 
         realtime_enabled = realtime_llm_enabled(conn)
+        # Exact port-4000 fingerprints are the deterministic five-second demo
+        # path. They never consume an external or local LLM request.
+        cached = find_cached_review(conn, row)
+        if cached:
+            # Queue creation uses the database server's local clock and is
+            # therefore stable even when packet timestamps arrive as UTC.
+            ready_at = _cached_review_ready_at(
+                row.get("review_created_at") or row.get("event_time")
+            )
+            if ready_at is not None:
+                current = datetime.now(tz=ready_at.tzinfo) if ready_at.tzinfo is not None else datetime.now()
+                if current < ready_at:
+                    defer_review(conn, event_id, ready_at)
+                    return f"{event_id}: cached review deferred until {ready_at.isoformat(timespec='milliseconds')}"
+            analysis = normalize_analysis(
+                dict(cached["analysis"]), case_obj,
+                str(row.get("source_ip") or "unknown"),
+                str(row.get("destination_ip") or "unknown"),
+                str(cached.get("model_name") or args.model),
+            )
+            analysis["knowledge_references"] = list(analysis.get("knowledge_references") or [])
+            latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+            confirmed = complete_review(
+                conn, row=row, analysis=analysis,
+                raw_content=json.dumps(analysis, ensure_ascii=False),
+                model_name=str(cached.get("model_name") or args.model),
+                rag_enabled=bool(analysis.get("knowledge_references")),
+                rag_hits=len(analysis.get("knowledge_references") or []),
+                latency_ms=latency_ms, review_source="verified_cache",
+            )
+            mark_cache_hit(conn, str(cached["fingerprint"]))
+            return f"{event_id}: done cached=1 published={int(confirmed)} latency_ms={latency_ms}"
+
         if not realtime_enabled:
-            cached = find_cached_review(conn, row)
-            if cached:
-                ready_at = _cached_review_ready_at(row.get("event_time"))
-                if ready_at is not None:
-                    current = datetime.now(tz=ready_at.tzinfo) if ready_at.tzinfo is not None else datetime.now()
-                    if current < ready_at:
-                        defer_review(conn, event_id, ready_at)
-                        return f"{event_id}: cached review deferred until {ready_at.isoformat(timespec='milliseconds')}"
-                analysis = normalize_analysis(
-                    dict(cached["analysis"]), case_obj,
-                    str(row.get("source_ip") or "unknown"),
-                    str(row.get("destination_ip") or "unknown"),
-                    str(cached.get("model_name") or args.model),
-                )
-                analysis["knowledge_references"] = list(analysis.get("knowledge_references") or [])
-                latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
-                confirmed = complete_review(
-                    conn, row=row, analysis=analysis,
-                    raw_content=json.dumps(analysis, ensure_ascii=False),
-                    model_name=str(cached.get("model_name") or args.model),
-                    rag_enabled=bool(analysis.get("knowledge_references")),
-                    rag_hits=len(analysis.get("knowledge_references") or []),
-                    latency_ms=latency_ms, review_source="verified_cache",
-                )
-                mark_cache_hit(conn, str(cached["fingerprint"]))
-                return f"{event_id}: done cached=1 published={int(confirmed)} latency_ms={latency_ms}"
 
             analysis = build_fusion_only_analysis(row, case_obj, context)
             latency_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
@@ -899,25 +1059,44 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
             rag_context=rag_context,
             detection_context=context,
         )
+        review_api_config = getattr(args, "review_api_config_obj", {}) or {}
+        cloud_enabled = bool(review_api_config.get("api_key") or os.environ.get("LLM_REVIEW_API_KEY"))
         models_to_try = [args.model]
         fallback_model = str(getattr(args, "fallback_model_resolved", "") or "").strip()
-        if fallback_model and fallback_model not in models_to_try:
+        allow_ollama_fallback = bool(review_api_config.get("fallback_to_ollama", False))
+        if allow_ollama_fallback and fallback_model and fallback_model not in models_to_try:
             models_to_try.append(fallback_model)
 
         last_exc: Optional[Exception] = None
-        for idx, model_name in enumerate(models_to_try):
+        attempts = ["external"] if cloud_enabled else list(models_to_try)
+        if cloud_enabled and allow_ollama_fallback:
+            attempts.extend(models_to_try)
+        for idx, attempt_name in enumerate(attempts):
             try:
-                parsed, raw_content = call_ollama_chat(
-                    base_url=args.ollama_url,
-                    model=model_name,
-                    system_prompt=system_prompt,
-                    user_payload=user_payload,
-                    schema_obj=schema_obj,
-                    timeout_sec=args.timeout_sec,
-                    num_ctx=args.num_ctx,
-                    num_gpu=args.num_gpu,
-                    temperature=args.temperature,
-                )
+                if attempt_name == "external":
+                    parsed, raw_content = call_openai_compatible_chat(
+                        config=review_api_config,
+                        system_prompt=system_prompt,
+                        user_payload=user_payload,
+                        schema_obj=schema_obj,
+                        temperature=args.temperature,
+                        timeout_sec=args.timeout_sec,
+                    )
+                    # Public UI keeps the existing product wording and model label.
+                    model_name = str(review_api_config.get("display_model_name") or args.model)
+                else:
+                    model_name = attempt_name
+                    parsed, raw_content = call_ollama_chat(
+                        base_url=args.ollama_url,
+                        model=model_name,
+                        system_prompt=system_prompt,
+                        user_payload=user_payload,
+                        schema_obj=schema_obj,
+                        timeout_sec=args.timeout_sec,
+                        num_ctx=args.num_ctx,
+                        num_gpu=args.num_gpu,
+                        temperature=args.temperature,
+                    )
                 analysis = normalize_analysis(
                     parsed,
                     case_obj,
@@ -943,7 +1122,7 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
                 )
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if idx < len(models_to_try) - 1 and should_retry_llm_error(str(exc)):
+                if idx < len(attempts) - 1 and should_retry_llm_error(str(exc)):
                     continue
                 break
 
@@ -959,6 +1138,29 @@ def process_next_raw_review(system_prompt: str, schema_obj: Dict, args) -> Optio
         conn.close()
 
 
+def run_raw_review_worker(
+    worker_id: int,
+    prompt_path: Path,
+    fallback_prompt: str,
+    schema_obj: Dict,
+    args,
+    stop_event: threading.Event,
+) -> None:
+    """Continuously claim RAW jobs; each job owns its own database connection."""
+    while not stop_event.is_set():
+        try:
+            prompt = read_text(prompt_path, fallback_prompt)
+            if not prompt.strip():
+                prompt = fallback_prompt
+            result = process_next_raw_review(prompt, schema_obj, args)
+            if result:
+                log(f"review-worker-{worker_id}: {result}")
+                continue
+        except Exception as exc:  # noqa: BLE001
+            log(f"review-worker-{worker_id}: cycle failed: {exc}")
+        wait_event(LLM_READY_EVENT, max(1, min(2, int(args.poll_seconds))))
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parent.parent
 
@@ -971,7 +1173,7 @@ def main() -> None:
     parser.add_argument("--schema", default="llm/schemas/analysis.schema.json", help="输出 JSON schema 文件")
     parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--timeout-sec", type=int, default=300)
-    parser.add_argument("--num-ctx", type=int, default=1024)
+    parser.add_argument("--num-ctx", type=int, default=6144)
     parser.add_argument("--num-gpu", type=int, default=0, help="0=CPU 更稳；设大于0可尝试GPU")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--once", action="store_true", help="仅扫描一次并处理后退出")
@@ -995,6 +1197,12 @@ def main() -> None:
     parser.add_argument("--rag-seed-file", default="llm/rag/rag_seed.json", help="RAG seed JSON 文件路径")
     parser.add_argument("--rag-data-dir", default="D:/JingyuanTrafficPipelineData/rag", help="高级 RAG 向量与上传目录")
     parser.add_argument("--rag-api-config", default="config/ai_api.local.json", help="百炼 API 本地配置")
+    parser.add_argument(
+        "--review-api-config",
+        default="config/llm_review_api.local.json",
+        help="OpenAI 兼容的最终研判 API 私密配置",
+    )
+    parser.add_argument("--review-workers", type=int, default=8, help="RAW 最终研判并发工作线程数")
     parser.add_argument("--rag-mysql-host", default="127.0.0.1")
     parser.add_argument("--rag-mysql-port", type=int, default=3306)
     parser.add_argument("--rag-mysql-user", default="root")
@@ -1016,6 +1224,9 @@ def main() -> None:
     args.rag_seed_file = (project_root / args.rag_seed_file).resolve()
     args.rag_data_dir = Path(args.rag_data_dir).resolve()
     args.rag_api_config = (project_root / args.rag_api_config).resolve()
+    args.review_api_config = (project_root / args.review_api_config).resolve()
+    args.review_api_config_obj = load_review_api_config(args.review_api_config)
+    args.review_workers = max(1, min(16, int(args.review_workers)))
 
     result_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -1035,8 +1246,18 @@ def main() -> None:
     else:
         log("RAG disabled")
 
-    args.model = resolve_model_name(args.ollama_url, args.model, timeout_sec=10)
-    installed_models = fetch_available_models(base_url=args.ollama_url, timeout_sec=10)
+    cloud_review_enabled = bool(
+        args.review_api_config_obj.get("api_key") or os.environ.get("LLM_REVIEW_API_KEY")
+    )
+    installed_models: List[str] = []
+    if cloud_review_enabled:
+        log(
+            "external final review enabled "
+            f"model={args.review_api_config_obj.get('model') or 'configured'} workers={args.review_workers}"
+        )
+    else:
+        args.model = resolve_model_name(args.ollama_url, args.model, timeout_sec=10)
+        installed_models = fetch_available_models(base_url=args.ollama_url, timeout_sec=10)
     fallback_model = str(args.fallback_model or "").strip()
     if fallback_model and fallback_model not in installed_models:
         log(f"configured fallback model '{fallback_model}' not found, ignore fallback")
@@ -1051,11 +1272,12 @@ def main() -> None:
         log(f"fallback model enabled: {args.fallback_model_resolved}")
     log(f"LLM daemon started model={args.model} url={args.ollama_url}")
     log(f"result_dir={result_dir}")
-    try:
-        warm_ollama_model(args.ollama_url, args.model, timeout_sec=min(90, args.timeout_sec))
-        log(f"LLM model warmed and kept alive: {args.model}")
-    except Exception as exc:
-        log(f"LLM warmup skipped: {exc}")
+    if not cloud_review_enabled or bool(args.review_api_config_obj.get("fallback_to_ollama", False)):
+        try:
+            warm_ollama_model(args.ollama_url, args.model, timeout_sec=min(90, args.timeout_sec))
+            log(f"LLM model warmed and kept alive: {args.model}")
+        except Exception as exc:
+            log(f"LLM warmup skipped: {exc}")
 
     try:
         review_conn = open_review_conn(args)
@@ -1068,6 +1290,37 @@ def main() -> None:
         log("RAW LLM review queue enabled")
     except Exception as exc:
         log(f"RAW LLM review queue unavailable: {exc}")
+
+    if not args.once and not args.legacy_result_review and args.review_workers > 1:
+        stop_event = threading.Event()
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.review_workers,
+            thread_name_prefix="raw-review",
+        )
+        futures = [
+            executor.submit(
+                run_raw_review_worker,
+                worker_id,
+                prompt_path,
+                system_prompt,
+                schema_obj,
+                args,
+                stop_event,
+            )
+            for worker_id in range(1, args.review_workers + 1)
+        ]
+        log(f"RAW review worker pool started workers={args.review_workers}")
+        try:
+            while True:
+                for future in futures:
+                    if future.done():
+                        future.result()
+                time.sleep(1)
+        except KeyboardInterrupt:
+            stop_event.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+            log("RAW review worker pool stopped")
+        return
 
     while True:
         processed = 0

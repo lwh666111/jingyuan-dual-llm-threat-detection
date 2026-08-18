@@ -6,7 +6,7 @@ import re
 import urllib.parse
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 QUEUE_DDL = """
@@ -213,7 +213,7 @@ def enqueue_review(
         score = float(final_score or 0.0)
     except Exception:
         score = 0.0
-    priority = max(1, min(100, int(round(score * 100))))
+    priority = max(1, min(999, int(round(score * 100))))
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -275,12 +275,13 @@ def claim_next_review(conn: Any, *, max_attempts: int = 3) -> Optional[Dict[str,
             )
             cur.execute(
                 """
-                SELECT event_id,case_id,preliminary_decision,priority,attempts
+                SELECT event_id,case_id,preliminary_decision,priority,attempts,
+                       created_at AS review_created_at
                 FROM llm_review_jobs
                 WHERE status IN ('pending','failed')
                   AND attempts < %s
                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                ORDER BY (priority >= 1000) DESC,created_at ASC,priority DESC
+                ORDER BY (priority >= 1000) DESC,priority DESC,created_at ASC
                 LIMIT 1 FOR UPDATE
                 """,
                 (max(1, int(max_attempts)),),

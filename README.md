@@ -19,8 +19,8 @@
 - RAW 数据库原生链路成为实时主链路：三层检测只负责筛选，未经 LLM 确认的候选不得进入正式大屏和态势关联。
 - 新增 MySQL 持久化 `llm_review_jobs` 队列，进程重启不丢任务；新候选每秒轮询并优先于历史 `result/b.*` 兼容任务。
 - 详情页新增 LLM 最终结论、模型、置信度、证据、RAG 命中数和研判耗时，右侧详情使用卡片内独立滚动。
-- Ollama 资源调度改为实时事件优先；态势长报告在候选队列存在时主动让路，避免历史报告积压拖慢单包研判。
-- 服务器 `qwen2.5:1.5b` 双样本实测：XSS 与正常登录单条推理分别约 9.6 秒和 9.3 秒；仅 XSS 被发布为正式事件。
+- 事件最终研判支持外部 OpenAI 兼容 API 并发处理；指纹完全匹配的 4000 靶场样本维持 5–8 秒确定性直出，其他候选事件继续经过 RAG 与最终研判。
+- 服务器实测：指纹样本约 6 秒发布，非指纹 XSS 经 RAG 与外部最终研判约 11 秒发布；正常登录仅保留原始日志。
 
 - 版本记录：`docs/VERSION_RECORD.md`
 - 更新日志：`docs/CHANGELOG_2026-04_2026-05.md`
@@ -31,7 +31,7 @@
 - 安装包校验：安装后可在发布机器执行 `Get-FileHash .\dist\JingyuanTrafficPipeline_Setup_ManualDeps.exe -Algorithm SHA256` 查看
 
 ## GitHub 仓库简介
-`靖渊智御：AI 驱动的外部 Web 威胁态势感知平台，支持真实抓包、自动检测、Ollama+RAG 研判、MySQL 入库、大屏展示、系统自检、模型切换、靶场测试与安装包部署。`
+`靖渊智御：AI 驱动的外部 Web 威胁态势感知平台，支持真实抓包、多模型筛选、云端大模型+RAG 最终研判、MySQL 入库、态势关联、大屏展示、自动防御、靶场测试与一键启动。`
 
 ## 主要能力
 
@@ -84,16 +84,23 @@ HTTP 请求进入抓包入口
  -> RRF 融合候选
  -> qwen3-rerank 云端重排
  -> Top-K 证据片段与来源引用
- -> 原有 Ollama 态势/事件报告生成
+ -> 外部兼容 API 完成事件最终研判，百炼 API 生成态势报告
 ```
 
-百炼只承担嵌入与重排，不替换现有 Ollama 报告模型。云 API 暂时不可用时，事件研判守护会自动退回旧 SQLite FTS5 检索，不阻断主链路。
+百炼承担嵌入、重排与态势报告生成；候选事件通过独立外部 API 并发完成最终研判。云端向量服务暂时不可用时，RAG 会退回本地 BM25/旧知识检索，不影响原始流量留存和小模型筛选。
 
 1. 将 `config/ai_api.example.json` 复制为 `config/ai_api.local.json`。
 2. 填写自己的百炼 `api_key`、工作空间 `base_url` 和 `rerank_url`。
 3. 不要把 `config/ai_api.local.json` 提交到 Git；该文件已加入 `.gitignore`。
 4. 默认向量和上传文件位于 `D:\JingyuanTrafficPipelineData\rag`，可通过 `--rag-data-dir` 或环境变量 `RAG_DATA_DIR` 修改。
 5. 执行 `python app.py` 后，MySQL 会增量创建 RAG 表并迁移旧 SQLite 知识，不删除旧库。
+
+事件最终研判 API 使用独立私密配置：
+
+1. 将 `config/llm_review_api.example.json` 复制为 `config/llm_review_api.local.json`。
+2. 填写自己的 `api_key`、`base_url` 和模型名称；默认并发工作线程为 8。
+3. 私密文件已加入 `.gitignore`，禁止提交真实密钥。
+4. 完全命中 4000 靶场指纹的事件不会调用外部 API；其余候选事件才进入 RAG 与外部最终研判。
 
 导入官方安全知识：
 
@@ -420,11 +427,7 @@ Start API only (with demo seed):
 python scripts\dashboard_api_server.py --port 3049 --seed-demo
 ```
 
-Run API demo checker:
-
-```powershell
-python scripts\platform_api_demo.py
-```
+For API integration, use the current `/api/v2` and `/api/v3` declarations in `docs/API_DECLARATION.md`.
 
 Demo login accounts (frontend hard-coded):
 
@@ -560,8 +563,6 @@ Use only in authorized environments for defense, testing, and research.
 - Recommended multi-vuln target (port 4000):
   - `test/start_multivuln_lab_4000.ps1`
   - `test/start_multivuln_lab_4000.bat`
-- Legacy login target (port 3000):
-  - `test/start_login_lab_3000.ps1`
 - Stop targets:
   - `test/stop_target_labs.ps1`
 
@@ -589,7 +590,7 @@ ollama pull qwen2.5:3b
     - `models/preprocessor.joblib`
     - `models/best_mlp.pth`
 
-- Symptom: local self-test to `127.0.0.1:3000` is not captured.
+- Symptom: local self-test to `127.0.0.1:4000` is not captured.
   - Use loopback interface in admin config (`capture_interface=5` on most Windows hosts).
   - For real external traffic to server NIC, switch back to Ethernet interface (for example `4`).
 

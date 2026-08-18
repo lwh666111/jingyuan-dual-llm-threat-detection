@@ -140,6 +140,12 @@ def bucket_start(value: Any, minutes: int = BEHAVIOR_AGG_BUCKET_MINUTES) -> date
 
 
 def should_aggregate_behavior(attack_type: str, detection: Dict[str, Any]) -> bool:
+    # A concrete high-confidence payload/POC describes the current request more
+    # precisely than a historical behavior window. Keep that event independent
+    # instead of relabelling it as a scan or brute-force aggregate.
+    poc_matches = detection.get("poc_matches") or []
+    if any(str(match.get("severity") or "").lower() in {"high", "critical"} for match in poc_matches):
+        return False
     behavior = detection.get("behavior") or {}
     behavior_type = str(behavior.get("type") or "")
     text = f"{attack_type} {behavior_type}"
@@ -366,12 +372,26 @@ def sync_detection_rows_mysql(
         with conn.cursor() as cur:
             cur.execute("DELETE FROM attack_events WHERE event_id=%s", (event_id,))
         delete_demo_event(conn, event_id)
+        review_priority_score = max(
+            float(final_score or 0.0),
+            float(payload.get("score") or 0.0),
+            float(behavior.get("score") or 0.0),
+            max((float(match.get("score") or 0.0) for match in poc_matches), default=0.0),
+        )
+        if any(
+            str(match.get("severity") or "").lower() in {"high", "critical"}
+            and float(match.get("score") or 0.0) >= 0.8
+            for match in poc_matches
+        ):
+            # Reserve 1000 for the explicit UI "prioritize" action. Concrete
+            # high-risk POCs outrank noisy behavioral jobs but remain below it.
+            review_priority_score = max(review_priority_score, 5.0)
         enqueue_review(
             conn,
             event_id=event_id,
             case_id=case_id,
             preliminary_decision=decision,
-            final_score=final_score,
+            final_score=review_priority_score,
         )
         prioritize_cached_review(
             conn,

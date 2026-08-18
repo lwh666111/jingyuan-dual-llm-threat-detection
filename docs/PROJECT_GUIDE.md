@@ -107,7 +107,7 @@ python app.py --help
 
 ## 5. 常见参数建议
 
-- 靶场 HTTP：`--port 3000 --capture-batch-size 1`
+- 靶场 HTTP：`--port 4000 --capture-batch-size 1`
 - 高频业务：`--capture-batch-size 10~20`
 - 检测容忍度：`--export-min-score 0.3`（可调）
 - 启动时仅处理新文件：默认 `--skip-existing-at-start`

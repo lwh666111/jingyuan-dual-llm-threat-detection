@@ -104,6 +104,43 @@ class SituationStoreMySQLTests(unittest.TestCase):
         self.assertFalse(any(row["situation_id"] == situation.situation_id for row in default_rows))
         self.assertTrue(any(row["situation_id"] == situation.situation_id for row in explicit_rows))
 
+    def test_ai_queue_position_and_priority_are_real(self) -> None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        conn = self.store.connect()
+        rows = [
+            ("SIT-TEST-QUEUE-RUNNING", "processing", 0, now - timedelta(seconds=3)),
+            ("SIT-TEST-QUEUE-FIRST", "pending", 0, now - timedelta(seconds=2)),
+            ("SIT-TEST-QUEUE-LAST", "pending", 0, now - timedelta(seconds=1)),
+        ]
+        with conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO attack_situations(
+                       situation_id,source_ip,target_asset,started_at,last_action_at,status,
+                       distinct_action_types,total_action_count,current_stage,risk_score,
+                       risk_level,sequence_hash,ai_status,ai_priority,ai_queued_at
+                   ) VALUES(%s,'203.0.113.88','queue-test',%s,%s,'open',3,3,'execution',
+                            0.8,'high',%s,%s,%s,%s)""",
+                [
+                    (situation_id, now, now, situation_id, status, priority, queued_at)
+                    for situation_id, status, priority, queued_at in rows
+                ],
+            )
+        conn.commit()
+
+        before = self.store.get_ai_queue_status("SIT-TEST-QUEUE-LAST")
+        self.assertEqual(before["queue_ahead"], 2)
+        self.assertEqual(before["queue_position"], 3)
+
+        after = self.store.prioritize_ai("SIT-TEST-QUEUE-LAST")
+        self.assertTrue(after["prioritized"])
+        self.assertEqual(after["queue_ahead"], 1)
+        self.assertEqual(after["queue_position"], 2)
+
+        self.assertTrue(self.store.mark_ai_retry("SIT-TEST-QUEUE-RUNNING"))
+        promoted = self.store.get_ai_queue_status("SIT-TEST-QUEUE-LAST")
+        self.assertEqual(promoted["queue_ahead"], 0)
+        self.assertEqual(promoted["queue_position"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

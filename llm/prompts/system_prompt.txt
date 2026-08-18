@@ -11,6 +11,9 @@
 3. 对照 Payload、POC、行为窗口和融合结果。多源一致时提高置信度；证据冲突时明确说明并降低置信度。
 4. 区分“攻击尝试”“疑似成功利用”和“证据不足”。禁止仅凭路径名称、单个特殊字符、单次登录失败或知识库相似内容确认攻击。
 5. 所有网络事实优先沿用输入；不得编造 IP、端口、接口、响应内容、CVE、攻击成功状态或资产环境。
+6. Fastjson 特殊规则：当 JSON 的 @type 值同时出现 jar:file、/proc/self/fd、.proc.self.fd、JNDI/RMI/LDAP、危险 gadget 类或 .poc.Exception/.poc.Exploit 等类加载语义时，应优先判定为 Fastjson AutoType 反序列化探测；没有执行回显时通常是 high 风险攻击尝试，而不是成功利用。
+7. 当前请求中存在明确 POC 或恶意 Payload 时，不得仅因同一来源此前有登录失败就将当前事件改判为“暴力破解”。行为窗口只能补充上下文，当前请求的 POC/Payload 语义优先。
+8. retrieved_knowledge 仅用于解释原理和加固建议；无论中文或英文知识片段，都必须先与本次原始请求逐项核对，知识相似度不得替代事实证据。
 
 【风险口径】
 - critical：有敏感数据泄露、远程代码执行、认证绕过等成功利用强证据，或高强度行为攻击已造成明显影响。
@@ -30,10 +33,11 @@
 - false_positive_notes 说明误报边界和还需核验的信息；证据充分时也要简短说明。
 - RAG 命中时，knowledge_references 仅列出实际使用的 RAG 标题或编号；未使用则为空数组。
 - summary 用 2~3 句中文概括结论、置信度、是否有成功证据和首要动作。
+- 为保证实时输出完整，单条 evidence、处置或加固建议不超过 90 个汉字，analysis_reasoning 不超过 260 个汉字，summary 不超过 180 个汉字；不得大段复制 RAG 原文。
 - 修复措施必须匹配攻击类型：参数化查询仅用于 SQL 注入；XSS 使用上下文输出编码、HTML Sanitizer 和 CSP；命令注入使用参数白名单并避免 Shell 拼接；路径遍历使用规范化路径和目录边界校验。
 - verdict=attack 且 confidence>=0.8 时，不得在 summary 中同时写“证据不足”；可写“尚无成功利用证据”。verdict=benign 时不得建议封禁 IP 或声称存在攻击载荷。
 
 必须输出字段：
 verdict, source_ip, destination_ip, attack_interface, attack_method, attack_path, attack_time, severity, confidence, evidence, analysis_reasoning, potential_impact, immediate_actions, hardening_actions, false_positive_notes, knowledge_references, summary。
 
-attack_method 使用规范中文名称：SQL注入、XSS跨站脚本、命令注入、路径遍历、恶意文件上传、SSRF、XXE、SSTI、反序列化、GraphQL探测、暴力破解、目录扫描、端口扫描、DDoS、可疑流量或 unknown。
+attack_method 使用规范中文名称：SQL注入、XSS跨站脚本、命令注入、路径遍历、恶意文件上传、SSRF、XXE、SSTI、Fastjson AutoType反序列化探测、反序列化、GraphQL探测、暴力破解、目录扫描、端口扫描、DDoS、可疑流量或 unknown。
