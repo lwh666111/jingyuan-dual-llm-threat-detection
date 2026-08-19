@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS situation_professional_reports (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
+REQUIRED_REPORT_HEADINGS = (
+    "## 一、基本信息",
+    "## 二、报告目的",
+    "## 三、分析方法",
+    "## 四、攻击态势分析",
+    "## 五、证据交叉验证",
+    "## 六、风险判断与行动建议",
+    "## 七、补充说明",
+)
+
 
 def connect(conf: Dict[str, Any], autocommit: bool = False):
     return pymysql.connect(
@@ -211,13 +221,20 @@ def retrieve_context(mysql_conf: Dict[str, Any], data_dir: Path, api_path: Path,
 def call_bailian(api_config: Dict[str, Any], model: str, system_prompt: str, snapshot: Dict[str, Any], rag_rows: List[Dict[str, Any]]) -> tuple[str, Dict[str, int]]:
     references = [{"document": x.get("document_name"), "title": x.get("title_path"), "content": str(x.get("content") or "")[:1800], "score": x.get("score")} for x in rag_rows]
     user_content = "请严格依据以下不可变事件快照和RAG参考资料生成最终Markdown报告。不得把攻击尝试写成攻击成功；证据不足时必须明确写明。\n\n事件快照：\n" + json.dumps(snapshot, ensure_ascii=False) + "\n\nRAG参考资料：\n" + json.dumps(references, ensure_ascii=False)
-    payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}], "temperature": 0.2, "stream": False}
+    max_tokens = max(1024, min(8192, int(api_config.get("professional_report_max_tokens") or 4096)))
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
+        "temperature": 0.1,
+        "enable_thinking": False,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
     req = urllib.request.Request(
         f"{api_config['base_url']}/chat/completions", data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_config['api_key']}", "Content-Type": "application/json"}, method="POST",
     )
-    # Professional reports are substantially longer than ordinary RAG requests.
-    timeout_seconds = max(120, min(300, int(api_config.get("professional_report_timeout_seconds") or 240)))
+    timeout_seconds = max(30, min(120, int(api_config.get("professional_report_timeout_seconds") or 90)))
     try:
         with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -225,8 +242,115 @@ def call_bailian(api_config: Dict[str, Any], model: str, system_prompt: str, sna
         raise RuntimeError(f"百炼 HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:500]}") from exc
     content = str((((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
     if len(content) < 500: raise RuntimeError("专业报告内容过短，未通过质量检查")
+    missing_headings = [heading for heading in REQUIRED_REPORT_HEADINGS if heading not in content]
+    if missing_headings:
+        raise RuntimeError(f"专业报告格式不完整，缺少章节：{'、'.join(missing_headings)}")
     usage = data.get("usage") or {}
     return content, {"input": int(usage.get("prompt_tokens") or 0), "output": int(usage.get("completion_tokens") or 0)}
+
+
+def _report_text(value: Any, fallback: str = "输入数据未提供", limit: int = 300) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return (text or fallback)[:limit]
+
+
+def build_fallback_markdown(snapshot: Dict[str, Any], rag_rows: List[Dict[str, Any]]) -> str:
+    """Build a complete, evidence-bounded report without a second model request."""
+    source_ip = _report_text(snapshot.get("source_ip"))
+    target_asset = _report_text(snapshot.get("target_asset"))
+    risk_level = _report_text(snapshot.get("risk_level"), "未评级")
+    risk_score = snapshot.get("risk_score")
+    risk_score_text = _report_text(risk_score, "输入数据未提供")
+    current_stage = _report_text(snapshot.get("current_stage"), "未归类阶段")
+    actions = sorted(
+        list(snapshot.get("actions") or []),
+        key=lambda item: int(item.get("sequence_no") or 0),
+    )
+    action_lines = []
+    for index, action in enumerate(actions, 1):
+        sequence_no = int(action.get("sequence_no") or index)
+        action_type = _action_label(action.get("action_type"))
+        stage = _stage_label(action.get("stage"))
+        seen_at = _report_text(action.get("first_seen_at") or action.get("last_seen_at"), "时间未提供")
+        target = _report_text(action.get("target_interface") or action.get("target_port"), "目标细节未提供")
+        count = int(action.get("action_count") or 0)
+        action_lines.append(
+            f"- 动作 {sequence_no}：{action_type}，阶段为{stage}，首次/最近观测时间为 {seen_at}，"
+            f"目标为 {target}，系统记录 {count} 次。该记录证明相关网络行为被观测到，不单独证明利用成功。"
+        )
+    if not action_lines:
+        action_lines.append("- 输入快照未提供可展开的攻击动作，无法形成更细的阶段判断。")
+
+    rag_note = (
+        f"本次检索到 {len(rag_rows)} 条知识库参考资料，仅用于解释调查和加固方向，不作为事件事实。"
+        if rag_rows else
+        "本次未召回知识库参考资料，报告仅依据事件快照生成。"
+    )
+    action_types = "、".join(dict.fromkeys(_action_label(item.get("action_type")) for item in actions)) or "未提供"
+    return "\n".join([
+        "## 一、基本信息",
+        "",
+        "## 二、报告目的",
+        f"本报告面向安全运营和技术管理人员，对来源 {source_ip} 针对 {target_asset} 的连续网络行为进行证据化说明，明确当前风险、证据边界和可执行处置动作。",
+        "",
+        "## 三、分析方法",
+        "报告保持系统给出的动作顺序、阶段、风险分值和次数不变，按事件快照核对时间线，并将网络侧事实、辅助研判和知识库建议分开表述。",
+        "",
+        "## 四、攻击态势分析",
+        "### 4.1 攻击时间线总览",
+        "### 4.2 分阶段解读",
+        *action_lines,
+        "### 4.3 态势综合分析",
+        f"当前阶段为{current_stage}，已记录的动作类型包括{action_types}。这些记录能够确认存在连续攻击或探测行为，但现有快照不足以单独确认主机失陷、命令成功执行或数据泄露。",
+        "",
+        "## 五、证据交叉验证",
+        "### 5.1 多源证据总览",
+        "### 5.2 关键证据分析",
+        "系统关联结果和网络侧事件支持上述攻击行为已经被检测；若缺少主机进程、认证成功、文件落地或数据库审计证据，则相关攻击结果仍需进一步核查。",
+        "### 5.3 安全知识参照",
+        rag_note,
+        "",
+        "## 六、风险判断与行动建议",
+        "### 6.1 风险与失陷判断",
+        f"系统风险等级为{risk_level}，风险评分为 {risk_score_text}。该评分是风险评价结果，不是攻击成功概率；当前证据不足以确认攻击已经成功。",
+        "### 6.2 优先调查与处置建议",
+        f"- 立即核查 {target_asset} 在报告时间窗内与 {source_ip} 相关的访问、认证、应用和主机日志，以找到成功会话、异常进程、文件变化或数据库操作作为完成标志。",
+        f"- 在不影响业务的前提下限制来源 {source_ip} 的访问，并持续观察同目标、同接口和相邻来源的后续行为；以高风险请求停止且无新增关联动作作为阶段性验收依据。",
+        "- 对涉及的接口执行参数校验、最小权限和规则复核；以复测攻击请求被阻断、正常请求不受影响作为验收依据。",
+        "### 6.3 检测与长期优化",
+        "保留原始请求、响应摘要、规则命中和模型结果的关联标识，补充主机及应用侧遥测，并对同类攻击链定期回放验证检测覆盖。",
+        "",
+        "## 七、补充说明",
+        "### 7.1 风险评分说明",
+        "风险分值直接采用系统输入，不在报告中重新计算，也不用于推断攻击成功概率。",
+        "### 7.2 数据质量与证据缺口",
+        "输入未覆盖的日志、资产信息和攻击结果均保持未知；没有发现相关证据不等于确认相关行为没有发生。",
+        "### 7.3 证据边界",
+        _report_text(snapshot.get("evidence_boundary"), "网络侧证据证明请求或连接行为发生，不单独证明命令执行、数据泄露或主机失陷。"),
+    ])
+
+
+def resolve_professional_report_options(config_payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model": str(config_payload.get("professional_report_model") or "qwen3.7-flash"),
+        "timeout_seconds": max(30, min(120, int(config_payload.get("professional_report_timeout_seconds") or 90))),
+        "max_tokens": max(1024, min(8192, int(config_payload.get("professional_report_max_tokens") or 4096))),
+    }
+
+
+def generate_professional_markdown(
+    api: Dict[str, Any],
+    model: str,
+    prompt: str,
+    snapshot: Dict[str, Any],
+    rag_rows: List[Dict[str, Any]],
+) -> tuple[str, Dict[str, int], str, Optional[str]]:
+    try:
+        markdown, usage = call_bailian(api, model, prompt, snapshot, rag_rows)
+        return markdown, usage, model, None
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"[:500]
+        return build_fallback_markdown(snapshot, rag_rows), {"input": 0, "output": 0}, f"{model} / local-template", error
 
 
 def _fonts() -> Dict[str, str]:
@@ -676,8 +800,12 @@ class ProfessionalReportManager:
             try: rag_rows = retrieve_context(self.mysql_conf, self.rag_data_dir, self.rag_api_path, snapshot)
             except Exception: rag_rows = []
             update_job(self.mysql_conf, job_id, 35, "正在调用外部模型生成专业分析", rag_references_json=json.dumps(rag_rows, ensure_ascii=False))
-            api = load_api_config(self.rag_api_path); config_payload = json.loads(self.rag_api_path.read_text(encoding="utf-8-sig")) if self.rag_api_path.exists() else {}
-            model = str(config_payload.get("report_model") or "qwen-plus")
+            config_payload = json.loads(self.rag_api_path.read_text(encoding="utf-8-sig")) if self.rag_api_path.exists() else {}
+            api = load_api_config(self.rag_api_path)
+            report_options = resolve_professional_report_options(config_payload)
+            api["professional_report_timeout_seconds"] = report_options["timeout_seconds"]
+            api["professional_report_max_tokens"] = report_options["max_tokens"]
+            model = report_options["model"]
             prompt = self.prompt_path.read_text(encoding="utf-8-sig")
             progress_stop = threading.Event()
 
@@ -694,18 +822,25 @@ class ProfessionalReportManager:
 
             ticker = threading.Thread(target=report_progress, daemon=True, name=f"professional-progress-{job_id[-6:]}")
             ticker.start()
+            generation_error = None
+            model_name = model
             try:
-                markdown, usage = call_bailian(api, model, prompt, snapshot, rag_rows)
+                markdown, usage, model_name, generation_error = generate_professional_markdown(
+                    api, model, prompt, snapshot, rag_rows
+                )
+                if generation_error:
+                    update_job(self.mysql_conf, job_id, 76, "模型超时或格式异常，正在使用快速模板")
             finally:
                 progress_stop.set()
                 ticker.join(timeout=1)
-            update_job(self.mysql_conf, job_id, 82, "正在排版并校验 PDF", model_name=model, report_markdown=markdown, input_tokens=usage["input"], output_tokens=usage["output"])
+            update_job(self.mysql_conf, job_id, 82, "正在排版并校验 PDF", model_name=model_name, report_markdown=markdown, input_tokens=usage["input"], output_tokens=usage["output"])
             output = self.report_dir / f"{job['situation_id']}_{job['sequence_hash']}.pdf"
             digest = render_pdf(
                 output, snapshot, markdown, rag_rows,
-                report_meta={"model_name": model, "input_tokens": usage["input"], "output_tokens": usage["output"]},
+                report_meta={"model_name": model_name, "input_tokens": usage["input"], "output_tokens": usage["output"]},
             )
-            update_job(self.mysql_conf, job_id, 100, "专业态势报告已生成", status="completed", pdf_path=str(output), pdf_sha256=digest, completed_at=datetime.now())
+            final_stage = "专业态势报告已生成（快速模板降级）" if generation_error else "专业态势报告已生成"
+            update_job(self.mysql_conf, job_id, 100, final_stage, status="completed", pdf_path=str(output), pdf_sha256=digest, completed_at=datetime.now())
         except Exception as exc:
             update_job(self.mysql_conf, job_id, 100, "报告生成失败", status="failed", error_message=f"{type(exc).__name__}: {exc}"[:2000], completed_at=datetime.now())
         finally:

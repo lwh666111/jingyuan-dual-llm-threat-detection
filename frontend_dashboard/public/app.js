@@ -1453,50 +1453,36 @@ async function ensureWorldMapReady() {
 }
 
 function buildAttackMapItems(rows) {
-  const bucket = new Map();
-  (Array.isArray(rows) ? rows : []).forEach((row) => {
+  const seenSources = new Set();
+  const items = [];
+  (Array.isArray(rows) ? rows : []).some((row, index) => {
     const info = getRegionInfo(row.source_region || row.region || row.name);
-    if (!info.coord) return;
+    if (!info.coord) return false;
     const total = Math.max(0, Number(row.total || row.count || row.value || 0));
-    if (!total) return;
-    const key = info.label;
-    const old = bucket.get(key) || { label: info.label, coord: info.coord, total: 0 };
-    old.total += total;
-    bucket.set(key, old);
+    if (!total) return false;
+    const sourceIp = String(row.source_ip || "").trim();
+    const sourceKey = sourceIp || `${info.label}:${index}`;
+    if (seenSources.has(sourceKey)) return false;
+    seenSources.add(sourceKey);
+    items.push({
+      sourceIp,
+      label: info.label,
+      displayLabel: sourceIp ? `${info.label} · ${sourceIp}` : info.label,
+      coord: info.coord,
+      total,
+      latestAt: row.latest_at || "",
+      historicalSupplement: Boolean(row.historical_supplement),
+    });
+    return items.length >= 10;
   });
-  return Array.from(bucket.values())
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 10);
+  return items;
 }
 
-function getAttackMapPreviewRows() {
-  return [
-    { source_region: "United States", total: 46 },
-    { source_region: "Turkey", total: 37 },
-    { source_region: "Bulgaria", total: 28 },
-    { source_region: "United Kingdom", total: 22 },
-    { source_region: "India", total: 18 },
-    { source_region: "Anhui", total: 16 },
-    { source_region: "Hong Kong", total: 13 },
-    { source_region: "Singapore", total: 11 },
-    { source_region: "Germany", total: 9 },
-    { source_region: "Slovenia", total: 7 },
-  ];
-}
-
-async function loadAttackMapPayload() {
-  try {
-    return await api("/api/v2/user/dashboard/source-map?days=30&limit=10");
-  } catch (err) {
-    const items = state.screenData?.sourceDist?.items || [];
-    return {
-      items,
-      fallback_client: true,
-      fallback_reason: err.message,
-      period_days: 30,
-      limit: 10,
-    };
-  }
+async function loadAttackMapPayload(signal) {
+  return api(`/api/v2/user/dashboard/source-map?days=30&limit=30&_=${Date.now()}`, {
+    signal,
+    cache: "no-store",
+  });
 }
 
 async function openAttackMapModal() {
@@ -1533,7 +1519,21 @@ async function openAttackMapModal() {
   requestAnimationFrame(() => overlay.classList.add("is-open"));
 
   let chart = null;
+  let refreshTimer = null;
+  let activeRequest = null;
+  let refreshRunning = false;
+  let closed = false;
+  let lastItems = [];
+  let worldMapName = null;
   const close = () => {
+    if (closed) return;
+    closed = true;
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    activeRequest?.abort();
+    activeRequest = null;
     if (chart) {
       chart.dispose();
       chart = null;
@@ -1552,44 +1552,73 @@ async function openAttackMapModal() {
   overlay.querySelector("#attackMapClose")?.addEventListener("click", close);
   document.addEventListener("keydown", onKeyDown);
 
-  try {
-    const payload = await loadAttackMapPayload();
-    let items = buildAttackMapItems(payload.items);
-    let mode = "真实数据";
-    if (items.length < 2) {
-      items = buildAttackMapItems(getAttackMapPreviewRows());
-      mode = "动画预览数据";
-    } else if (payload.fallback_all_time) {
-      mode = "历史数据";
-    } else if (payload.fallback_client) {
-      mode = "当前大屏数据";
-    }
-
+  const renderPayload = async (payload) => {
+    const items = buildAttackMapItems(payload.items);
+    lastItems = items;
+    const historicalCount = items.filter((item) => item.historicalSupplement).length;
+    const mode = payload.fallback_all_time
+      ? "历史真实数据"
+      : historicalCount
+        ? `实时数据（含 ${historicalCount} 个历史补充来源）`
+        : "实时数据";
     const total = items.reduce((sum, item) => sum + item.total, 0);
+    const updatedAt = payload.data_updated_at ? ` · 数据时间 ${payload.data_updated_at}` : "";
     const summary = overlay.querySelector("#attackMapSummary");
     if (summary) {
-      summary.textContent = `${mode} · ${items.length} 个来源 · 共 ${total.toLocaleString("zh-CN")} 次攻击，线条频率随攻击次数增强`;
+      summary.textContent = `${mode} · ${items.length} 个真实来源 · 共 ${total.toLocaleString("zh-CN")} 次攻击${updatedAt} · 每 5 秒刷新`;
     }
     renderAttackMapList(overlay.querySelector("#attackMapList"), items);
 
     const chartEl = overlay.querySelector("#attackMapChart");
     const emptyEl = overlay.querySelector("#attackMapEmpty");
     if (!items.length || !chartEl) {
+      if (chart) {
+        chart.dispose();
+        chart = null;
+      }
+      if (chartEl) chartEl.innerHTML = "";
       emptyEl?.classList.remove("hidden");
       return;
     }
+    emptyEl?.classList.add("hidden");
 
-    const worldMapName = await ensureWorldMapReady();
+    if (worldMapName === null) worldMapName = await ensureWorldMapReady();
+    if (closed) return;
     if (worldMapName) {
-      chart = renderAttackMapEcharts(chartEl, items, worldMapName);
+      chart = renderAttackMapEcharts(chartEl, items, worldMapName, chart);
     } else {
+      if (chart) {
+        chart.dispose();
+        chart = null;
+      }
       renderAttackMapSvg(chartEl, items);
     }
-  } catch (err) {
-    const summary = overlay.querySelector("#attackMapSummary");
-    if (summary) summary.textContent = `加载失败：${err.message}`;
-    overlay.querySelector("#attackMapEmpty")?.classList.remove("hidden");
-  }
+  };
+
+  const refresh = async () => {
+    if (closed || refreshRunning) return;
+    refreshRunning = true;
+    activeRequest = new AbortController();
+    try {
+      const payload = await loadAttackMapPayload(activeRequest.signal);
+      if (!closed) await renderPayload(payload);
+    } catch (err) {
+      if (closed || err?.name === "AbortError") return;
+      const summary = overlay.querySelector("#attackMapSummary");
+      if (summary) {
+        summary.textContent = lastItems.length
+          ? `更新失败，正在保留上一次的 ${lastItems.length} 个真实来源：${err.message}`
+          : `加载失败：${err.message}`;
+      }
+      if (!lastItems.length) overlay.querySelector("#attackMapEmpty")?.classList.remove("hidden");
+    } finally {
+      activeRequest = null;
+      refreshRunning = false;
+    }
+  };
+
+  await refresh();
+  if (!closed) refreshTimer = setInterval(refresh, 5000);
 }
 
 function renderAttackMapList(container, items) {
@@ -1601,7 +1630,7 @@ function renderAttackMapList(container, items) {
       return `
         <div class="attack-map-rank" style="--bar-width:${width}%">
           <b>${String(idx + 1).padStart(2, "0")}</b>
-          <span>${escapeHtml(item.label)}</span>
+          <span title="${escapeHtml(item.displayLabel)}">${escapeHtml(item.displayLabel)}</span>
           <strong>${Number(item.total || 0).toLocaleString("zh-CN")}</strong>
         </div>
       `;
@@ -1609,12 +1638,13 @@ function renderAttackMapList(container, items) {
     .join("");
 }
 
-function renderAttackMapEcharts(container, items, mapName) {
-  const chart = echarts.init(container);
+function renderAttackMapEcharts(container, items, mapName, existingChart = null) {
+  if (!existingChart) container.innerHTML = "";
+  const chart = existingChart || echarts.init(container);
   const colors = ["#ff5d7a", "#ffb84d", "#35d9ff", "#55f0b2", "#8d7cff", "#f56bdc"];
   const max = Math.max(1, ...items.map((x) => x.total));
   const lineSeries = items.map((item, idx) => ({
-    name: item.label,
+    name: item.displayLabel,
     type: "lines",
     coordinateSystem: "geo",
     zlevel: 3,
@@ -1630,11 +1660,11 @@ function renderAttackMapEcharts(container, items, mapName) {
       color: colors[idx % colors.length],
       width: 1.2 + (item.total / max) * 2.6,
       opacity: 0.78,
-      curveness: 0.28,
+      curveness: (idx % 2 === 0 ? 1 : -1) * (0.2 + Math.floor(idx / 2) * 0.035),
       shadowColor: colors[idx % colors.length],
       shadowBlur: 8,
     },
-    data: [{ fromName: item.label, toName: "北京", coords: [item.coord, BEIJING_COORD], value: item.total }],
+    data: [{ fromName: item.displayLabel, toName: "北京", coords: [item.coord, BEIJING_COORD], value: item.total }],
   }));
 
   chart.setOption(
@@ -1680,7 +1710,7 @@ function renderAttackMapEcharts(container, items, mapName) {
           rippleEffect: { brushType: "stroke", scale: 4 },
           symbolSize: (val) => 8 + (Number(val[2] || 0) / max) * 16,
           itemStyle: { color: "#ffbf4d", shadowBlur: 14, shadowColor: "#ffbf4d" },
-          data: items.map((item) => ({ name: item.label, value: [...item.coord, item.total] })),
+          data: items.map((item) => ({ name: item.displayLabel, value: [...item.coord, item.total] })),
         },
         {
           name: "北京防护节点",
@@ -1726,7 +1756,7 @@ function renderAttackMapSvg(container, items) {
       return `
         <path class="attack-svg-line line-${idx % 6}" d="${d}" />
         <circle class="attack-svg-source" cx="${from.x.toFixed(1)}" cy="${from.y.toFixed(1)}" r="${(5 + (item.total / max) * 8).toFixed(1)}" />
-        <text class="attack-svg-label" x="${(from.x + 10).toFixed(1)}" y="${(from.y - 8).toFixed(1)}">${escapeHtml(item.label)}</text>
+        <text class="attack-svg-label" x="${(from.x + 10).toFixed(1)}" y="${(from.y - 8).toFixed(1)}">${escapeHtml(item.displayLabel)}</text>
         <circle class="attack-svg-missile" r="${(3.5 + (item.total / max) * 2).toFixed(1)}">
           <animateMotion dur="${dur}s" repeatCount="indefinite" path="${d}" />
         </circle>
@@ -2271,7 +2301,7 @@ function renderProfessionalReportModal() {
       <span class="section-eyebrow">PROFESSIONAL SITUATION REPORT</span>
       <div class="professional-report-mark ${done ? "done" : failed ? "failed" : ""}"><i></i><i></i><i></i></div>
       <h3 id="professionalReportTitle">${done ? "专业态势报告已生成" : failed ? "专业态势报告生成失败" : "正在生成专业态势报告"}</h3>
-      <p>${done ? "报告已完成事实核验、知识增强与 PDF 排版，可以立即下载。" : failed ? escapeHtml(job.error_message || "生成服务暂时不可用，请稍后重试。") : "通常需要 1 至 3 分钟，退出此界面也可以"}</p>
+      <p>${done ? "报告已完成事实核验、知识增强与 PDF 排版，可以立即下载。" : failed ? escapeHtml(job.error_message || "生成服务暂时不可用，请稍后重试。") : "通常需要 30 至 90 秒，最迟约 2 分钟，退出此界面也可以"}</p>
       <div class="professional-report-progress"><span style="width:${progress}%"></span></div>
       <div class="professional-report-stage"><span>${escapeHtml(job.stage || "任务已创建")}</span><strong>${progress}%</strong></div>
       <footer>
@@ -5815,6 +5845,8 @@ async function api(path, options = {}) {
     headers.Authorization = `Bearer ${state.token}`;
   }
   const fetchOptions = { method, headers };
+  if (options.signal) fetchOptions.signal = options.signal;
+  if (options.cache) fetchOptions.cache = options.cache;
   fetchOptions.credentials = "same-origin";
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";

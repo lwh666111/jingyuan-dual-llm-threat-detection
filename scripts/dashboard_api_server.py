@@ -753,6 +753,49 @@ def aggregate_counts_by_label(rows: List[Dict[str, Any]], label_key: str, total_
     return items
 
 
+def build_source_map_items(conn: Any, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep real attack sources distinct while resolving a display region for each IP."""
+    source_bucket: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        source_ip = normalize_ip_literal(str(row.get("source_ip") or ""))
+        if not source_ip:
+            continue
+        total = max(0, int(row.get("total") or 0))
+        if not total:
+            continue
+        region = resolve_region_for_event(
+            conn,
+            source_ip,
+            str(row.get("source_region") or ""),
+        )
+        region = simplify_source_region_for_dashboard(region)
+        latest_at = row.get("latest_at")
+        existing = source_bucket.get(source_ip)
+        if not existing:
+            source_bucket[source_ip] = {
+                "source_ip": source_ip,
+                "source_region": region,
+                "total": total,
+                "latest_at": latest_at,
+            }
+            continue
+        existing["total"] = int(existing.get("total") or 0) + total
+        if str(latest_at or "") > str(existing.get("latest_at") or ""):
+            existing["latest_at"] = latest_at
+            existing["source_region"] = region
+
+    items = list(source_bucket.values())
+    items.sort(
+        key=lambda item: (
+            str(item.get("latest_at") or ""),
+            int(item.get("total") or 0),
+            str(item.get("source_ip") or ""),
+        ),
+        reverse=True,
+    )
+    return items
+
+
 def attack_type_aliases(label: str) -> List[str]:
     canonical = normalize_attack_type_label(label)
     aliases = {
@@ -3539,48 +3582,52 @@ def create_app(
         except ValueError:
             days = 30
         try:
-            limit = max(1, min(20, int(request.args.get("limit", 10))))
+            limit = max(1, min(50, int(request.args.get("limit", 10))))
         except ValueError:
             limit = 10
+        candidate_limit = max(100, limit * 4)
 
         def collect_rows(time_filter_sql: str) -> List[Dict[str, Any]]:
             with closing(get_conn(app.config["MYSQL_CONF"], autocommit=True)) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""
-                        SELECT source_ip, source_region, COUNT(*) AS total
+                        SELECT source_ip, source_region, COUNT(*) AS total, MAX(occurred_at) AS latest_at
                         FROM demo_attack_events
                         WHERE {time_filter_sql} AND {visible_sql}
                         GROUP BY source_ip, source_region
+                        ORDER BY latest_at DESC
+                        LIMIT {candidate_limit}
                         """
                     )
                     rows = cur.fetchall()
-                region_bucket: Dict[str, int] = {}
-                for row in rows:
-                    count = int(row.get("total") or 0)
-                    region = resolve_region_for_event(
-                        conn,
-                        str(row.get("source_ip") or ""),
-                        str(row.get("source_region") or ""),
-                    )
-                    region = simplify_source_region_for_dashboard(region)
-                    region_bucket[region] = region_bucket.get(region, 0) + count
-            items = [{"source_region": k, "total": v} for k, v in region_bucket.items()]
-            items.sort(key=lambda x: int(x.get("total") or 0), reverse=True)
-            return items
+                return build_source_map_items(conn, rows)
 
-        items = collect_rows(f"occurred_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)")
-        fallback_all_time = False
-        if not items:
-            # Local demos may not have traffic in the current month; use historical data so the animation still works.
-            items = collect_rows("1=1")
-            fallback_all_time = bool(items)
+        recent_items = collect_rows(f"occurred_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)")
+        items = [{**item, "historical_supplement": False} for item in recent_items[:limit]]
+        historical_supplement_count = 0
+        if len(items) < limit:
+            seen_ips = {str(item.get("source_ip") or "") for item in items}
+            for item in collect_rows("1=1"):
+                source_ip = str(item.get("source_ip") or "")
+                if not source_ip or source_ip in seen_ips:
+                    continue
+                items.append({**item, "historical_supplement": True})
+                seen_ips.add(source_ip)
+                historical_supplement_count += 1
+                if len(items) >= limit:
+                    break
+        fallback_all_time = not recent_items and bool(items)
+        data_updated_at = max((str(item.get("latest_at") or "") for item in items), default="") or None
         return jsonify(
             {
-                "items": normalize_rows(items[:limit]),
+                "items": normalize_rows(items),
                 "period_days": days,
                 "limit": limit,
                 "fallback_all_time": fallback_all_time,
+                "historical_supplement_count": historical_supplement_count,
+                "recent_item_count": min(len(recent_items), limit),
+                "data_updated_at": data_updated_at,
                 "server_region": "北京",
                 "server_coord": [116.4074, 39.9042],
             }

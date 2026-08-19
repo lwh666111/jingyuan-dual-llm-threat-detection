@@ -6,6 +6,9 @@
   "rerank_model": "qwen3-rerank",
   "report_model": "qwen-plus",
   "situation_report_model": "qwen-plus",
+  "professional_report_model": "qwen3.7-flash",
+  "professional_report_timeout_seconds": 90,
+  "professional_report_max_tokens": 4096,
   "embedding_dimensions": 1024,
   "timeout_seconds": 90
 }

@@ -14,12 +14,16 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from situation_professional_report import (  # noqa: E402
+    REQUIRED_REPORT_HEADINGS,
     _list_item_text,
     _sanitize_pdf_text,
+    build_fallback_markdown,
     build_snapshot,
     call_bailian,
     find_latest_completed_job,
+    generate_professional_markdown,
     render_pdf,
+    resolve_professional_report_options,
 )
 
 
@@ -31,8 +35,9 @@ class FakeResponse:
         return False
 
     def read(self):
+        sections = "\n".join(f"{heading}\n本节依据事件快照生成。" for heading in REQUIRED_REPORT_HEADINGS)
         return json.dumps(
-            {"choices": [{"message": {"content": "# 专业报告\n" + "已完成证据分析。" * 100}}]},
+            {"choices": [{"message": {"content": sections + "\n" + "已完成证据分析。" * 100}}]},
             ensure_ascii=False,
         ).encode("utf-8")
 
@@ -56,15 +61,86 @@ class ProfessionalSituationReportTests(unittest.TestCase):
         self.assertEqual(row["job_id"], "SPR-OLD")
 
     @patch("urllib.request.urlopen", return_value=FakeResponse())
-    def test_professional_api_timeout_is_bounded(self, mocked_urlopen):
+    def test_professional_api_uses_fast_bounded_settings(self, mocked_urlopen):
         call_bailian(
             {"api_key": "test", "base_url": "https://example.invalid/v1", "timeout_seconds": 999},
-            "qwen-plus",
+            "qwen3.7-flash",
             "system",
             {"situation_id": "SIT-1"},
             [],
         )
-        self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 240)
+        self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 90)
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "qwen3.7-flash")
+        self.assertFalse(payload["enable_thinking"])
+        self.assertEqual(payload["max_tokens"], 4096)
+        self.assertEqual(payload["temperature"], 0.1)
+
+    def test_professional_model_setting_is_isolated_from_other_reports(self):
+        options = resolve_professional_report_options(
+            {
+                "report_model": "qwen-plus",
+                "situation_report_model": "qwen-turbo",
+                "professional_report_model": "qwen3.7-flash",
+                "professional_report_timeout_seconds": 999,
+            }
+        )
+        self.assertEqual(options["model"], "qwen3.7-flash")
+        self.assertEqual(options["timeout_seconds"], 120)
+        self.assertEqual(resolve_professional_report_options({"report_model": "qwen-plus"})["model"], "qwen3.7-flash")
+
+    def test_local_fallback_has_all_required_sections_and_evidence_boundary(self):
+        markdown = build_fallback_markdown(
+            build_snapshot(
+                {
+                    "situation_id": "SIT-FALLBACK",
+                    "source_ip": "203.0.113.7",
+                    "target_asset": "api.example.test",
+                    "risk_level": "high",
+                    "risk_score": 0.88,
+                    "current_stage": "EXPLOITATION",
+                    "actions": [
+                        {
+                            "sequence_no": 1,
+                            "action_type": "SQL_INJECTION",
+                            "stage": "EXPLOITATION",
+                            "action_count": 3,
+                            "target_interface": "/login",
+                        }
+                    ],
+                }
+            ),
+            [],
+        )
+        for heading in REQUIRED_REPORT_HEADINGS:
+            self.assertIn(heading, markdown)
+        self.assertIn("不足以确认攻击已经成功", markdown)
+
+    @patch("situation_professional_report.call_bailian", side_effect=TimeoutError("simulated timeout"))
+    def test_model_timeout_returns_complete_local_report_instead_of_failure(self, _call):
+        snapshot = build_snapshot(
+            {
+                "situation_id": "SIT-TIMEOUT",
+                "source_ip": "203.0.113.9",
+                "target_asset": "api.example.test",
+                "risk_level": "high",
+                "risk_score": 0.9,
+                "actions": [],
+            }
+        )
+        markdown, usage, model_name, error = generate_professional_markdown(
+            {"api_key": "test", "base_url": "https://example.invalid/v1"},
+            "qwen3.7-flash",
+            "prompt",
+            snapshot,
+            [],
+        )
+        self.assertTrue(error.startswith("TimeoutError"))
+        self.assertEqual(usage, {"input": 0, "output": 0})
+        self.assertEqual(model_name, "qwen3.7-flash / local-template")
+        for heading in REQUIRED_REPORT_HEADINGS:
+            self.assertIn(heading, markdown)
 
     def test_pdf_text_normalizes_emoji_and_circled_sequence_numbers(self):
         normalized = _sanitize_pdf_text("🎯 ① 目标：核查接口 2️⃣ 完成复核")

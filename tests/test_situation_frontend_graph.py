@@ -64,6 +64,36 @@ console.log(JSON.stringify({
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn('timeZone: "Asia/Shanghai"', source)
 
+    def test_attack_map_keeps_ten_distinct_ips_from_the_same_region(self):
+        script = f"""
+const fs = require("fs");
+const source = fs.readFileSync({json.dumps(str(APP_JS))}, "utf8");
+const match = source.match(/function buildAttackMapItems[\\s\\S]*?(?=\\nasync function loadAttackMapPayload)/);
+if (!match) throw new Error("buildAttackMapItems was not found");
+function getRegionInfo(value) {{ return {{ label: String(value), coord: [-98.5, 39.8] }}; }}
+eval(match[0]);
+const rows = Array.from({{ length: 12 }}, (_, index) => ({{
+  source_ip: `203.0.113.${{index + 1}}`,
+  source_region: "美国",
+  total: 12 - index,
+}}));
+const items = buildAttackMapItems(rows);
+console.log(JSON.stringify({{ count: items.length, ips: items.map((item) => item.sourceIp) }}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True, encoding="utf-8"
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["count"], 10)
+        self.assertEqual(len(set(result["ips"])), 10)
+
+    def test_attack_map_refreshes_and_has_no_preview_data(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("setInterval(refresh, 5000)", source)
+        self.assertIn("activeRequest?.abort()", source)
+        self.assertIn('cache: "no-store"', source)
+        self.assertNotIn("getAttackMapPreviewRows", source)
+
     def test_ai_report_queue_has_live_position_and_priority_action(self):
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn("前方还有 ${ahead} 个任务", source)
