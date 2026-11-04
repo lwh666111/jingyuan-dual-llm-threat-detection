@@ -30,6 +30,28 @@ const WORLD_MAP_SCRIPT_URLS = [
 const REGION_COORDS = {
   beijing: { label: "北京", coord: [116.4074, 39.9042] },
   "\u5317\u4eac": { label: "北京", coord: [116.4074, 39.9042] },
+  harbin: { label: "哈尔滨", coord: [126.6424, 45.756] },
+  "\u54c8\u5c14\u6ee8": { label: "哈尔滨", coord: [126.6424, 45.756] },
+  "heilongjiang sheng": { label: "黑龙江", coord: [126.6424, 45.756] },
+  heilongjiang: { label: "黑龙江", coord: [126.6424, 45.756] },
+  "\u9ed1\u9f99\u6c5f": { label: "黑龙江", coord: [126.6424, 45.756] },
+  warsaw: { label: "华沙", coord: [21.0122, 52.2297] },
+  "\u534e\u6c99": { label: "华沙", coord: [21.0122, 52.2297] },
+  amsterdam: { label: "阿姆斯特丹", coord: [4.9041, 52.3676] },
+  "\u963f\u59c6\u65af\u7279\u4e39": { label: "阿姆斯特丹", coord: [4.9041, 52.3676] },
+  jinan: { label: "济南", coord: [117.1201, 36.6512] },
+  "\u6d4e\u5357": { label: "济南", coord: [117.1201, 36.6512] },
+  dalian: { label: "大连", coord: [121.6147, 38.914] },
+  "\u5927\u8fde": { label: "大连", coord: [121.6147, 38.914] },
+  kunming: { label: "昆明", coord: [102.8329, 24.8801] },
+  "\u6606\u660e": { label: "昆明", coord: [102.8329, 24.8801] },
+  roubaix: { label: "鲁贝", coord: [3.1746, 50.6927] },
+  "\u9c81\u8d1d": { label: "鲁贝", coord: [3.1746, 50.6927] },
+  nanjing: { label: "南京", coord: [118.7969, 32.0603] },
+  "\u5357\u4eac": { label: "南京", coord: [118.7969, 32.0603] },
+  "frankfurt am main": { label: "法兰克福", coord: [8.6821, 50.1109] },
+  frankfurt: { label: "法兰克福", coord: [8.6821, 50.1109] },
+  "\u6cd5\u5170\u514b\u798f": { label: "法兰克福", coord: [8.6821, 50.1109] },
   shanghai: { label: "上海", coord: [121.4737, 31.2304] },
   "\u4e0a\u6d77": { label: "上海", coord: [121.4737, 31.2304] },
   guangdong: { label: "广东", coord: [113.2665, 23.1322] },
@@ -1453,29 +1475,39 @@ async function ensureWorldMapReady() {
 }
 
 function buildAttackMapItems(rows) {
-  const seenSources = new Set();
-  const items = [];
-  (Array.isArray(rows) ? rows : []).some((row, index) => {
-    const info = getRegionInfo(row.source_region || row.region || row.name);
+  const cityBuckets = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const city = String(row.source_city || row.source_region || row.region || row.name || "").trim();
+    const cityKey = normalizeRegionLookupKey(city);
+    if (!cityKey || city === "未知" || city === "内网") return;
+    let info = getRegionInfo(city);
+    let displayCity = info.coord ? info.label : city;
+    if (!info.coord) info = getRegionInfo(row.source_location || city);
     if (!info.coord) return false;
     const total = Math.max(0, Number(row.total || row.count || row.value || 0));
-    if (!total) return false;
-    const sourceIp = String(row.source_ip || "").trim();
-    const sourceKey = sourceIp || `${info.label}:${index}`;
-    if (seenSources.has(sourceKey)) return false;
-    seenSources.add(sourceKey);
-    items.push({
-      sourceIp,
-      label: info.label,
-      displayLabel: sourceIp ? `${info.label} · ${sourceIp}` : info.label,
+    if (!total) return;
+    const existing = cityBuckets.get(cityKey);
+    if (existing) {
+      existing.total += total;
+      if (String(row.latest_at || "") > String(existing.latestAt || "")) {
+        existing.latestAt = row.latest_at || "";
+        existing.coord = info.coord;
+      }
+      existing.historicalSupplement ||= Boolean(row.historical_supplement);
+      return;
+    }
+    cityBuckets.set(cityKey, {
+      label: displayCity,
+      displayLabel: displayCity,
       coord: info.coord,
       total,
       latestAt: row.latest_at || "",
       historicalSupplement: Boolean(row.historical_supplement),
     });
-    return items.length >= 10;
   });
-  return items;
+  return [...cityBuckets.values()]
+    .sort((a, b) => b.total - a.total || String(b.latestAt).localeCompare(String(a.latestAt)))
+    .slice(0, 10);
 }
 
 async function loadAttackMapPayload(signal) {
@@ -1494,7 +1526,7 @@ async function openAttackMapModal() {
       <div class="attack-map-topbar">
         <div>
           <div class="panel-sub">动态攻击态势</div>
-          <h2>近 30 天 TOP10 攻击来源飞线图</h2>
+          <h2>近 30 天 TOP10 攻击来源城市飞线图</h2>
           <p id="attackMapSummary">正在加载攻击来源数据...</p>
         </div>
         <button id="attackMapClose" class="btn btn-ghost" type="button">关闭</button>
@@ -1565,7 +1597,7 @@ async function openAttackMapModal() {
     const updatedAt = payload.data_updated_at ? ` · 数据时间 ${payload.data_updated_at}` : "";
     const summary = overlay.querySelector("#attackMapSummary");
     if (summary) {
-      summary.textContent = `${mode} · ${items.length} 个真实来源 · 共 ${total.toLocaleString("zh-CN")} 次攻击${updatedAt} · 每 5 秒刷新`;
+      summary.textContent = `${mode} · ${items.length} 个来源城市 · 共 ${total.toLocaleString("zh-CN")} 次攻击${updatedAt} · 每 5 秒刷新`;
     }
     renderAttackMapList(overlay.querySelector("#attackMapList"), items);
 
@@ -1607,7 +1639,7 @@ async function openAttackMapModal() {
       const summary = overlay.querySelector("#attackMapSummary");
       if (summary) {
         summary.textContent = lastItems.length
-          ? `更新失败，正在保留上一次的 ${lastItems.length} 个真实来源：${err.message}`
+          ? `更新失败，正在保留上一次的 ${lastItems.length} 个来源城市：${err.message}`
           : `加载失败：${err.message}`;
       }
       if (!lastItems.length) overlay.querySelector("#attackMapEmpty")?.classList.remove("hidden");

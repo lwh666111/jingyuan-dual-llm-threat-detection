@@ -739,6 +739,18 @@ def simplify_source_region_for_dashboard(value: Any) -> str:
     return first
 
 
+def source_city_for_dashboard(value: Any) -> str:
+    """Return the most specific available locality for the TOP10 source map."""
+    region = normalize_source_region_label(value)
+    if region in {"未知", "内网"}:
+        return region
+    parts = [normalize_source_region_label(x.strip()) for x in re.split(r"[/|,，]+", region) if x.strip()]
+    if not parts:
+        return "未知"
+    city = parts[-1]
+    return city.replace(" City", "").replace(" city", "").strip() or "未知"
+
+
 def aggregate_counts_by_label(rows: List[Dict[str, Any]], label_key: str, total_key: str = "total") -> List[Dict[str, Any]]:
     bucket: Dict[str, int] = {}
     for row in rows:
@@ -754,8 +766,8 @@ def aggregate_counts_by_label(rows: List[Dict[str, Any]], label_key: str, total_
 
 
 def build_source_map_items(conn: Any, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep real attack sources distinct while resolving a display region for each IP."""
-    source_bucket: Dict[str, Dict[str, Any]] = {}
+    """Aggregate attack sources by city for the TOP10 source map."""
+    city_bucket: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         source_ip = normalize_ip_literal(str(row.get("source_ip") or ""))
         if not source_ip:
@@ -763,33 +775,43 @@ def build_source_map_items(conn: Any, rows: List[Dict[str, Any]]) -> List[Dict[s
         total = max(0, int(row.get("total") or 0))
         if not total:
             continue
-        region = resolve_region_for_event(
+        source_location = resolve_region_for_event(
             conn,
             source_ip,
             str(row.get("source_region") or ""),
         )
-        region = simplify_source_region_for_dashboard(region)
+        source_location = normalize_source_region_label(source_location)
+        city = source_city_for_dashboard(source_location)
+        if city in {"未知", "内网"}:
+            continue
         latest_at = row.get("latest_at")
-        existing = source_bucket.get(source_ip)
+        existing = city_bucket.get(city.casefold())
         if not existing:
-            source_bucket[source_ip] = {
-                "source_ip": source_ip,
-                "source_region": region,
+            city_bucket[city.casefold()] = {
+                "source_region": city,
+                "source_city": city,
+                "source_location": source_location,
+                "source_ip_count": 1,
+                "_source_ips": {source_ip},
                 "total": total,
                 "latest_at": latest_at,
             }
             continue
         existing["total"] = int(existing.get("total") or 0) + total
+        existing["_source_ips"].add(source_ip)
+        existing["source_ip_count"] = len(existing["_source_ips"])
         if str(latest_at or "") > str(existing.get("latest_at") or ""):
             existing["latest_at"] = latest_at
-            existing["source_region"] = region
+            existing["source_location"] = source_location
 
-    items = list(source_bucket.values())
+    items = list(city_bucket.values())
+    for item in items:
+        item.pop("_source_ips", None)
     items.sort(
         key=lambda item: (
-            str(item.get("latest_at") or ""),
             int(item.get("total") or 0),
-            str(item.get("source_ip") or ""),
+            str(item.get("latest_at") or ""),
+            str(item.get("source_city") or ""),
         ),
         reverse=True,
     )
@@ -3607,13 +3629,14 @@ def create_app(
         items = [{**item, "historical_supplement": False} for item in recent_items[:limit]]
         historical_supplement_count = 0
         if len(items) < limit:
-            seen_ips = {str(item.get("source_ip") or "") for item in items}
+            seen_cities = {str(item.get("source_city") or item.get("source_region") or "").casefold() for item in items}
             for item in collect_rows("1=1"):
-                source_ip = str(item.get("source_ip") or "")
-                if not source_ip or source_ip in seen_ips:
+                city = str(item.get("source_city") or item.get("source_region") or "").strip()
+                city_key = city.casefold()
+                if not city or city_key in seen_cities:
                     continue
                 items.append({**item, "historical_supplement": True})
-                seen_ips.add(source_ip)
+                seen_cities.add(city_key)
                 historical_supplement_count += 1
                 if len(items) >= limit:
                     break

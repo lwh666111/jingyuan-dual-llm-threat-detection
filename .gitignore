@@ -27,6 +27,7 @@ result_threshold_test/
 
 temp_capture/
 tmp/
+.deploy_tmp/
 
 # Logs
 *.log

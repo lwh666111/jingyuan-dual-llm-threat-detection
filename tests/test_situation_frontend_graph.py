@@ -64,28 +64,32 @@ console.log(JSON.stringify({
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn('timeZone: "Asia/Shanghai"', source)
 
-    def test_attack_map_keeps_ten_distinct_ips_from_the_same_region(self):
+    def test_attack_map_aggregates_by_city_and_keeps_top_ten(self):
         script = f"""
 const fs = require("fs");
 const source = fs.readFileSync({json.dumps(str(APP_JS))}, "utf8");
 const match = source.match(/function buildAttackMapItems[\\s\\S]*?(?=\\nasync function loadAttackMapPayload)/);
 if (!match) throw new Error("buildAttackMapItems was not found");
+function normalizeRegionLookupKey(value) {{ return String(value || "").trim().toLowerCase(); }}
 function getRegionInfo(value) {{ return {{ label: String(value), coord: [-98.5, 39.8] }}; }}
 eval(match[0]);
 const rows = Array.from({{ length: 12 }}, (_, index) => ({{
   source_ip: `203.0.113.${{index + 1}}`,
-  source_region: "美国",
+  source_city: `城市${{index + 1}}`,
+  source_location: `国家/地区/城市${{index + 1}}`,
   total: 12 - index,
-}}));
+}})).concat([{{ source_ip: "203.0.113.99", source_city: "城市1", source_location: "国家/地区/城市1", total: 5 }}]);
 const items = buildAttackMapItems(rows);
-console.log(JSON.stringify({{ count: items.length, ips: items.map((item) => item.sourceIp) }}));
+console.log(JSON.stringify({{ count: items.length, labels: items.map((item) => item.displayLabel), firstTotal: items[0].total }}));
 """
         completed = subprocess.run(
             ["node", "-e", script], check=True, capture_output=True, text=True, encoding="utf-8"
         )
         result = json.loads(completed.stdout)
         self.assertEqual(result["count"], 10)
-        self.assertEqual(len(set(result["ips"])), 10)
+        self.assertEqual(len(set(result["labels"])), 10)
+        self.assertEqual(result["labels"][0], "城市1")
+        self.assertEqual(result["firstTotal"], 17)
 
     def test_attack_map_refreshes_and_has_no_preview_data(self):
         source = APP_JS.read_text(encoding="utf-8")
@@ -93,6 +97,12 @@ console.log(JSON.stringify({{ count: items.length, ips: items.map((item) => item
         self.assertIn("activeRequest?.abort()", source)
         self.assertIn('cache: "no-store"', source)
         self.assertNotIn("getAttackMapPreviewRows", source)
+
+    def test_attack_map_has_harbin_city_coordinate_and_prefers_city_lookup(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('harbin: { label: "哈尔滨", coord: [126.6424, 45.756] }', source)
+        self.assertIn("let info = getRegionInfo(city);", source)
+        self.assertIn("if (!info.coord) info = getRegionInfo(row.source_location || city);", source)
 
     def test_ai_report_queue_has_live_position_and_priority_action(self):
         source = APP_JS.read_text(encoding="utf-8")
